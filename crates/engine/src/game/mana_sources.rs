@@ -2187,6 +2187,18 @@ fn activatable_mana_profiles_for_object(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 return None;
             }
+            // CR 601.2g: This profile fallback is only for mana abilities
+            // that require a manual choice during cost payment. Tap-cost
+            // abilities are simulated together by the authoritative auto-tap
+            // payment probe, which accounts for mana spent to activate a
+            // filter land before assigning its produced mana. Including them
+            // here would model that activation independently and let the
+            // filter land spend the same mana another profile already claims.
+            if has_tap_component(&ability.cost)
+                || has_unambiguous_self_sacrifice_component(&ability.cost)
+            {
+                return None;
+            }
             if !mana_abilities::can_activate_mana_ability_now(
                 state, controller, object_id, idx, ability,
             ) {

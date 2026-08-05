@@ -211,6 +211,94 @@ fn create_tap_mana_source(state: &mut GameState, name: &str, produced: ManaProdu
 }
 
 #[test]
+fn castability_does_not_double_count_mana_used_to_activate_a_filter_land() {
+    let mut state = setup_game_at_main_phase();
+    let spell =
+        create_generic_creature_in_hand(&mut state, 9_013, PlayerId(0), "Three-Colored Spell", 0);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Red,
+        ],
+        generic: 0,
+    };
+
+    create_tap_mana_source(
+        &mut state,
+        "Swamp",
+        ManaProduction::Fixed {
+            colors: vec![ManaColor::Black],
+            contribution: ManaContribution::Base,
+        },
+    );
+
+    let filter_land = create_object(
+        &mut state,
+        CardId(9_014),
+        PlayerId(0),
+        "Black-Red Filter Land".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&filter_land).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::ChoiceAmongCombinations {
+                        options: vec![
+                            vec![ManaColor::Black, ManaColor::Black],
+                            vec![ManaColor::Black, ManaColor::Red],
+                            vec![ManaColor::Red, ManaColor::Red],
+                        ],
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::Black],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+    }
+
+    let cost = state.objects[&spell].mana_cost.clone();
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+        "the filter land must spend the Swamp's mana before producing its pair"
+    );
+    assert!(
+        !has_manual_mana_ability_for_spell_payment(&state, PlayerId(0), spell),
+        "the filter land's tap-cost activation belongs to exact auto-payment, not the manual fallback"
+    );
+    assert!(
+        !can_feasibly_pay_mana_cost(&state, PlayerId(0), Some(spell), &cost),
+        "castability must use the exact tap-source payment authority rather than double-counting the Swamp"
+    );
+    assert!(
+        !crate::ai_support::legal_actions(&state)
+            .iter()
+            .any(|action| matches!(
+                action,
+                GameAction::CastSpell { object_id, .. } if *object_id == spell
+            )),
+        "an unpayable spell must not be offered as a cast action"
+    );
+}
+
+#[test]
 fn tapped_relic_can_use_a_new_legend_to_pay_a_second_creature_spell() {
     let mut state = setup_game_at_main_phase();
     let spell =
