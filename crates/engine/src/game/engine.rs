@@ -16106,9 +16106,10 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // #5904's wildcard-free population traversal sits above all three
-                // existing producers but adds no prompt. Each producer remains in
-                // its named function and is byte-identical; only its coordinate moved.
+                // Re-pinned against the merged source; this remains coordinate
+                // evidence only, not a sixth prompt producer. The existing
+                // producers are at these current `WaitingFor::OptionalEffectChoice`
+                // construction sites.
                 "game/effects/mod.rs:6447".to_string(),
                 "game/effects/mod.rs:6524".to_string(),
                 "game/effects/mod.rs:9719".to_string(),
