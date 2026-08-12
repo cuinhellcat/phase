@@ -66,6 +66,70 @@ fn extract_hand_cast_battlefield_threshold_leaves_effect_text() {
     }));
 }
 
+/// Issue #7154 — Faerie Miscreant's singleton named-card intervening-if must
+/// lower through the full Oracle pipeline to a live `ControlsType` condition.
+/// The source itself is excluded by `another`; the exact name remains a card
+/// name filter rather than being swallowed into the draw effect.
+#[test]
+fn faerie_miscreant_single_named_intervening_if_parses_to_draw_trigger() {
+    const ORACLE: &str =
+        "Flying\nWhen this creature enters, if you control another creature named Faerie Miscreant, draw a card.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Faerie Miscreant",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Faerie".to_string()],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "parsed triggers: {:?}",
+        parsed.triggers
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+
+    let TriggerCondition::ControlsType {
+        filter: TargetFilter::Typed(filter),
+    } = trigger
+        .condition
+        .as_ref()
+        .expect("intervening-if condition")
+    else {
+        panic!(
+            "expected ControlsType named presence, got {:?}",
+            trigger.condition
+        );
+    };
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(filter.controller, Some(ControllerRef::You));
+    assert!(filter
+        .properties
+        .iter()
+        .any(|property| matches!(property, FilterProp::Another)));
+    assert!(filter.properties.iter().any(|property| matches!(
+        property,
+        FilterProp::Named { name } if name == "faerie miscreant"
+    )));
+
+    let execute = trigger.execute.as_ref().expect("draw body");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "Faerie Miscreant body must not fall back to Unimplemented: {:?}",
+        execute.effect
+    );
+}
+
 /// The zoned cast-and-condition parser shares its condition branch across all
 /// supported origin zones. These focused extractor cases prove the graveyard
 /// owner scope and shared-exile owner scope without inventing a runtime card.
