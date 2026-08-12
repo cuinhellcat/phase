@@ -13893,6 +13893,89 @@ fn discard_self_cost_beats_graveyard_effect_origin() {
     );
 }
 
+/// CR 113.6j + CR 113.6m: a self-sacrifice cost puts the source into its
+/// graveyard, so it keeps battlefield activation authority over a later
+/// graveyard self-return effect.
+#[test]
+fn sacrifice_self_cost_beats_graveyard_effect_origin() {
+    let r = parse(
+        "{B}, Sacrifice this creature: Return this card from your graveyard to your hand.",
+        "Test Sacrificial Return",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert_eq!(r.abilities.len(), 1);
+    let ability = &r.abilities[0];
+    let cost = ability.cost.as_ref().expect("the ability has a cost");
+    assert!(
+        matches!(
+            cost,
+            AbilityCost::Composite { costs }
+                if costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::Sacrifice(sacrifice)
+                        if sacrifice.target == TargetFilter::SelfRef
+                ))
+        ),
+        "reach-guard: expected a self-sacrifice cost, got {cost:?}"
+    );
+    assert_eq!(
+        activation_zone_from_self_cost(cost),
+        Some(Zone::Battlefield),
+        "a self-sacrifice is payable only while the source is on the battlefield"
+    );
+    assert_eq!(
+        activation_zone_from_self_effect(ability),
+        Some(Zone::Graveyard),
+        "the later self-return alone would derive Graveyard"
+    );
+    assert_eq!(
+        ability.activation_zone,
+        Some(Zone::Battlefield),
+        "cost-side source-zone authority must beat the later effect-side origin"
+    );
+}
+
+/// The canonical own-resolution visitor must cover every direct ability branch
+/// that can carry a self-zone move.
+#[test]
+fn self_changezone_derivation_visits_sub_else_and_mode_branches() {
+    let root = parse(
+        "{1}: Draw a card.",
+        "Test Branch Root",
+        &[],
+        &["Artifact"],
+        &[],
+    )
+    .abilities
+    .remove(0);
+    let self_return = parse(
+        "{1}: Return this card from your graveyard to your hand.",
+        "Test Branch Return",
+        &[],
+        &["Artifact"],
+        &[],
+    )
+    .abilities
+    .remove(0);
+
+    let mut sub = root.clone();
+    sub.sub_ability = Some(Box::new(self_return.clone()));
+    let mut otherwise = root.clone();
+    otherwise.else_ability = Some(Box::new(self_return.clone()));
+    let mut modal = root;
+    modal.mode_abilities.push(self_return);
+
+    for (branch, ability) in [("sub", sub), ("else", otherwise), ("mode", modal)] {
+        assert_eq!(
+            activation_zone_from_self_effect(&ability),
+            Some(Zone::Graveyard),
+            "the {branch} branch's self-return must contribute its origin"
+        );
+    }
+}
+
 /// V7 — cost-shape NEAR-MISSES must not short-circuit to the wrong zone.
 /// Phantasmagorian's cost discards *other* cards (`self_scope` is not
 /// `SourceCard`), and Salvage Titan's cost exiles *other* artifact cards from

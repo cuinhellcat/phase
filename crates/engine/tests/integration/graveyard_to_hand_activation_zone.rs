@@ -41,6 +41,12 @@ use engine::types::zones::Zone;
 /// Sanitarium Skeleton's entire printed Oracle text.
 const SANITARIUM_SKELETON_TEXT: &str = "{2}{B}: Return this card from your graveyard to your hand.";
 
+/// A self-sacrifice puts the source into the graveyard while paying the cost;
+/// it must therefore remain a battlefield activation even when its later effect
+/// returns that source from the graveyard.
+const SELF_SACRIFICE_RETURN_TEXT: &str =
+    "{B}, Sacrifice this creature: Return this card from your graveyard to your hand.";
+
 /// Bestial Bloodline's printed Oracle text (the reported card).
 const BESTIAL_BLOODLINE_TEXT: &str = "Enchant creature\nEnchanted creature gets +2/+2.\n{4}{G}: Return this card from your graveyard to your hand.";
 
@@ -309,6 +315,35 @@ fn bestial_bloodline_activatable_from_graveyard_returns_to_hand() {
     );
     let outcome = runner.activate(aura, 0).resolve();
     outcome.assert_zone(&[aura], Zone::Hand);
+}
+
+/// Cost-side authority is exercised through the full activation pipeline: the
+/// source starts on the battlefield, pays its self-sacrifice cost, and then the
+/// effect returns it from the graveyard to hand.
+#[test]
+fn self_sacrifice_return_remains_battlefield_activated() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, floating(&[ManaType::Black]));
+    let source = scenario
+        .add_creature(P0, "Test Sacrificial Return", 1, 1)
+        .from_oracle_text(SELF_SACRIFICE_RETURN_TEXT)
+        .id();
+    let mut runner = scenario.build();
+
+    let ability = &runner.state().objects[&source].abilities[0];
+    assert_eq!(
+        ability.activation_zone,
+        Some(Zone::Battlefield),
+        "the self-sacrifice cost is payable only from the battlefield"
+    );
+    assert!(
+        offers_activation(runner.state(), source),
+        "the battlefield source must offer its activation"
+    );
+
+    let outcome = runner.activate(source, 0).resolve();
+    outcome.assert_zone(&[source], Zone::Hand);
 }
 
 /// V13 — over-restriction canary. A battlefield ability with

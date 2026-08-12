@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::ControlFlow};
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
@@ -19,6 +19,7 @@ use crate::types::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
     TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
+use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -6754,6 +6755,9 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
             zone: Some(zone),
             ..
         } => Some(*zone),
+        AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
+            Some(Zone::Battlefield)
+        }
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }
@@ -6796,15 +6800,10 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 /// owner's hand.`) by the `Effect::ChangeZone` variant match, because it lowers
 /// to `Effect::Bounce`.
 ///
-/// The `sub_ability` recursion below is **kind-agnostic** — it recurses whatever
-/// the sub-ability's `AbilityKind` is. Lochmere Serpent depends on exactly that:
-/// its `Graveyard → Hand` self-move sits on a sub-ability whose kind is `Spell`,
-/// not `Activated`. Narrowing the recursion to activated sub-abilities would be
-/// a behavior change, not a tidy-up.
-///
-/// The traversal walks the chain **in written order** (top-level effect first,
-/// then `sub_ability`), which is CR 113.6m's "a previous part of its … effect"
-/// order. Three parts of CR 113.6m are deliberately **not** implemented because
+/// The canonical own-resolution traversal is **kind-agnostic** and walks direct
+/// sub-, otherwise-, and modal branches. Lochmere Serpent depends on exactly
+/// that: its `Graveyard → Hand` self-move sits on a sub-ability whose kind is
+/// `Spell`, not `Activated`. Three parts of CR 113.6m are deliberately **not** implemented because
 /// each governs a measurably empty class at this corpus vintage; each has its
 /// extension point named here:
 /// - the `unless` clause's effect half ("a previous part of its … effect
@@ -6821,19 +6820,22 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 ///   extension point: an `Effect::CreateDelayedTrigger` arm here that recurses
 ///   into the carried `AbilityDefinition`.
 fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
-    if let Effect::ChangeZone {
-        origin: Some(origin),
-        target: TargetFilter::SelfRef,
-        ..
-    } = *def.effect
-    {
-        if origin != Zone::Battlefield {
-            return Some(origin);
+    let mut activation_zone = None;
+    let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if let Effect::ChangeZone {
+            origin: Some(origin),
+            target: TargetFilter::SelfRef,
+            ..
+        } = effect
+        {
+            if *origin != Zone::Battlefield {
+                activation_zone = Some(*origin);
+                return ControlFlow::Break(());
+            }
         }
-    }
-    def.sub_ability
-        .as_deref()
-        .and_then(activation_zone_from_self_effect)
+        ControlFlow::Continue(())
+    });
+    activation_zone
 }
 
 /// CR 608.2k: Source zone of a non-self `AbilityCost::Exile` component
