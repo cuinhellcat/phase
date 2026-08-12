@@ -5308,6 +5308,28 @@ pub struct PendingTokenBattlefieldEntry {
     pub source_id: ObjectId,
 }
 
+/// CR 707.2 + CR 614.1c: everything the non-liminal copy-token entry tail still
+/// has to do for ONE token after its body is materialized — the copy exceptions,
+/// its entry counters, its entry events, and the rest of the batch.
+///
+/// Split out of the batch loop so the tail has exactly one implementation
+/// (`token_copy::finish_non_liminal_copy_token_entry`), reachable both inline and
+/// from the [`PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost`]
+/// resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyTokenEntryTail {
+    pub owner: PlayerId,
+    pub copy: Box<CopyTokenSpec>,
+    pub enter_tapped: EtbTapState,
+    pub enter_with_counters: Vec<(CounterType, u32)>,
+    /// CR 306.5b + CR 614.1c: the entry counters the copy path seeds itself
+    /// (copied loyalty, "enters with N counters" self-replacements, and the
+    /// creating effect's own additions), already merged in application order.
+    pub etb_counters: Vec<(CounterType, u32)>,
+    /// How many tokens of this batch are still unstarted after this one.
+    pub remaining_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -5371,6 +5393,19 @@ pub enum PendingCounterPostAction {
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
+    },
+    /// CR 303.4f: finish a NON-liminal copy-token entry whose CR 303.4f Aura-host
+    /// choice paused it between the body's materialization and the rest of its
+    /// entry.
+    ///
+    /// Deliberately NOT `ApplyCopyTokenModificationsAndFinalize`: that action's
+    /// handler resumes a copy whose ETB counters have ALREADY been applied and
+    /// therefore skips `etb_counters` entirely, while this pause happens BEFORE
+    /// them — reusing it would silently drop a copied planeswalker's CR 306.5b
+    /// loyalty and every CR 614.1c "enters with counters" self-replacement.
+    ContinueCopyTokenEntryAfterAuraHost {
+        object_id: ObjectId,
+        tail: Box<CopyTokenEntryTail>,
     },
     FinalizeCommittedLiminalTokenEntry {
         object_id: ObjectId,

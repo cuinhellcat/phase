@@ -16035,9 +16035,38 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                "game/effects/mod.rs:6300".to_string(),
-                "game/effects/mod.rs:6377".to_string(),
-                "game/effects/mod.rs:9570".to_string(),
+                //
+                // Issue #5904 (CR 303.4f Aura token copies): `:6300/:6377/:9570 ⇒
+                // `:6331/:6408/:9601`, a UNIFORM +31. LOCAL, not upstream, so the
+                // CI-vs-local diagnosis in the header does not apply. Accounted
+                // hunk by hunk from `git diff -U0` on `effects/mod.rs`: the seven
+                // hunks in the `2873..2969` predicate block sum to exactly +31
+                // (−20 collapsing the hand-rolled
+                // `quantity_{expr,ref}_depends_on_zone_change_this_way` recursion
+                // into the shared `quantity_ref_population_filter` +
+                // `quantity_expr_counts_population_matching` pair, then +8/−2/+13
+                // for those two new helpers and the
+                // `filter_contains_last_created` wrapper, then +32 for
+                // `condition_depends_on_last_created` and its doc), and they sit
+                // above ALL THREE producers. The unit's only other hunks in this
+                // file are at `:10816`/`:10831` (+13, the `last_created`
+                // deferral arm and its comment), i.e. BELOW all three; whole-file
+                // delta is +44, so nothing else moved them. Predicted
+                // `6300+31`/`6377+31`/`9570+31` equal the observed coordinates
+                // exactly. Identity re-established, not assumed: each producer at
+                // its new coordinate is sha256-identical to
+                // `HEAD:effects/mod.rs` at its old one (`a8512b40…`, `82c6c569…`,
+                // `eb2d5e19…`) and each is still inside the enclosing function
+                // this row NAMES — `drive_sequential_repeated_optional_payment`,
+                // `resolve_repeated_optional_payment_choice`,
+                // `resolve_chain_body`. Set preservation: the two asserts above
+                // ran GREEN on the run that caught this (total still 37,
+                // partition still 5/7/25), and the other two entries did not move
+                // at all. Nothing this unit adds mints an `OptionalEffect` prompt
+                // — the one prompt it does add is `ReturnAsAuraTarget`.
+                "game/effects/mod.rs:6331".to_string(),
+                "game/effects/mod.rs:6408".to_string(),
+                "game/effects/mod.rs:9601".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

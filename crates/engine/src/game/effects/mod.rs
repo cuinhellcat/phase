@@ -2870,31 +2870,19 @@ fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
     crate::game::filter::filter_contains_last_zone_changed(filter)
 }
 
-fn quantity_expr_depends_on_zone_change_this_way(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref { qty } => quantity_ref_depends_on_zone_change_this_way(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Offset { inner, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(inner)
-        }
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .any(quantity_expr_depends_on_zone_change_this_way),
-        QuantityExpr::UpTo { max } => quantity_expr_depends_on_zone_change_this_way(max),
-        QuantityExpr::Power { exponent, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(exponent)
-        }
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_depends_on_zone_change_this_way(left)
-                || quantity_expr_depends_on_zone_change_this_way(right)
-        }
-        QuantityExpr::Fixed { .. } => false,
-    }
+fn filter_contains_last_created(filter: &TargetFilter) -> bool {
+    crate::game::filter::filter_contains_last_created(filter)
 }
 
-fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
+/// The object-population `TargetFilter` a `QuantityRef` counts over, if it
+/// counts over one at all.
+///
+/// Single enumeration of the "this ref reads a population" variant set, shared
+/// by every predicate that asks whether a magnitude depends on a particular
+/// resolution-local anaphor ledger (`LastZoneChanged`, `LastCreated`, …).
+/// Without it each such predicate re-listed the same eleven variants and a new
+/// population-counting `QuantityRef` had to be threaded once per predicate.
+fn quantity_ref_population_filter(qty: &QuantityRef) -> Option<&TargetFilter> {
     match qty {
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
@@ -2905,18 +2893,29 @@ fn quantity_ref_depends_on_zone_change_this_way(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
-            filter_contains_last_zone_changed(filter)
-        }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
         QuantityRef::DistinctCardTypes {
             source: crate::types::ability::CardTypeSetSource::Objects { filter },
         }
         | QuantityRef::DistinctSubtypes {
             source: crate::types::ability::CardTypeSetSource::Objects { filter },
             ..
-        } => filter_contains_last_zone_changed(filter),
-        _ => false,
+        } => Some(filter),
+        _ => None,
     }
+}
+
+/// Whether any magnitude in `expr` counts a population selected by a filter
+/// satisfying `filter_pred`. Traversal delegates to `QuantityExpr::any_ref`
+/// (the single composition-form authority) and the variant set to
+/// [`quantity_ref_population_filter`].
+fn quantity_expr_counts_population_matching(
+    expr: &QuantityExpr,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    quantity_expr_any_ref(expr, &mut |qty| {
+        quantity_ref_population_filter(qty).is_some_and(filter_pred)
+    })
 }
 
 fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bool {
@@ -2924,13 +2923,45 @@ fn condition_depends_on_zone_change_this_way(condition: &AbilityCondition) -> bo
         AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::DiscardedCardMatchesFilter { .. } => true,
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            quantity_expr_depends_on_zone_change_this_way(lhs)
-                || quantity_expr_depends_on_zone_change_this_way(rhs)
+            quantity_expr_counts_population_matching(lhs, &filter_contains_last_zone_changed)
+                || quantity_expr_counts_population_matching(rhs, &filter_contains_last_zone_changed)
         }
         AbilityCondition::Not { condition } => condition_depends_on_zone_change_this_way(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => conditions
             .iter()
             .any(condition_depends_on_zone_change_this_way),
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 111.1: Whether a condition reads the resolution-local
+/// `last_created_token_ids` ledger — the "the token created this way" / "it"
+/// anaphor a token-creating instruction publishes when it COMPLETES
+/// (`record_last_created_token`, the tail of the liminal entry finalization).
+///
+/// Structural twin of [`condition_depends_on_zone_change_this_way`], and used at
+/// the same gate for the same reason: while the parent instruction is suspended
+/// on a player choice mid-entry (a CR 616.1 replacement ordering prompt, or the
+/// CR 303.4f Aura-host prompt raised when a token copy of an Aura enters), the
+/// ledger does not yet name the token being created. Evaluating "If the token is
+/// an Aura, …" against it there reads a stale population and silently drops the
+/// gated sub-ability (Yenna, Redtooth Regent). Deferring the sub WITH its
+/// condition re-evaluates it at chain top once the entry completes, which is
+/// also the CR 608.2c order: the gated sentence is the NEXT instruction and
+/// cannot begin before this one finishes.
+///
+/// Predicate helper, not rule-implementing code — the CR annotation lives at the
+/// gate.
+fn condition_depends_on_last_created(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_counts_population_matching(lhs, &filter_contains_last_created)
+                || quantity_expr_counts_population_matching(rhs, &filter_contains_last_created)
+        }
+        AbilityCondition::Not { condition } => condition_depends_on_last_created(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_depends_on_last_created)
+        }
         _ => false,
     }
 }
@@ -10782,9 +10813,22 @@ fn resolve_chain_body(
             // resolution choice would mis-defer e.g. a `Sacrifice`→`EffectZoneChoice`
             // →`TargetMatchesFilter`-gated sibling, whose completion leaves
             // `cont.chain.targets` empty (it uses the tracked-set/ParentTarget path).
+            // CR 608.2c + CR 111.1 + CR 303.4f: The `last_created_token_ids`
+            // twin of the `last_zone_changed_ids` deferral above. A token entry
+            // publishes "the token created this way" only when the entry
+            // FINISHES; while it is suspended mid-entry — on a CR 616.1
+            // replacement-ordering prompt, or on the CR 303.4f host prompt a
+            // token copy of an Aura raises — the ledger still names the previous
+            // instruction's tokens (or nothing at all). Evaluating a gate like
+            // Yenna, Redtooth Regent's "If the token is an Aura, untap Yenna,
+            // then scry 2" there reads that stale population, so the whole
+            // trailing sentence was silently dropped. Defer it WITH its
+            // condition; the drain re-evaluates it at chain top after the entry
+            // completes, which is the order CR 608.2c requires anyway.
             if waits_for_resolution_choice(&state.waiting_for)
                 && (condition_depends_on_effect_performed(condition)
                     || condition_depends_on_zone_change_this_way(condition)
+                    || condition_depends_on_last_created(condition)
                     || matches!(condition, AbilityCondition::WhenYouDo)
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                         && condition_depends_on_result_object(condition))

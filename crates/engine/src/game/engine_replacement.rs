@@ -1504,8 +1504,17 @@ fn handle_persist_chosen_attribute_choice(
             .is_some_and(|aura| aura.attached_to.is_none())
     {
         match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
+            // entrant already ENTERED the battlefield as a non-Aura and only became
+            // an Aura when its `BecomeCopy` replacement realized post-entry. There is
+            // no un-entering it — CR 303.4g's "isn't created" / "remains in its
+            // current zone" clause governs an object still in the act of entering —
+            // so the CR 704.5m unattached-Aura state-based action owns it from here,
+            // exactly as it did before the `Resolved` split. Same disposition as
+            // `Attached`: nothing further to do at this seam.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+            | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
             crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
                 return Err(EngineError::InvalidAction(
                     "PersistChosenAttribute requires a resolved Aura host before the copy installs"
@@ -2101,8 +2110,15 @@ fn finish_copy_target_choice_entry(
     // multi-host Aura with a token continuation); if one ever does, thread the
     // continuation through the resume like the ETB-counter pause does.
     match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
+        // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
+        // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
+        // un-entered, and CR 303.4g's "isn't created" clause governs only an object
+        // still in the act of entering — so the CR 704.5m unattached-Aura state-based
+        // action owns it. Same disposition as `Attached`: nothing to do here.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-        | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
         crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,

@@ -1918,14 +1918,23 @@ fn legal_aura_attachment_targets(
 
 /// Disposition of an object that has just become an Aura while already on the
 /// battlefield (the copy path — see [`resolve_entering_aura_attachment`]).
+///
+/// `Attached` and `NoLegalHost` are deliberately distinct even though neither
+/// raises a prompt: CR 303.4g gives the no-host case its OWN rule ("the Aura
+/// remains in its current zone … If the Aura is a token, it isn't created"),
+/// which a caller that can still decline to create the entrant must be able to
+/// act on. Collapsing them loses exactly that information.
 pub(crate) enum EnteringAuraAttachment {
     /// The object is not an Aura needing attachment (not an Aura, an Aura that's
     /// also a creature per CR 303.4d, or already attached).
     NotApplicable,
-    /// Attachment resolved without a player choice — either auto-attached to the
-    /// sole legal host, or deliberately left unattached because there is no legal
-    /// host (CR 303.4g; the CR 704.5m unattached-Aura SBA will handle it).
-    Resolved,
+    /// CR 303.4f: attachment resolved without a player choice — the sole legal
+    /// host was auto-attached.
+    Attached,
+    /// CR 303.4g: there is no legal object or player for the Aura to enchant.
+    /// The Aura was left unattached; what that means is the caller's decision
+    /// (see the callers' own CR 303.4g/CR 704.5m rationale).
+    NoLegalHost,
     /// CR 303.4f: multiple legal hosts, so the controller must choose one.
     NeedsChoice {
         controller: PlayerId,
@@ -1947,18 +1956,47 @@ pub(crate) enum EnteringAuraAttachment {
 ///
 /// CR 303.4f: because the Aura is entering by a means other than resolving as an
 /// Aura spell and the effect doesn't specify a host, its controller chooses what
-/// it enchants. CR 303.4g: with no legal host the Aura would not enter at all;
-/// the engine's post-entry equivalent is to leave it unattached so the
-/// unattached-Aura SBA (CR 704.5m) moves it to the graveyard on the next check.
+/// it enchants. CR 303.4g: with no legal host the Aura can't enter — this
+/// function reports that as [`EnteringAuraAttachment::NoLegalHost`] and leaves
+/// the object untouched, because only the CALLER knows whether the entrant can
+/// still be withheld (a token that isn't created) or has already entered and is
+/// therefore the CR 704.5m unattached-Aura SBA's problem.
+///
+/// Composed from [`entering_aura_hosts`] (decide) and
+/// [`apply_entering_aura_hosts`] (act), which a caller that must interpose an
+/// irreversible step between the two — the liminal token path, whose CR 733
+/// birth journal append is append-only and must not be written for a token CR
+/// 303.4g says isn't created — invokes separately.
 pub(crate) fn resolve_entering_aura_attachment(
     state: &mut GameState,
     object_id: ObjectId,
 ) -> EnteringAuraAttachment {
+    let hosts = entering_aura_hosts(state, object_id);
+    apply_entering_aura_hosts(state, object_id, hosts)
+}
+
+/// The legal hosts an entering Aura may be attached to, decided but NOT applied.
+///
+/// `Hosts::legal_targets` may be empty — that IS the CR 303.4g case, and it is
+/// reported rather than acted on so a caller can answer CR 303.4g's "if the Aura
+/// is a token, it isn't created" BEFORE taking any step it cannot take back.
+pub(crate) enum EnteringAuraHosts {
+    /// Same disposition as [`EnteringAuraAttachment::NotApplicable`].
+    NotApplicable,
+    Hosts {
+        controller: PlayerId,
+        legal_targets: Vec<TargetRef>,
+    },
+}
+
+/// Decide half of [`resolve_entering_aura_attachment`] — pure with respect to
+/// the game state.
+pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> EnteringAuraHosts {
     let Some(enchant_filter) = aura_enchant_filter(state, object_id) else {
-        return EnteringAuraAttachment::NotApplicable;
+        return EnteringAuraHosts::NotApplicable;
     };
     let Some(obj) = state.objects.get(&object_id) else {
-        return EnteringAuraAttachment::NotApplicable;
+        return EnteringAuraHosts::NotApplicable;
     };
     // CR 303.4 + CR 704.5m: entry-time attachment only applies to an Aura that is
     // actually on the battlefield. Defensive guard — if an intermediate entry
@@ -1967,31 +2005,236 @@ pub(crate) fn resolve_entering_aura_attachment(
     // attaching it or prompting for a host of a non-battlefield Aura would be
     // invalid state; do nothing and let it resolve wherever it now lives.
     if obj.zone != Zone::Battlefield {
-        return EnteringAuraAttachment::NotApplicable;
+        return EnteringAuraHosts::NotApplicable;
     }
     // Only resolve entry attachment for an as-yet-unattached Aura; a copy that
     // was already attached by some other effect must not be re-homed here.
     if obj.attached_to.is_some() {
-        return EnteringAuraAttachment::NotApplicable;
+        return EnteringAuraHosts::NotApplicable;
     }
     let controller = obj.controller;
-    let legal_targets =
-        legal_aura_attachment_targets(state, object_id, controller, &enchant_filter);
+    EnteringAuraHosts::Hosts {
+        legal_targets: legal_aura_attachment_targets(state, object_id, controller, &enchant_filter),
+        controller,
+    }
+}
+
+/// Act half of [`resolve_entering_aura_attachment`]: attach the sole legal host
+/// (CR 303.4f), or report the disposition the caller must handle.
+pub(crate) fn apply_entering_aura_hosts(
+    state: &mut GameState,
+    object_id: ObjectId,
+    hosts: EnteringAuraHosts,
+) -> EnteringAuraAttachment {
+    let EnteringAuraHosts::Hosts {
+        controller,
+        legal_targets,
+    } = hosts
+    else {
+        return EnteringAuraAttachment::NotApplicable;
+    };
     match legal_targets.as_slice() {
-        // CR 303.4g: no legal host — leave unattached for the CR 704.5m SBA.
-        [] => EnteringAuraAttachment::Resolved,
+        // CR 303.4g: no legal object or player to enchant — report it and let the
+        // caller decide the entrant's fate.
+        [] => EnteringAuraAttachment::NoLegalHost,
         [TargetRef::Object(id)] => {
             crate::game::effects::attach::attach_to(state, object_id, *id);
-            EnteringAuraAttachment::Resolved
+            EnteringAuraAttachment::Attached
         }
         [TargetRef::Player(id)] => {
             crate::game::effects::attach::attach_to_player(state, object_id, *id);
-            EnteringAuraAttachment::Resolved
+            EnteringAuraAttachment::Attached
         }
         _ => EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,
         },
+    }
+}
+
+#[cfg(test)]
+mod entering_aura_attachment_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypeFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn creature(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_100),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        id
+    }
+
+    /// An unattached Aura token on the battlefield with `enchant creature`,
+    /// controlled by `controller`.
+    fn aura(state: &mut GameState, controller: PlayerId, enchant: TargetFilter) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_200),
+            controller,
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.is_token = true;
+        obj.keywords.push(Keyword::Enchant(enchant));
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
+    fn enchant_creature() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))
+    }
+
+    /// CR 303.4d: an Aura that's also a creature can't enchant anything, so
+    /// entry-time attachment does not apply to it at all. This is the arm that
+    /// must NOT be folded into CR 303.4g — the entrant is still created.
+    #[test]
+    fn an_aura_creature_is_not_applicable() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+        state
+            .objects
+            .get_mut(&id)
+            .expect("aura")
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::NotApplicable
+        ));
+    }
+
+    /// CR 303.4g: zero legal hosts is its OWN verdict, distinct from `Attached`.
+    /// Reported, not acted on — the object is left exactly as it was so the
+    /// caller can still decline to create it.
+    #[test]
+    fn no_legal_host_is_reported_and_nothing_is_attached() {
+        let mut state = GameState::new_two_player(1);
+        let id = aura(&mut state, P0, enchant_creature());
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::NoLegalHost
+        ));
+        assert!(
+            state.objects[&id].attached_to.is_none(),
+            "CR 303.4g: the no-host verdict must not attach anything"
+        );
+        assert!(
+            state.objects.contains_key(&id),
+            "the decision seam does not itself un-create the entrant — that is the caller's call"
+        );
+    }
+
+    /// CR 303.4f: one legal host is not a choice — attach it, and say so with a
+    /// verdict distinct from "there was nothing to attach to".
+    #[test]
+    fn a_sole_legal_host_is_attached() {
+        let mut state = GameState::new_two_player(1);
+        let host = creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        assert!(matches!(
+            resolve_entering_aura_attachment(&mut state, id),
+            EnteringAuraAttachment::Attached
+        ));
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
+        );
+    }
+
+    /// CR 303.4f: more than one legal host IS a choice.
+    #[test]
+    fn multiple_legal_hosts_need_a_choice() {
+        let mut state = GameState::new_two_player(1);
+        let host_a = creature(&mut state, P0, "Host A");
+        let host_b = creature(&mut state, P0, "Host B");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let EnteringAuraAttachment::NeedsChoice {
+            controller,
+            legal_targets,
+        } = resolve_entering_aura_attachment(&mut state, id)
+        else {
+            panic!("two legal hosts must produce a choice");
+        };
+        assert_eq!(controller, P0);
+        assert_eq!(
+            legal_targets,
+            vec![TargetRef::Object(host_a), TargetRef::Object(host_b)]
+        );
+        assert!(
+            state.objects[&id].attached_to.is_none(),
+            "an unanswered choice attaches nothing"
+        );
+    }
+
+    /// CR 303.4f: "that player" is the player the Aura is entering under the
+    /// control of. It is read off the OBJECT, never off the active player — which
+    /// is what makes an opponent-controlled copy token prompt its own controller.
+    #[test]
+    fn entering_aura_hosts_reports_the_objects_own_controller() {
+        let mut state = GameState::new_two_player(1);
+        state.active_player = P0;
+        creature(&mut state, P1, "Their A");
+        creature(&mut state, P1, "Their B");
+        // The Aura is P1's; a controller-scoped enchant ability therefore binds
+        // to P1's creatures even though P0 is the active player.
+        let id = aura(
+            &mut state,
+            P1,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        );
+
+        let EnteringAuraHosts::Hosts {
+            controller,
+            legal_targets,
+        } = entering_aura_hosts(&state, id)
+        else {
+            panic!("an unattached Aura on the battlefield has a host verdict");
+        };
+        assert_eq!(
+            controller, P1,
+            "CR 303.4f: the chooser is the Aura's controller, not the active player"
+        );
+        assert_eq!(legal_targets.len(), 2);
+    }
+
+    /// The decide half is pure: asking twice does not attach anything.
+    #[test]
+    fn entering_aura_hosts_does_not_mutate() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let before = state.objects[&id].clone();
+        let _ = entering_aura_hosts(&state, id);
+        let _ = entering_aura_hosts(&state, id);
+        assert_eq!(state.objects[&id].attached_to, before.attached_to);
+        assert_eq!(state.objects[&id].timestamp, before.timestamp);
     }
 }
 

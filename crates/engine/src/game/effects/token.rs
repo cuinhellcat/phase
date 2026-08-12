@@ -1521,6 +1521,41 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     )
 }
 
+/// CR 303.4g: what "there is no legal object or player for it to enchant" means
+/// for THIS entrant.
+///
+/// The rule splits on exactly one property — "If the Aura is a token, it isn't
+/// created" — so this is selected from the object's own CR 111.1 `is_token`
+/// flag and nothing else. A typed pair rather than a `bool` so both dispositions
+/// carry their rule at the use site.
+enum UnhostedAuraEntry {
+    /// The entrant is a token: it isn't created at all.
+    NotCreated,
+    /// The entrant is card-backed: it is already on the battlefield and cannot
+    /// be un-entered, so it stays there unattached and CR 704.5m sweeps it.
+    EnterUnattached,
+}
+
+/// CR 303.4g: undo a token battlefield entry that CR 303.4g says never happened.
+///
+/// The inverse of the `state.objects.insert` + `zones::add_to_zone` pair
+/// immediately above the CR 303.4f/g consult, and nothing more. In particular it
+/// does NOT roll back `state.next_object_id`: the id was drawn by
+/// `reserve_liminal_token_object` and is recorded as a high-water mark on every
+/// sibling token's CR 733 birth command (`resulting_next_object_id`), so
+/// rewinding the allocator would make a later replay reuse a burnt id.
+pub(crate) fn uncreate_unentered_aura_token(
+    state: &mut GameState,
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    // allow-raw-zone: this is the un-entry of a token that CR 303.4g says was
+    // never created, not a CR 400.7 zone change — there is no destination zone
+    // and no `ZoneChanged` to emit.
+    zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
+    state.objects.remove(&object_id);
+}
+
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1549,13 +1584,23 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
     let owner = entry.object.owner;
 
-    // CR 733: journal the settled copy-token birth at the single liminal insert
+    // CR 733: the settled copy-token birth journals at the single liminal insert
     // seam. `copy_resume` is `Some` for every production liminal entry of kind
     // Token (`token_copy.rs` is the only production constructor), so this covers
     // the whole liminal copy path. Counters, the attacking entry, and later
     // status changes journal through their OWN families — this command is the
     // birth only, exactly as the ordinary CR 111.1 birth is.
-    if let Some(copy) = entry.copy_resume.clone() {
+    //
+    // The command is BUILT here, before `state.objects.insert` consumes
+    // `entry.object`, but RECORDED below, after the CR 303.4f/g consult has
+    // settled whether this token is created at all. `ResolvedRulesJournal` is
+    // append-only — `record_token_creation` has no retraction anywhere in the
+    // tree, verified against `append_command`, which only pushes — so a birth
+    // recorded for a token CR 303.4g says "isn't created" could never be taken
+    // back. Recording after the consult but BEFORE the attach is also what keeps
+    // the journal replayable: `apply_resolved_attachment` rejects an attachment
+    // whose object does not exist yet, so the birth must own the lower ordinal.
+    let birth_command = entry.copy_resume.clone().map(|copy| {
         // CR 707.9b/9c: the liminal seam folds its immediate exceptions into the
         // copiable values BEFORE entry, so the body is complete here and replay
         // can reapply them from this record.
@@ -1570,7 +1615,7 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
                 all_creature_types: state.all_creature_types.clone(),
             }
         };
-        let command = ResolvedTokenCreationCommand {
+        ResolvedTokenCreationCommand {
             object: ObjectIncarnationRef::from_object(&entry.object),
             owner,
             entry_timestamp: entry.object.timestamp,
@@ -1589,16 +1634,129 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             // one past this id when it drew it, however many were drawn since.
             resulting_next_object_id: entry_ref.0 + 1,
             cause: state.current_or_begin_rules_execution_node(),
-        };
+        }
+    });
+
+    // CR 303.4g: what "no legal host" means for THIS entrant. Selected from the
+    // object's own `is_token` (CR 111.1), which is exactly the discriminator the
+    // rule names — so `LiminalEntryKind::Meld`, a card-backed entrant, routes to
+    // `EnterUnattached` without a special case.
+    let unhosted_entry = if entry.object.is_token {
+        UnhostedAuraEntry::NotCreated
+    } else {
+        UnhostedAuraEntry::EnterUnattached
+    };
+
+    state.objects.insert(entry_ref, entry.object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
+    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+
+    // CR 303.4f: an Aura entering the battlefield by any means other than
+    // resolving as an Aura spell, where the effect doesn't specify a host, has
+    // its controller choose what it enchants as it enters. A token that is a
+    // copy of an Aura (Yenna, Redtooth Regent; Court of Vantress copying a
+    // Curse) carries no effect-specified `attach_to` — `entry.attach_to.is_some()`
+    // means the effect DID name a host (Role tokens), so CR 303.4f doesn't apply.
+    // Mirrors the `attach_to.is_none()` gate on the ZoneChange entry path.
+    //
+    // Decided before the birth is journaled and applied after, so the CR 303.4g
+    // arm can withhold the birth entirely (see `birth_command` above).
+    let hosts = if entry.attach_to.is_none() {
+        crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
+    } else {
+        crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable
+    };
+
+    // CR 303.4g: "If an Aura is entering the battlefield and there is no legal
+    // object or player for it to enchant … If the Aura is a token, it isn't
+    // created." Un-enter it before anything observes it: no CR 733 birth record,
+    // no `TokenCreated`, no battlefield `ZoneChanged`, no `last_created_token_ids`
+    // row, and — the observable difference from letting the CR 704.5m
+    // unattached-Aura SBA sweep it — nothing in the owner's graveyard.
+    if matches!(
+        &hosts,
+        crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
+            if legal_targets.is_empty()
+    ) && matches!(unhosted_entry, UnhostedAuraEntry::NotCreated)
+    {
+        uncreate_unentered_aura_token(state, entry_ref, owner);
+        // CR 111.1 + CR 603.7: the anaphora slot still has to be republished, or
+        // the batch continuation (which reads it back to seed the next token's
+        // `created_ids`) would carry whatever an EARLIER, unrelated effect left
+        // there. `entry.created_ids` is this batch's list up to but excluding the
+        // token that was not created — exactly what `finalize_committed_liminal_
+        // token_entry_from_action` would have assigned before appending, minus
+        // the append.
+        state.last_created_token_ids = entry.created_ids.clone();
+        // Not a pause: the batch loop must go on to the next token in the count.
+        return true;
+    }
+
+    if let Some(command) = birth_command {
         state
             .resolved_rules_journal
             .record_token_creation(command)
             .expect("resolved copy-token creation must have a live journal cause");
     }
 
-    state.objects.insert(entry_ref, entry.object);
-    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
-    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+    match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+        // `NoLegalHost` reaches here only for a non-token entrant (the token
+        // arm returned above): a card-backed Aura is already on the
+        // battlefield and cannot be un-entered, so CR 704.5m owns it.
+        crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+        | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+        | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
+        crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+            controller: chooser,
+            legal_targets,
+        } => {
+            // CR 616.1 carrier: park the entry tail exactly like the
+            // enter-with-counters pause below, so the finalize step and any
+            // remaining batch continuation run after the host is chosen.
+            state.last_created_token_ids = entry.created_ids.clone();
+            let remaining_counters = counters_to_apply
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(counter_type, count)| PendingCounterAddition::Object {
+                    actor: owner,
+                    object_id: entry_ref,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                })
+                .collect();
+            let mut post_actions = vec![finalization];
+            post_actions.extend(post_actions_after_finalize);
+            super::counters::stash_pending_counter_additions(
+                state,
+                remaining_counters,
+                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                    if entry.copy_resume.is_some() {
+                        EffectKind::CopyTokenOf
+                    } else {
+                        EffectKind::Token
+                    },
+                    entry.source_id,
+                    post_actions,
+                ),
+            );
+            state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                player: chooser,
+                source_id: entry.source_id,
+                returned_id: entry_ref,
+                legal_targets,
+                pending_effect: Box::new(ResolvedAbility::new(
+                    Effect::Attach {
+                        attachment: TargetFilter::SelfRef,
+                        target: TargetFilter::Any,
+                    },
+                    Vec::new(),
+                    entry.source_id,
+                    chooser,
+                )),
+            };
+            return false;
+        }
+    }
 
     for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
         if *counter_count > 0
@@ -1788,6 +1946,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // withheld its `TokenCreated` and wrote no `created_tokens_this_turn` row. Appending after the
     // assignment is the same position `created_ids.push(object_id)` produced.
     record_last_created_token(state, object_id);
+
     true
 }
 

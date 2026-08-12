@@ -1504,6 +1504,25 @@ pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Whether `filter` references the resolution-local `last_created_token_ids`
+/// ledger population — "the token created this way" / "it" (bare or nested
+/// inside compound filters).
+///
+/// Structural twin of [`filter_contains_last_zone_changed`]: same anaphor class,
+/// same recursion set, different published ledger. Kept beside it so the two
+/// resolution-local anaphors stay discoverable as one pair.
+pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::LastCreated => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_contains_last_created)
+        }
+        TargetFilter::Not { filter } => filter_contains_last_created(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_contains_last_created(filter),
+        _ => false,
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a

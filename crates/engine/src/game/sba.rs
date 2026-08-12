@@ -44,8 +44,17 @@ fn live_battlefield_object_mut<'a>(
     })
 }
 
-fn pending_replacement_pauses_sba(state: &GameState) -> bool {
+/// CR 704.4: state-based actions pay no attention to what happens during the
+/// resolution of a spell or ability. An entry that is mid-resolution — parked on
+/// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
+/// is not yet the thing that entered, so the object-destroying SBAs (notably the
+/// CR 704.5m unattached-Aura sweep) must not see it.
+fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
     state.pending_replacement.is_some()
+        || matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::ReturnAsAuraTarget { .. }
+        )
 }
 
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
@@ -136,7 +145,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         // on the next pass once the choice is answered. The later
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
-        if pending_replacement_pauses_sba(state) {
+        if mid_resolution_entry_pauses_sba(state) {
             return;
         }
 
@@ -162,7 +171,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         }
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
-        if pending_replacement_pauses_sba(state) {
+        if mid_resolution_entry_pauses_sba(state) {
             return;
         }
 
@@ -174,7 +183,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -187,7 +196,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // graveyard. Runs after unattached_auras so dead-host Roles are already
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -196,13 +205,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // graveyards; on a tie for newest, all of them do. Global (not per-player) and
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -210,7 +219,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // ability that has triggered but not yet left the stack, it's put into its
             // owner's graveyard.
             check_zero_defense(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -229,14 +238,14 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             // CR 704.5w + CR 704.5x + CR 310.11: Battle with no (or illegal) protector —
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
             // and no chapter ability has triggered but not yet left the stack, sacrifice it.
             check_saga_sacrifice(state, events, &mut any_performed, &battlefield_snapshot);
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 
@@ -256,7 +265,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
                 &mut any_performed,
                 &battlefield_snapshot,
             );
-            if pending_replacement_pauses_sba(state) {
+            if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
 

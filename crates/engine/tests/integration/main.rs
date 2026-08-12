@@ -1037,6 +1037,7 @@ mod wolverine_fierce_fighter_heal;
 mod wrenn_and_six_up_to_one_optout;
 mod yare_extra_blockers;
 mod yavimaya_enchantress_dynamic_pump;
+mod yenna_aura_token_copy;
 mod yuriko_combat_damage;
 
 // Folded in from former top-level tests/*.rs files (each was its own ~130MB

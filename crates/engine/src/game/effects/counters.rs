@@ -686,15 +686,19 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids.extend(status.created_ids);
-            } else {
-                state.last_created_token_ids.extend(status.created_ids);
-            }
+            super::token_copy::extend_copy_batch_created_ids(state, status.created_ids);
             match completion {
                 super::token_copy::CopyTokenApplyCompletion::Completed => true,
                 super::token_copy::CopyTokenApplyCompletion::Paused => false,
             }
+        }
+        PendingCounterPostAction::ContinueCopyTokenEntryAfterAuraHost { object_id, tail } => {
+            // CR 303.4f: the host choice is answered and the attach is applied;
+            // run the rest of this token's entry (copy exceptions, entry counters,
+            // entry events) plus the rest of the batch.
+            super::token_copy::continue_copy_token_entry_after_aura_host(
+                state, object_id, *tail, events,
+            )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
             object_id,
