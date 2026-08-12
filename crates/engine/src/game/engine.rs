@@ -16118,9 +16118,14 @@ mod stage2_injector_tests {
                 // is the same +118. Each producer is sha256-identical at its new
                 // coordinate and still inside the function its row names. That
                 // round removes two `_` arms and adds no prompt of any kind.
+                //
+                // Merging `origin/main` (#7304 and neighbours) then moved the
+                // third producer alone by -4, `:9725 ⇒ :9721`; the other two did
+                // not move, which locates the deletion between them. Re-read at
+                // the new coordinate and sha256-identical to its old one.
                 "game/effects/mod.rs:6449".to_string(),
                 "game/effects/mod.rs:6526".to_string(),
-                "game/effects/mod.rs:9725".to_string(),
+                "game/effects/mod.rs:9721".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
