@@ -850,7 +850,7 @@ pub enum Keyword {
     Fuse,
     Gravestorm,
     Haunt,
-    /// CR 702.74a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
+    /// CR 702.75a: Hideaway N — look at top N cards, exile one face down, rest on bottom.
     Hideaway(u32),
     Improvise,
     Ingest,
@@ -2588,7 +2588,8 @@ impl FromStr for Keyword {
                 "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
                 "cleave" => return Ok(Keyword::Cleave(parse_keyword_mana_cost(p))),
-                // CR 702.74a
+                // CR 702.75a; the 4 default is CR 702.75b's errata for pre-errata
+                // cards printed as bare "Hideaway".
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
                 // CR 303.4a + CR 702.5a: When the enchant clause is unrecognized
