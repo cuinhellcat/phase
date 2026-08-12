@@ -25,11 +25,12 @@
 //! fix and prove nothing.
 
 use engine::ai_support::legal_actions;
+use engine::game::casting::can_pay_cost_after_auto_tap;
 use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{ActivationRestriction, Effect, TargetFilter};
+use engine::types::ability::{AbilityCost, ActivationRestriction, Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -373,6 +374,72 @@ fn sibling_battlefield_pump_ability_still_offered() {
          offered; legal_actions returned {:?}",
         legal_actions(runner.state())
     );
+    // ---- revert-invariant reach-guards for the Aura negative below ----
+    //
+    // Read this before touching the block: `!offers_activation(aura)` at the end
+    // of this test is the **only** runtime assertion in this file that is still
+    // reached when the production line is reverted. V10/V11/V12 all abort
+    // earlier on `assert_eq!(ability.activation_zone, Some(Zone::Graveyard))`, a
+    // parser precondition that itself flips on revert, so on revert they prove
+    // only what the parser tests already prove. V13 therefore carries the whole
+    // runtime claim alone, and every guard below is chosen to hold **with and
+    // without** the fix: object identity, ability count, effect shape,
+    // restrictions, zone, attachment and affordability are all untouched by the
+    // one-line parser change.
+    //
+    // There is deliberately **no** `activation_zone` assertion here, and one
+    // must not be added as a tidy-up. That value is exactly what the fix
+    // changes; asserting it would abort this test on revert *before* the
+    // negative below is evaluated and destroy the discrimination this block
+    // exists to protect.
+    let aura_object = &runner.state().objects[&aura];
+    assert_eq!(
+        aura_object.zone,
+        Zone::Battlefield,
+        "reach-guard: the Aura is on the battlefield"
+    );
+    assert_eq!(
+        aura_object.attached_to,
+        Some(AttachTarget::Object(host)),
+        "reach-guard: the Aura is still attached, so no CR 704.5m sweep can \
+         explain the negative"
+    );
+    assert_eq!(
+        aura_object.abilities.len(),
+        1,
+        "reach-guard: Bestial Bloodline has exactly one activated ability"
+    );
+    let aura_ability = &aura_object.abilities[0];
+    assert!(
+        matches!(
+            *aura_ability.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "reach-guard: expected a Graveyard → Hand self-ChangeZone, got {:?}",
+        aura_ability.effect
+    );
+    assert!(
+        aura_ability.activation_restrictions.is_empty() && aura_ability.condition.is_none(),
+        "reach-guard: no restriction or condition may explain the negative — \
+         `can_activate_ability_now` checks the zone BEFORE either"
+    );
+    let Some(AbilityCost::Mana { cost }) = &aura_ability.cost else {
+        panic!(
+            "reach-guard: expected the printed {{4}}{{G}} mana cost, got {:?}",
+            aura_ability.cost
+        );
+    };
+    assert!(
+        can_pay_cost_after_auto_tap(runner.state(), P0, aura, cost),
+        "reach-guard: {{4}}{{G}} is payable from the floating pool, so \
+         affordability cannot be the reason the ability is withheld"
+    );
+
     assert!(
         !offers_activation(runner.state(), aura),
         "…while the Aura's graveyard-return in the same scenario is withheld"

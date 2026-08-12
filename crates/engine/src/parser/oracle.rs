@@ -6778,9 +6778,23 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 /// your hand"). Do not re-add a `destination` field to the pattern.
 ///
 /// `origin != Zone::Battlefield` is the CR 113.6 default guard, **not** part of
-/// CR 113.6m: an ability whose effect moves its source *off* the battlefield
-/// already functions there by default (Cooped Up / Cage of Hands class), so
-/// there is nothing to derive.
+/// CR 113.6m: an ability whose effect moves its own source *off* the
+/// battlefield already functions there by default, so there is nothing to
+/// derive. Keep it — it is the correct default and costs nothing — but do not
+/// mistake it for load-bearing: **its class is empty at this corpus vintage.**
+/// 0 of the 22,794 parsed abilities carry a self-`ChangeZone` with
+/// `origin: Some(Zone::Battlefield)`, so no card and no test reaches this line.
+/// The shape that would reach it is an effect lowering to
+/// `ChangeZone { origin: Some(Zone::Battlefield), target: TargetFilter::SelfRef, .. }`
+/// — a self-move whose text names the battlefield as the zone it moves out of.
+/// No printed self-move does today: they leave the origin unstated
+/// (`origin: None`) or lower to a different variant. The two Auras that look
+/// like this class are rejected by *earlier* parts of the pattern and never
+/// arrive here — Cooped Up (`{2}{W}: Exile enchanted creature.`) by
+/// `target: TargetFilter::SelfRef`, because it moves the enchanted creature and
+/// not its own source, and Cage of Hands (`{1}{W}: Return this Aura to its
+/// owner's hand.`) by the `Effect::ChangeZone` variant match, because it lowers
+/// to `Effect::Bounce`.
 ///
 /// The `sub_ability` recursion below is **kind-agnostic** — it recurses whatever
 /// the sub-ability's `AbilityKind` is. Lochmere Serpent depends on exactly that:
@@ -6802,7 +6816,7 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 ///   a cost-chain inspection in this function.
 /// - CR 113.6m sentence 2 (an effect that creates a delayed triggered ability
 ///   which moves the object out of a zone, CR 603.7) — 0 operative cards (the
-///   abilities carrying that shape are synthesized Unearth, CR 702.83, whose
+///   abilities carrying that shape are synthesized Unearth, CR 702.84, whose
 ///   delayed move is `Battlefield → Exile`, i.e. the CR 113.6 default);
 ///   extension point: an `Effect::CreateDelayedTrigger` arm here that recurses
 ///   into the carried `AbilityDefinition`.
