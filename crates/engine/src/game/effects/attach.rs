@@ -788,6 +788,40 @@ pub(crate) fn attachment_illegality(
     attachment_id: ObjectId,
     host_id: ObjectId,
 ) -> Option<AttachIllegality> {
+    attachment_illegality_projected(
+        state,
+        attachment_id,
+        state.objects.get(&attachment_id),
+        host_id,
+    )
+}
+
+/// CR 614.12 + CR 701.3a: [`attachment_illegality`] against an explicitly
+/// supplied projection of the ATTACHMENT.
+///
+/// Every attachment-side half of this resolver — is the attacher an Aura or an
+/// Equipment (CR 303.4 / CR 301.5), its own `AttachmentRestriction` statics
+/// (CR 301.5b / CR 303.4j), and the CR 702.16c/d protection quality match — reads
+/// the attachment's characteristics. For an entrant that is not yet the object
+/// stored under its id, `state.objects` holds the WRONG characteristics: a meld
+/// entrant's id still holds the exiled front-face component card, which has a
+/// different typeline, colors and controller than the permanent that is entering.
+/// CR 614.12 requires "the characteristics of the permanent as it would exist on
+/// the battlefield", so the pre-entry CR 303.4f/g host consult passes the
+/// entrant projection here and this resolver reads it instead.
+///
+/// `attachment` is `None` only when no object and no projection exists under the
+/// id, in which case the attachment-side halves are skipped exactly as before.
+///
+/// `attachment_id` is still used for the two id-keyed structural reads that are
+/// not characteristic lookups: the CR 301.5c self-attach guard and the CR 701.3b
+/// attachment-graph cycle guard.
+pub(crate) fn attachment_illegality_projected(
+    state: &GameState,
+    attachment_id: ObjectId,
+    attachment: Option<&crate::game::game_object::GameObject>,
+    host_id: ObjectId,
+) -> Option<AttachIllegality> {
     // CR 301.5c: "An Equipment can't equip itself." (And no permanent can be
     // attached to itself.) Single-authority self-attach guard protecting both
     // `can_attach_to_object` and `attach_to`.
@@ -806,16 +840,12 @@ pub(crate) fn attachment_illegality(
     if crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeAttached") {
         return Some(AttachIllegality::Prohibited);
     }
-    let (attacher_is_aura, attacher_is_equipment) =
-        state
-            .objects
-            .get(&attachment_id)
-            .map_or((false, false), |obj| {
-                (
-                    obj.card_types.subtypes.iter().any(|s| s == "Aura"),
-                    obj.card_types.subtypes.iter().any(|s| s == "Equipment"),
-                )
-            });
+    let (attacher_is_aura, attacher_is_equipment) = attachment.map_or((false, false), |obj| {
+        (
+            obj.card_types.subtypes.iter().any(|s| s == "Aura"),
+            obj.card_types.subtypes.iter().any(|s| s == "Equipment"),
+        )
+    });
     // CR 303.4c: Other applicable effects can make an Aura's host illegal.
     if attacher_is_aura
         && crate::game::static_abilities::object_has_static_other(state, host_id, "CantBeEnchanted")
@@ -835,7 +865,7 @@ pub(crate) fn attachment_illegality(
     // (read from the HOST's statics), this restriction is carried by the
     // ATTACHMENT itself, so a candidate host failing the filter makes the attach
     // illegal (CR 301.5b / CR 303.4j: the attachment doesn't move).
-    if !attachment_satisfies_restrictions(state, attachment_id, host_id) {
+    if !attachment_satisfies_restrictions(state, attachment_id, attachment, host_id) {
         return Some(AttachIllegality::Prohibited);
     }
 
@@ -847,10 +877,7 @@ pub(crate) fn attachment_illegality(
     // remove …" does not make matching attachments illegal via *that* instance
     // (Flickering Ward / Ward cycle / Benevolent Blessing). Other instances of
     // protection from the same quality still apply normally.
-    if let (Some(host), Some(attachment)) = (
-        state.objects.get(&host_id),
-        state.objects.get(&attachment_id),
-    ) {
+    if let (Some(host), Some(attachment)) = (state.objects.get(&host_id), attachment) {
         if protection_blocks_attachment(state, host_id, attachment_id, host, attachment) {
             return Some(AttachIllegality::Protection);
         }
@@ -1232,12 +1259,18 @@ fn protection_grant_exempts_attachment(
 fn attachment_satisfies_restrictions(
     state: &GameState,
     attachment_id: ObjectId,
+    attachment: Option<&crate::game::game_object::GameObject>,
     host_id: ObjectId,
 ) -> bool {
-    let Some(attachment) = state.objects.get(&attachment_id) else {
+    let Some(attachment) = attachment else {
         return true;
     };
-    let ctx = FilterContext::from_source(state, attachment_id);
+    // CR 614.12: source-relative predicates inside the restriction filter bind to
+    // the ENTRANT's controller. Identical to `FilterContext::from_source` for an
+    // attachment that is already the object stored under this id (that
+    // constructor reads exactly `state.objects[id].controller`); it differs only
+    // for a pre-entry projection, which is the case this parameter exists for.
+    let ctx = FilterContext::from_source_with_controller(attachment_id, attachment.controller);
     crate::game::functioning_abilities::active_static_definitions(state, attachment).all(|def| {
         match &def.mode {
             crate::types::statics::StaticMode::AttachmentRestriction { filter } => {
@@ -1251,14 +1284,18 @@ fn attachment_satisfies_restrictions(
 
 /// Returns `Some(reason)` when a player host forbids `attachment` via
 /// player-scoped protection, else `None`.
+/// The attachment is supplied as a projection rather than looked up by id:
+/// CR 614.12 requires an ENTRANT to be read as it will exist on the battlefield,
+/// and its id may still hold the pre-entry object. Object-host sibling of
+/// [`attachment_illegality_projected`], which documents the same reasoning.
 pub(crate) fn player_attachment_illegality(
     state: &GameState,
-    attachment_id: ObjectId,
+    attachment: Option<&crate::game::game_object::GameObject>,
     host: PlayerId,
 ) -> Option<AttachIllegality> {
     // CR 702.16c: A player with protection can't be enchanted by an Aura of the
     // protected quality.
-    if crate::game::static_abilities::player_protection_from(state, host, Some(attachment_id)) {
+    if crate::game::static_abilities::player_protection_from_object(state, host, attachment) {
         return Some(AttachIllegality::Protection);
     }
     None
@@ -1269,13 +1306,39 @@ pub(crate) fn can_attach_to_object(
     attachment_id: ObjectId,
     target_id: ObjectId,
 ) -> bool {
+    can_attach_to_object_projected(
+        state,
+        attachment_id,
+        state.objects.get(&attachment_id),
+        target_id,
+    )
+}
+
+/// CR 614.12: [`can_attach_to_object`] against an explicitly supplied projection
+/// of the attachment. See [`attachment_illegality_projected`].
+pub(crate) fn can_attach_to_object_projected(
+    state: &GameState,
+    attachment_id: ObjectId,
+    attachment: Option<&crate::game::game_object::GameObject>,
+    target_id: ObjectId,
+) -> bool {
     // CR 701.3a: A blocked attachment is not a legal host for an attach effect.
-    attachment_illegality(state, attachment_id, target_id).is_none()
+    attachment_illegality_projected(state, attachment_id, attachment, target_id).is_none()
 }
 
 pub(crate) fn can_attach_to_player(
     state: &GameState,
     attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> bool {
+    can_attach_to_player_projected(state, state.objects.get(&attachment_id), target_player)
+}
+
+/// CR 614.12: [`can_attach_to_player`] against an explicitly supplied projection
+/// of the attachment. See [`attachment_illegality_projected`].
+pub(crate) fn can_attach_to_player_projected(
+    state: &GameState,
+    attachment: Option<&crate::game::game_object::GameObject>,
     target_player: PlayerId,
 ) -> bool {
     // CR 303.4c: A player who has left the game is an illegal Aura host.
@@ -1288,7 +1351,7 @@ pub(crate) fn can_attach_to_player(
     }
     // CR 702.16c: Protection from a quality prevents Auras of that quality from
     // being attached to the protected player.
-    player_attachment_illegality(state, attachment_id, target_player).is_none()
+    player_attachment_illegality(state, attachment, target_player).is_none()
 }
 
 /// CR 303.4: Attach an Aura to a player (Curse cycle, Faith's Fetters-class).
@@ -1616,7 +1679,7 @@ mod tests {
         );
 
         assert_eq!(
-            player_attachment_illegality(&state, aura, PlayerId(1)),
+            player_attachment_illegality(&state, state.objects.get(&aura), PlayerId(1)),
             Some(AttachIllegality::Protection)
         );
         assert!(!can_attach_to_player(&state, aura, PlayerId(1)));

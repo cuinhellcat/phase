@@ -529,6 +529,10 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     let liminal_immediate =
         copy_token_modifications_are_liminal_immediate(&additional_modifications)
             && etb_counters.is_empty();
+    // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
+    // resolve against. Loop-invariant, and cloned once so the per-token CR
+    // 303.4f/g projection below can be built while `state` is borrowed.
+    let all_creature_types = state.all_creature_types.clone();
 
     for index in 0..final_count {
         if liminal_immediate {
@@ -701,13 +705,46 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             ObjectIncarnationRef::from_object(token)
         });
 
+        // CR 707.9b/9c + CR 614.12: the consult below must see the entrant as it
+        // will exist AFTER the copy exceptions, not the bare copied body.
+        //
+        // `materialize_token_copy_body` is a documented no-op for
+        // `DeferredToUnjournaledSeam` — on this path the exceptions land later, at
+        // `apply_token_modifications` — so at this point the stored object still
+        // carries the UNMODIFIED copiable values. The liminal seam folds its
+        // exceptions before its own consult, so without this projection the two
+        // copy seams disagree about what the entrant is, and an exception that
+        // adds or removes `Creature` (CR 303.4d), adds or removes the `Aura`
+        // subtype, or changes color (CR 702.16c) flips the CR 303.4f/g verdict.
+        // The failure mode is silent: a token that is never created.
+        //
+        // A PROJECTION rather than an early mutation of the stored object: the
+        // exceptions must still be applied exactly once, by the seam that owns
+        // them and can pause (`AddCounterOnEnter` reaches
+        // `add_counter_with_replacement`), and several arms — `AddPower`,
+        // `GrantAbility`, `GrantTrigger` — are not idempotent under a second pass.
+        let entrant_projection = state.objects.get(&token_id).map(|token| {
+            let mut projection = token.clone();
+            apply_immediate_copy_token_modifications_to_object(
+                &mut projection,
+                &additional_modifications,
+                &all_creature_types,
+            );
+            projection
+        });
+
         // CR 303.4f + CR 303.4g: decide the entering Aura's host BEFORE the CR 733
         // birth is journaled (append-only, no retraction) and BEFORE the attach is
         // applied, so the CR 303.4g "if the Aura is a token, it isn't created" arm
         // can withhold the birth and the attach can never take a lower journal
         // ordinal than the birth it depends on. Same decide/act split the liminal
         // seam uses in `token::commit_liminal_token_entry_with_post_actions`.
-        let hosts = crate::game::zone_pipeline::entering_aura_hosts(state, token_id);
+        let hosts = match entrant_projection.as_ref() {
+            Some(entrant) => {
+                crate::game::zone_pipeline::entering_aura_hosts_projected(state, token_id, entrant)
+            }
+            None => crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable,
+        };
         if matches!(
             &hosts,
             crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }

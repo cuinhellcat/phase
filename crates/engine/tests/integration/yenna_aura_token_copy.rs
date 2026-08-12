@@ -959,6 +959,18 @@ enchanted creature this turn.\n\
 /// COPY — P0's — sees only P0's `hosts` creatures. `hosts == 0` is therefore a
 /// genuine CR 303.4g case with an untouched P0 graveyard.
 fn fylgja_copy_scenario(hosts: usize) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    fylgja_copy_scenario_with(hosts, 1, Vec::new())
+}
+
+/// [`fylgja_copy_scenario`] with an explicit copy `count` and CR 707.9 "except"
+/// body, for the two seam properties the 1×/no-exception shape cannot reach: a
+/// multi-token non-liminal batch, and an exception that changes what the entrant
+/// IS before the CR 303.4f/g consult reads it.
+fn fylgja_copy_scenario_with(
+    hosts: usize,
+    count: i32,
+    additional_modifications: Vec<ContinuousModification>,
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let maker = scenario
@@ -969,9 +981,9 @@ fn fylgja_copy_scenario(hosts: usize) -> (GameRunner, ObjectId, ObjectId, Vec<Ob
             source_filter: None,
             enters_attacking: false,
             tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: count },
             extra_keywords: Vec::new(),
-            additional_modifications: Vec::new(),
+            additional_modifications,
         })
         .id();
     let host_ids: Vec<ObjectId> = (0..hosts)
@@ -1087,4 +1099,132 @@ fn non_liminal_copy_with_no_legal_host_is_not_created() {
         "reach-guard: the copy SOURCE is still legally attached, so the copy effect \
          really had something to copy"
     );
+}
+
+/// CR 707.9b + CR 303.4d on the NON-LIMINAL copy path: the CR 303.4f/g consult
+/// must read the entrant as it will exist after the copy exceptions.
+///
+/// The two copy seams apply CR 707.9 exceptions at different points — the liminal
+/// one folds them into the copiable values before entry, the non-liminal one
+/// defers them to `apply_token_modifications` after the birth — so only a
+/// projection makes them agree about what the entrant is.
+///
+/// Fixture reachability, stated because the sibling `aura_creature_copy_is_
+/// created_then_swept` looks identical and is NOT this test: that one copies
+/// Cooped Up, whose only modification (`AddType`) is liminal-immediate and which
+/// has no entry counters, so it takes the LIMINAL seam. Fylgja carries a
+/// CR 614.1c "enters with four healing counters" self-replacement, which forces
+/// the non-liminal route regardless of the modification.
+///
+/// The revert-failing assertion is `created.len() == 1`. Reading the stored
+/// object instead of the projection sees a plain Aura with `enchant creature you
+/// control`, finds zero P0 creatures, and takes CR 303.4g — the token is silently
+/// never created.
+#[test]
+fn non_liminal_copy_reads_the_entrant_after_its_copy_exceptions() {
+    let (mut runner, maker, aura, _) = fylgja_copy_scenario_with(
+        0,
+        1,
+        vec![ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }],
+    );
+    // Reach-guard: the copy SOURCE really carries the CR 614.1c self-replacement
+    // that forces the non-liminal route (it was placed directly, so it has no
+    // counters of its own — only an ENTRY can produce them).
+    assert_eq!(
+        runner.state().objects[&aura].counters.values().sum::<u32>(),
+        0,
+        "fixture: only the token's entry can seed counters"
+    );
+
+    activate(&mut runner, maker);
+    let observed = drive(
+        &mut runner,
+        &[TargetRef::Object(aura)],
+        HostAnswers::Answer(&[]),
+    );
+
+    assert!(
+        observed.host_prompts.is_empty(),
+        "CR 303.4d: an Aura that's also a creature enchants nothing, so no host is chosen"
+    );
+    let created = observed.token_created_ids();
+    assert_eq!(
+        created.len(),
+        1,
+        "CR 303.4d is not CR 303.4g: with the `AddType` exception read, the token IS \
+         created even though no legal host exists for the unmodified body (got {created:?})"
+    );
+    assert_eq!(
+        battlefield_named(&runner, "Fylgja"),
+        vec![aura],
+        "CR 704.5m via CR 303.4d: the created Aura-creature is then swept, exactly as \
+         on the liminal seam"
+    );
+}
+
+/// CR 111.1 + CR 608.2c on the NON-LIMINAL copy path: a multi-token batch whose
+/// first token pauses on a CR 303.4f host prompt must still publish BOTH tokens
+/// as "the tokens created this way".
+///
+/// `two_copies_each_choose_their_own_host` pins the same property on the liminal
+/// seam. This is its non-liminal twin: the nested pause assigns
+/// `state.last_created_token_ids = []` and the first token survives only inside
+/// `pending.created_ids`, one frame-lifetime assumption away from being dropped
+/// from the anaphor.
+///
+/// The revert-failing assertion is the two-element `created` list together with
+/// both tokens being attached to distinct hosts.
+#[test]
+fn two_non_liminal_copies_each_choose_their_own_host() {
+    let (mut runner, maker, aura, hosts) = fylgja_copy_scenario_with(2, 2, Vec::new());
+
+    activate(&mut runner, maker);
+    let observed = drive(
+        &mut runner,
+        &[TargetRef::Object(aura)],
+        HostAnswers::Answer(&[TargetRef::Object(hosts[0]), TargetRef::Object(hosts[1])]),
+    );
+
+    assert_eq!(
+        observed.host_prompts.len(),
+        2,
+        "CR 303.4f: each token in the batch chooses its own host"
+    );
+    let created = observed.token_created_ids();
+    assert_eq!(
+        created.len(),
+        2,
+        "CR 111.1: both tokens of the batch are created across the nested pause \
+         (got {created:?})"
+    );
+    let tokens: Vec<ObjectId> = battlefield_named(&runner, "Fylgja")
+        .into_iter()
+        .filter(|id| *id != aura)
+        .collect();
+    assert_eq!(tokens.len(), 2, "both token copies are on the battlefield");
+    let mut attached: Vec<Option<AttachTarget>> = tokens
+        .iter()
+        .map(|id| runner.state().objects[id].attached_to)
+        .collect();
+    attached.sort_by_key(|target| match target {
+        Some(AttachTarget::Object(id)) => id.0,
+        _ => u64::MAX,
+    });
+    assert_eq!(
+        attached,
+        vec![
+            Some(AttachTarget::Object(hosts[0])),
+            Some(AttachTarget::Object(hosts[1])),
+        ],
+        "CR 303.4f: each token is attached to the host its own prompt chose"
+    );
+    for token in &tokens {
+        assert_eq!(
+            runner.state().objects[token].counters.values().sum::<u32>(),
+            4,
+            "CR 614.1c: every token in the batch still seeds its entry counters"
+        );
+    }
 }

@@ -1837,7 +1837,19 @@ fn entering_object_projection(state: &GameState, object_id: ObjectId) -> Option<
 }
 
 fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {
-    let obj = entering_object_projection(state, object_id)?;
+    aura_enchant_filter_of(entering_object_projection(state, object_id)?)
+}
+
+/// CR 303.4 + CR 702.5: the Enchant ability an ENTRANT will have on the
+/// battlefield, read from an explicitly supplied projection.
+///
+/// Split from [`aura_enchant_filter`] so a seam holding a projection that is not
+/// (yet) the object stored under its id can consult it — CR 614.12's "the
+/// characteristics of the permanent as it would exist on the battlefield". Two
+/// seams need that: a liminal entrant, whose id still holds the pre-entry
+/// component card, and a non-liminal copy token whose CR 707.9 exceptions are
+/// applied by a later, unjournaled seam.
+pub(crate) fn aura_enchant_filter_of(obj: &GameObject) -> Option<TargetFilter> {
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         return None;
     }
@@ -1864,9 +1876,19 @@ fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetF
     }
 }
 
+/// CR 303.4f: the legal hosts for an entering Aura.
+///
+/// `entrant` is the CR 614.12 projection of the ATTACHMENT — the characteristics
+/// the Aura will have on the battlefield. Every host-legality check below that
+/// reads the attachment side reads it, never `state.objects[aura_id]`: for a
+/// liminal entrant that id still holds the pre-entry component card (a meld's
+/// exiled front face), whose typeline, colors and controller are not the entering
+/// permanent's, and for a non-liminal copy token the CR 707.9 exceptions have not
+/// been stamped onto the stored object yet.
 fn legal_aura_attachment_targets(
     state: &GameState,
     aura_id: ObjectId,
+    entrant: Option<&GameObject>,
     controller: PlayerId,
     enchant_filter: &TargetFilter,
 ) -> Vec<TargetRef> {
@@ -1897,19 +1919,15 @@ fn legal_aura_attachment_targets(
         // `matches_target_filter`, never the `find_legal_targets` enumerator, so
         // hexproof (CR 702.11) / shroud (CR 702.18) never remove a legal host.
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
-        // CR 701.3a + CR 702.16c: host-side prohibitions and protection.
-        //
-        // NARROWING, deliberate and named: `attachment_illegality` reads the
-        // ATTACHMENT from `state.objects`. For a liminal entrant that id still
-        // holds the pre-entry object (a meld's exiled component card), so the
-        // attachment-side halves of that check — "is the attacher an Aura", and
-        // the protection quality match — read pre-entry characteristics. The
-        // effect is only ever permissive (a non-Aura attacher skips both), never
-        // restrictive, and it is strictly better than the prior behaviour on this
-        // path, which ran no CR 303.4f/g consult at all. Closing it needs the
-        // entrant projection threaded through `attach.rs`, which is a wider
-        // single-authority change than this seam should make.
-        .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
+        // CR 701.3a + CR 702.16c: host-side prohibitions and protection, read
+        // against the CR 614.12 entrant projection so a protection or
+        // attachment-restriction match is computed from the characteristics the
+        // permanent will have on the battlefield.
+        .filter(|id| {
+            crate::game::effects::attach::can_attach_to_object_projected(
+                state, aura_id, entrant, *id,
+            )
+        })
         .map(TargetRef::Object)
         .collect();
 
@@ -1919,6 +1937,16 @@ fn legal_aura_attachment_targets(
         // `players::player_exists_for_choice` spells for a member already known to be in
         // `state.players`. Routed so an existence fix propagates here for free.
         if !crate::game::players::player_exists_for_choice(state, player.id) {
+            return None;
+        }
+        // CR 303.4c + CR 702.16c: the player-host mirror of the object-host
+        // legality filter above. Without it an illegal player counts as a legal
+        // host, which suppresses the CR 303.4g denial: the Curse token copy is
+        // created, `attach_to_player` no-ops on the illegality, and CR 704.5m
+        // sweeps it — exactly the entered-then-died bug this seam exists to
+        // prevent, on the player axis.
+        if !crate::game::effects::attach::can_attach_to_player_projected(state, entrant, player.id)
+        {
             return None;
         }
         if crate::game::filter::player_matches_target_filter_in_state(
@@ -2071,9 +2099,34 @@ pub(crate) enum EnteringAuraHosts {
 /// Decide half of [`resolve_entering_aura_attachment`] — pure with respect to
 /// the game state.
 pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> EnteringAuraHosts {
-    let Some(enchant_filter) = aura_enchant_filter(state, object_id) else {
+    let Some(entrant) = entering_object_projection(state, object_id) else {
         return EnteringAuraHosts::NotApplicable;
     };
+    entering_aura_hosts_projected(state, object_id, entrant)
+}
+
+/// CR 614.12: [`entering_aura_hosts`] against an explicitly supplied projection
+/// of the ENTRANT.
+///
+/// The non-liminal copy-token seam owns a projection its stored object does not
+/// match yet: on that path the CR 707.9b/9c "except …" exceptions are applied by
+/// a later, unjournaled seam (`apply_token_modifications`), so the object under
+/// this id still carries the UNMODIFIED copied body. An exception that adds or
+/// removes `Creature` (CR 303.4d), adds or removes the `Aura` subtype, or changes
+/// the entrant's colors (CR 702.16c protection) flips this verdict — and a wrong
+/// verdict here is a token silently never created (CR 303.4g). The liminal seam
+/// folds the same exceptions BEFORE its own consult, so passing the projection is
+/// what makes the two seams agree on what the entrant is.
+pub(crate) fn entering_aura_hosts_projected(
+    state: &GameState,
+    object_id: ObjectId,
+    entrant: &GameObject,
+) -> EnteringAuraHosts {
+    let Some(enchant_filter) = aura_enchant_filter_of(entrant) else {
+        return EnteringAuraHosts::NotApplicable;
+    };
+    // Existence and battlefield residency are read from the STORED object: they
+    // are facts about where the entrant is, which no projection may override.
     let Some(obj) = state.objects.get(&object_id) else {
         return EnteringAuraHosts::NotApplicable;
     };
@@ -2091,9 +2144,17 @@ pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> Ent
     if obj.attached_to.is_some() {
         return EnteringAuraHosts::NotApplicable;
     }
-    let controller = obj.controller;
+    // CR 303.4f: "that player" is the entrant's controller — read from the
+    // projection, which is where a controller-changing entry effect lands first.
+    let controller = entrant.controller;
     EnteringAuraHosts::Hosts {
-        legal_targets: legal_aura_attachment_targets(state, object_id, controller, &enchant_filter),
+        legal_targets: legal_aura_attachment_targets(
+            state,
+            object_id,
+            Some(entrant),
+            controller,
+            &enchant_filter,
+        ),
         controller,
     }
 }
@@ -2334,6 +2395,21 @@ mod entering_aura_attachment_tests {
         id
     }
 
+    /// A Curse-shaped card-backed Aura in `zone`: `enchant player`, so its only
+    /// candidate hosts are players.
+    fn card_aura_enchanting_players(
+        state: &mut GameState,
+        controller: PlayerId,
+        zone: Zone,
+    ) -> ObjectId {
+        let id = card_aura(state, controller, zone);
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.name = "Card Curse".to_string();
+        obj.keywords = vec![Keyword::Enchant(TargetFilter::Player)];
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
     /// CR 303.4g: "If the Aura is a token, it isn't created." Token-ness outranks
     /// the origin — a token is never created regardless of where the effect was
     /// putting it onto the battlefield from.
@@ -2438,6 +2514,276 @@ mod entering_aura_attachment_tests {
         assert!(
             !state.battlefield.iter().any(|&bid| bid == id),
             "it is put into the graveyard INSTEAD OF entering the battlefield"
+        );
+    }
+
+    /// CR 400.7 + CR 603.6a: the CR 303.4g graveyard placement is a real zone
+    /// change, so it EMITS a `ZoneChanged` that "whenever a card is put into a
+    /// graveyard from anywhere" triggers can see.
+    ///
+    /// Honest scope: this does NOT discriminate against the destination-rewrite
+    /// form this arm replaced — that delivered the same event and emitted the same
+    /// pair. It pins the property against the OTHER regression available here, a
+    /// raw `zones::` placement of the kind the liminal card-backed sibling still
+    /// uses, which emits nothing at all and so fires no "put into a graveyard from
+    /// anywhere" trigger. The revert-discriminating assertion for the routing
+    /// change itself is in the redirect test below.
+    #[test]
+    fn the_stack_origin_graveyard_placement_emits_a_zone_changed() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                crate::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Stack),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == id
+            )),
+            "CR 400.7: the graveyard placement must be observable (got {events:?})"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                crate::types::events::GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == id
+            )),
+            "CR 303.4g: nothing may observe the denied battlefield entry"
+        );
+    }
+
+    /// CR 614.6 discriminating regression: the CR 303.4g graveyard placement is a
+    /// FRESH event, so a board-wide `Moved` graveyard→exile redirect (Rest in
+    /// Peace / Leyline of the Void) fires on it and the Aura ends in EXILE.
+    ///
+    /// The revert-failing assertion is `zone == Exile`. Rewriting the approved
+    /// entry event's destination — the shape this replaced — skipped a second
+    /// consult entirely, so the Aura landed in the graveyard with Rest in Peace on
+    /// the battlefield. Structural twin of
+    /// `engine_replacement::prevented_etb_graveyard_fallback_consults_moved_redirects`.
+    #[test]
+    fn the_stack_origin_graveyard_placement_consults_moved_redirects() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(1);
+        // Rest in Peace-class redirect. Deliberately NOT a creature: a creature
+        // would be a legal host for `enchant creature` and CR 303.4g would never
+        // be reached.
+        let rip = create_object(
+            &mut state,
+            CardId(90_400),
+            P1,
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 614.6: the CR 303.4g graveyard placement is a fresh, replaceable \
+             event — a graveyard→exile redirect must fire on it"
+        );
+        assert!(
+            !state.players[0].graveyard.iter().any(|&gid| gid == id),
+            "the Aura must not reach the graveyard with Rest in Peace out"
+        );
+        assert!(
+            !state.battlefield.iter().any(|&bid| bid == id),
+            "CR 303.4g: it still never enters the battlefield"
+        );
+    }
+
+    /// Reach-guard for the redirect regression: with Rest in Peace out but a
+    /// legal host present, the Aura enters normally. Without this, the exile
+    /// assertion above could pass for the wrong reason (an entry blocked upstream
+    /// and swept by some other rule).
+    #[test]
+    fn a_moved_redirect_does_not_disturb_a_hosted_entry() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(1);
+        let rip = create_object(
+            &mut state,
+            CardId(90_400),
+            P1,
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+        let host = creature(&mut state, P0, "Host");
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
+        );
+    }
+
+    /// CR 303.4c + CR 702.16c: a player who cannot legally be enchanted is not a
+    /// legal host, so an Aura whose only candidate is that player takes the
+    /// CR 303.4g arm rather than entering and being swept by CR 704.5m.
+    ///
+    /// Revert-failing assertion: `zone == Zone::Graveyard`. Without the
+    /// `can_attach_to_player` filter the protected player counted as legal, the
+    /// entry was allowed, and `attach_to_player` silently no-opped on the
+    /// illegality.
+    #[test]
+    fn a_player_host_that_cannot_be_enchanted_is_not_a_legal_host() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Stack);
+        // CR 702.16j: protection from everything on BOTH players, so no player is
+        // a legal host and the enchant-player filter's population is empty.
+        for player in [P0, P1] {
+            state.add_transient_continuous_effect(
+                id,
+                P0,
+                crate::types::ability::Duration::UntilEndOfTurn,
+                TargetFilter::SpecificPlayer { id: player },
+                vec![crate::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::Everything,
+                    ),
+                }],
+                None,
+            );
+        }
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: no legal player host, so the stack-origin Aura is put into \
+             its owner's graveyard instead of entering"
+        );
+        assert!(!state.battlefield.iter().any(|&bid| bid == id));
+    }
+
+    /// Reach-guard twin of the test above: the same Aura with an unprotected
+    /// player present enters and attaches to that player, so the negative there
+    /// is not passing because enchant-player hosts are never offered at all.
+    #[test]
+    fn an_unprotected_player_is_still_a_legal_host() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Stack);
+        state.add_transient_continuous_effect(
+            id,
+            P0,
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: P0 },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::Everything),
+            }],
+            None,
+        );
+
+        let mut events = Vec::new();
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Player(P1)),
+            "CR 303.4f: the sole legal player host is attached as the Aura enters"
         );
     }
 
@@ -3480,10 +3826,9 @@ fn execute_zone_move_with_applied_terminal(
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
             // CR 303.4g: set when the unhosted entrant came from the stack and so
-            // must be put into its owner's graveyard rather than remain. Applied
-            // after the borrow of `event` ends, by rewriting the approved event's
-            // destination — the entry is denied, and the graveyard placement IS
-            // the rule's substitute for it.
+            // must be put into its owner's graveyard rather than remain. Acted on
+            // after the borrow of `event` ends — the battlefield entry is denied
+            // and a FRESH graveyard move is proposed in its place.
             let mut unhosted_to_owners_graveyard = false;
             if let ProposedEvent::ZoneChange {
                 object_id,
@@ -3509,6 +3854,7 @@ fn execute_zone_move_with_applied_terminal(
                         let legal_targets = legal_aura_attachment_targets(
                             state,
                             *object_id,
+                            entering_object_projection(state, *object_id),
                             controller,
                             &enchant_filter,
                         );
@@ -3560,14 +3906,30 @@ fn execute_zone_move_with_applied_terminal(
             }
             if unhosted_to_owners_graveyard {
                 // CR 303.4g: "…the Aura is put into its owner's graveyard instead
-                // of entering the battlefield." Retarget the already-approved
-                // event rather than re-entering the replacement pipeline: the
-                // graveyard placement is not a new, separately replaceable event —
-                // it is the rules-mandated substitute outcome of this one.
-                if let ProposedEvent::ZoneChange { to, attach_to, .. } = &mut event {
-                    *to = Zone::Graveyard;
-                    *attach_to = None;
-                }
+                // of entering the battlefield."
+                //
+                // CR 614.6: the approved battlefield entry never happens, and the
+                // graveyard placement that replaces it is a FRESH, never-consulted
+                // event — so it routes through the pipeline rather than being
+                // written as a destination rewrite of the already-approved event.
+                // A board-wide `Moved` graveyard→exile redirect (Rest in Peace /
+                // Leyline of the Void) therefore fires on it. Same house decision
+                // as `engine_replacement.rs`'s CR 608.3e prevented-permanent
+                // graveyard fallback, which is the structural twin of this arm.
+                //
+                // The already-applied set rides along on the fresh request so no
+                // replacement can be spent twice: every def that applied to this
+                // entry was consulted against `to: Battlefield`, and the new
+                // proposal is `to: Graveyard`, so a battlefield-scoped entry
+                // replacement cannot re-match it either way — carrying `applied`
+                // makes that structural fact explicit instead of implicit.
+                let applied = event.applied_set().clone();
+                return move_object_with_terminal(
+                    state,
+                    ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
+                        .with_replacement_applied(applied),
+                    events,
+                );
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
                 let delivery_start = events.len();

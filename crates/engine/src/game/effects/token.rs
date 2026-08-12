@@ -1556,6 +1556,27 @@ pub(crate) fn uncreate_unentered_aura_token(
 /// does not cover. See `zone_pipeline::unhosted_aura_entry` for why the liminal
 /// seam's card-backed arm takes the graveyard disposition: the entrant has no
 /// prior zone to "remain" in, and the card must not simply cease to exist.
+///
+/// WHY THIS ONE IS NOT PIPELINE-ROUTED, unlike its ZoneChange twin. The
+/// stack-origin arm in `zone_pipeline` proposes a fresh, replacement-aware
+/// Stack → Graveyard move, so a `Moved` graveyard→exile redirect (Rest in Peace /
+/// Leyline of the Void) fires on it. That is only expressible because that
+/// entrant HAS a from-zone. This one does not: `ProposedEvent::TokenEntry`
+/// carries no origin, and the object is on the battlefield here solely because
+/// the seam raw-inserted it a few lines above to run the consult. Routing
+/// Battlefield → Graveyard through `move_object` would emit
+/// `ZoneChanged { from: Some(Battlefield) }` and make the game observe a CR 700.4
+/// death for an entry CR 303.4g says never happened — strictly worse than the
+/// missing `ZoneChanged` it would buy. There is no `from: None` graveyard
+/// proposal in the pipeline to route instead (`record_and_emit_entry_from_no_zone`
+/// is battlefield-only).
+///
+/// This is reachable only defensively: `materialize_token_copy_body` sets
+/// `is_token` on every entrant the one production `TokenEntry` producer builds
+/// (`token_copy.rs`), so `unhosted_aura_entry` takes the `NotCreated` arm for all
+/// of them. Closing it properly means giving the pipeline a from-nothing,
+/// replacement-consulting placement — worth doing when a production card-backed
+/// liminal entrant exists, not before.
 fn place_unentered_aura_in_owners_graveyard(
     state: &mut GameState,
     object_id: ObjectId,
@@ -1678,6 +1699,26 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     //
     // Decided before the birth is journaled and applied after, so the CR 303.4g
     // arm can withhold the birth entirely (see `birth_command` above).
+    //
+    // WHY THE CONSULT RUNS AFTER THE INSERT, and what that costs. The insert +
+    // `add_to_zone` pair above emits nothing — no `ZoneChanged`, no
+    // `TokenCreated`, no journal command, no `last_created_token_ids` row — and
+    // the `NotCreated` arm below rewinds both, so nothing the game can observe
+    // escapes on the denied path. It is a prerequisite, not a shortcut:
+    // `entering_aura_hosts` reads the entrant's zone off `state.objects` and
+    // reports `NotApplicable` for anything not on the battlefield. It also puts
+    // this seam in agreement with the OTHER token seam
+    // (`token_copy.rs`'s non-liminal loop, which likewise consults a token it has
+    // already created on the battlefield).
+    //
+    // The residual, stated rather than papered over: an enchant filter that
+    // COUNTS a population the entrant belongs to ("enchant creature you control if
+    // you control two or more enchantments") observes the entrant as present here
+    // and as absent at the pre-entry ZoneChange seam in `zone_pipeline`. Only
+    // counting predicates diverge — CR 303.4d self-exclusion is applied
+    // explicitly by `legal_aura_attachment_targets`, and `FilterProp::Another` is
+    // source-relative to the Aura itself, so both already exclude the entrant on
+    // either side. No card in the pool carries a counting enchant ability.
     let hosts = if entry.attach_to.is_none() {
         crate::game::zone_pipeline::entering_aura_hosts(state, entry_ref)
     } else {

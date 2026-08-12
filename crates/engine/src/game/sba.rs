@@ -49,6 +49,15 @@ fn live_battlefield_object_mut<'a>(
 /// a CR 616.1 replacement-ordering choice, or on a CR 303.4f Aura-host choice —
 /// is not yet the thing that entered, so the object-destroying SBAs (notably the
 /// CR 704.5m unattached-Aura sweep) must not see it.
+///
+/// NOT `effects::waits_for_resolution_choice`, though the two overlap on
+/// `ReturnAsAuraTarget`. That predicate answers a different question — "must a
+/// chained sub-ability be stashed as a CR 608.2c continuation across this
+/// window?" — and answers it for some sixty prompt variants (Scry, Discard,
+/// Search, …). Reusing it here would suppress the CR 704.5 SBAs across every one
+/// of them, a behavior change with nothing to do with an in-flight ENTRY. It
+/// also cannot express the other half of this gate: `pending_replacement`, which
+/// is a parked event rather than a `WaitingFor` variant at all.
 fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
     state.pending_replacement.is_some()
         || matches!(
