@@ -15,7 +15,7 @@ use crate::types::game_state::{
     MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
     StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId};
+use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -5757,15 +5757,15 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
         // opponent's Solemnity would prevent the counters) must still complete the
         // parked activation instead of wedging, so `LoyaltyActivation` is eligible
-        // at the Prevented boundary as well. `GetPlayerCountersUnlessPayment` is
-        // eligible here too: a prevented Ward player-counter payment is a FAILED
-        // cost (CR 702.21a) that must counter the guarded ability, not wedge.
+        // at the Prevented boundary as well. Counter-addition unless payments
+        // are eligible here too: a prevented counter placement fails the cost
+        // (CR 118.3) and must resolve the pending unless branch, not wedge.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -5780,7 +5780,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
                     | PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::LoyaltyActivation { .. }
-                    | PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             )
         ),
         CostMoveDrainBoundary::PriorityBoundary => matches!(
@@ -5854,9 +5854,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         super::planeswalker::resume_loyalty_activation(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::GetPlayerCountersUnlessPayment { .. })
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
     ) {
-        engine_payment_choices::resume_get_player_counters_unless_payment(
+        engine_payment_choices::resume_counter_addition_unless_payment(
             state,
             events,
             matches!(boundary, CostMoveDrainBoundary::ReplacementDelivered { .. }),
@@ -6742,9 +6742,32 @@ fn finalize_copy_retarget(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let changed_pins = state
+        .stack
+        .iter()
+        .find(|entry| entry.id == copy_id)
+        .and_then(|entry| entry.ability())
+        .map(|ability| {
+            ability
+                .targets
+                .iter()
+                .zip(targets.iter())
+                .filter(|(old, new)| ability.retarget_target_requires_pin_refresh(old, new, state))
+                .filter_map(|(_, target)| match target {
+                    TargetRef::Object(id) => {
+                        state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                    }
+                    TargetRef::Player(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
+            for pin in changed_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -11729,8 +11752,31 @@ fn apply_retarget(
     }
 
     if stack_entry_index < state.stack.len() {
+        let target_pins: Vec<_> = state
+            .stack
+            .get(stack_entry_index)
+            .and_then(|entry| entry.ability())
+            .map(|ability| {
+                current_targets
+                    .iter()
+                    .zip(new_targets.iter())
+                    .filter(|(old, new)| {
+                        ability.retarget_target_requires_pin_refresh(old, new, state)
+                    })
+                    .filter_map(|(_, target)| match target {
+                        TargetRef::Object(id) => {
+                            state.objects.get(id).map(ObjectIncarnationRef::from_object)
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(ability) = state.stack[stack_entry_index].ability_mut() {
             ability.targets = new_targets;
+            for pin in target_pins {
+                ability.update_selected_target_incarnation(pin);
+            }
         }
     } else {
         return Err(EngineError::InvalidAction(
@@ -15916,7 +15962,16 @@ mod stage2_injector_tests {
                 }
                 if test_file || spans.iter().any(|(a, b)| (*a..=*b).contains(&n)) {
                     in_test += 1;
-                } else if line.contains("waiting_for = ") || line.contains("Ok(Some(") {
+                } else if line.contains("waiting_for = ")
+                    || line.contains("Ok(Some(")
+                    // `install_direct_choice_frame` owns the actual
+                    // `state.waiting_for` write. Its typed prompt argument is
+                    // still a production mint, not a reader; the call sits
+                    // within this bounded argument expression.
+                    || lines[n.saturating_sub(32)..n]
+                        .iter()
+                        .any(|prior| prior.contains(".install_direct_choice_frame("))
+                {
                     producers.push(format!("{rel}:{}", n + 1));
                 } else {
                     readers.push(format!("{rel}:{}", n + 1));
@@ -16035,38 +16090,12 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                //
-                // Issue #5904 (CR 303.4f Aura token copies): `:6300/:6377/:9570 ⇒
-                // `:6331/:6408/:9601`, a UNIFORM +31. LOCAL, not upstream, so the
-                // CI-vs-local diagnosis in the header does not apply. Accounted
-                // hunk by hunk from `git diff -U0` on `effects/mod.rs`: the seven
-                // hunks in the `2873..2969` predicate block sum to exactly +31
-                // (−20 collapsing the hand-rolled
-                // `quantity_{expr,ref}_depends_on_zone_change_this_way` recursion
-                // into the shared `quantity_ref_population_filter` +
-                // `quantity_expr_counts_population_matching` pair, then +8/−2/+13
-                // for those two new helpers and the
-                // `filter_contains_last_created` wrapper, then +32 for
-                // `condition_depends_on_last_created` and its doc), and they sit
-                // above ALL THREE producers. The unit's only other hunks in this
-                // file are at `:10816`/`:10831` (+13, the `last_created`
-                // deferral arm and its comment), i.e. BELOW all three; whole-file
-                // delta is +44, so nothing else moved them. Predicted
-                // `6300+31`/`6377+31`/`9570+31` equal the observed coordinates
-                // exactly. Identity re-established, not assumed: each producer at
-                // its new coordinate is sha256-identical to
-                // `HEAD:effects/mod.rs` at its old one (`a8512b40…`, `82c6c569…`,
-                // `eb2d5e19…`) and each is still inside the enclosing function
-                // this row NAMES — `drive_sequential_repeated_optional_payment`,
-                // `resolve_repeated_optional_payment_choice`,
-                // `resolve_chain_body`. Set preservation: the two asserts above
-                // ran GREEN on the run that caught this (total still 37,
-                // partition still 5/7/25), and the other two entries did not move
-                // at all. Nothing this unit adds mints an `OptionalEffect` prompt
-                // — the one prompt it does add is `ReturnAsAuraTarget`.
+                // #5904 adds the Aura-token host prompt and shifts these existing
+                // producers. Re-pinned against the merged source; this remains
+                // coordinate evidence only, not a sixth prompt producer.
                 "game/effects/mod.rs:6331".to_string(),
                 "game/effects/mod.rs:6408".to_string(),
-                "game/effects/mod.rs:9601".to_string(),
+                "game/effects/mod.rs:9607".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -16384,7 +16413,7 @@ mod stage2_injector_tests {
                 //
                 // SET PRESERVATION: unchanged. Upstream adds no line matching the needle to this file and
                 // neither does this branch — total still 37, partition still 5/7/25.
-                "game/engine.rs:11942".to_string(),
+                "game/engine.rs:11988".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \
