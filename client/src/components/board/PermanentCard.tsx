@@ -517,6 +517,14 @@ export const PermanentCard = memo(function PermanentCard({
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
   const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
+  // What the fan will actually put on screen, for the `⧉` control's label. While
+  // an interaction is live `AttachmentFan` builds its cards from the projection's
+  // children, not from `obj.attachments`, so counting the raw snapshot here would
+  // promise more cards than the fan shows (an Aura + an Equipment where only the
+  // Equipment is a legal choice reads "2 attached cards" over a one-card fan) —
+  // and would rediscover from the snapshot exactly what the note above forbids.
+  const attachmentFanCardCount =
+    interactionAttachmentFan?.children.length ?? obj.attachments.length;
   const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
   const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
   const hiddenExileCount = exileLinks.length - visibleExileLinks.length;
@@ -684,12 +692,6 @@ export const PermanentCard = memo(function PermanentCard({
       });
     } else if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
-    } else if (attachmentsActionable) {
-      // The host is not a legal choice, but one of its attachments is. Open
-      // the full-card chooser rather than requiring a precise click on an
-      // overlapping attachment peek. The fan derives every selectable card
-      // from the engine's current legal-target set.
-      showAttachmentFan();
     } else if (isActivatable) {
       // THE single authority for "what does a click on this bucket do"
       // (viewmodel/cardActionChoice.ts). Owns the CR 605.1a mana/non-mana
@@ -723,6 +725,25 @@ export const PermanentCard = memo(function PermanentCard({
       }
     } else if (isUndoableTap) {
       dispatchAction({ type: "UntapLandForMana", data: { object_id: objectId } });
+    } else if (attachmentsActionable) {
+      // The host is not a legal choice, but one of its attachments is. Open
+      // the full-card chooser rather than requiring a precise click on an
+      // overlapping attachment peek. The fan derives every selectable card
+      // from the engine's current legal-target set.
+      //
+      // Placed after the host's own target / activation / undo intent for the
+      // same reason the affordance-set branch below is placed last: the premise
+      // "the host is not a legal choice" is not something this branch can see.
+      // During Priority `HumanResponseModel::ExactCandidates` publishes a fan for
+      // EVERY activatable attachment, so the fan's existence says nothing about
+      // the host — and while this sat above `isActivatable`, a creature with its
+      // own ability was unreachable whenever an Aura or Equipment on it was also
+      // activatable. The fan cannot stand in for the host either: it excludes the
+      // host by design (`AttachmentFan.tsx`, `id !== host.id`), so the host's
+      // ability had no path at all. Reported for Slumbering Keepguard under
+      // Cooped Up, whose `{2}{W}` is legitimately activatable from the
+      // battlefield — no engine defect required.
+      showAttachmentFan();
     } else if (
       obj.attachments.some(
         (attachId) => activatableObjectIds.has(attachId) || manaTappableObjectIds.has(attachId),
@@ -1106,7 +1127,39 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {obj.attachments.length === 1 && (
+      {/* The explicit route into the fan, and the ONLY one once the host's own
+          click belongs to the host (see the `attachmentsActionable` branch). The
+          `+N` control above covers the collapsed case and this covers the
+          expanded one — `attachmentsExpanded` is the same predicate `+N` is
+          derived from, so the two are complementary by construction and exactly
+          one entry point renders in every state.
+          Was `length === 1`, which left a host with SEVERAL expanded attachments
+          with no entry point at all — the state Priority produces, because
+          `attachmentsActionable` is itself one of the disjuncts that expands the
+          stack, and each attachment is then reachable only through a ~22px peek
+          rendered behind the host face.
+          Two states the gate deliberately leaves without a control, so the
+          "complementary" claim above is not unconditional: with no attachments
+          neither renders and none is needed, and on a NESTED host the button is
+          painted inside the peek wrapper's `zIndex: 5 - i` and so sits under the
+          parent's card face, focus ring included — the working fallback there is
+          that host's OWN peek, which opens a fan keyed to it, and since a fan
+          lists a host plus its direct children that is one hop per level and
+          therefore enough.
+          The size is left exactly as it was, deliberately. This control is now
+          the pointer route where the host's own click used to open the fan, and
+          at `clamp(20px, …, 28px)` it is under the 44px floor the branch above
+          cites — but 44px is not reachable here. Battlefield cards sit in an
+          8px gap (`BattlefieldRow.tsx:176`, `const gap = 8`) and `--card-base`
+          floors at 3.5rem, so at `-left-2.5` the badge already overhangs the
+          gap; growing outward to 44px would put ~26px over the NEIGHBOUR's face
+          at `z-40` and steal its clicks, and growing inward would swallow most
+          of a 56px card — either way re-creating, in miniature, the click theft
+          this branch exists to undo. A sub-44px target that takes only its own
+          corner is the better trade; the floor needs a layout-level answer
+          (badge sizes are shared with `+N` and the group-expand control at
+          `GroupedPermanent.tsx:279`, which caps its own overhang at 12px). */}
+      {obj.attachments.length > 0 && attachmentsExpanded && (
         <button
           type="button"
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
@@ -1115,8 +1168,8 @@ export const PermanentCard = memo(function PermanentCard({
             height: attachmentBadgeSize,
             fontSize: attachmentBadgeFontSize,
           }}
-          title={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
-          aria-label={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
+          title={t("permanent.viewAttachmentsFor", { count: attachmentFanCardCount, name: obj.name })}
+          aria-label={t("permanent.viewAttachmentsFor", { count: attachmentFanCardCount, name: obj.name })}
           onPointerDown={(event) => event.stopPropagation()}
           onClick={openAttachmentFan}
         >
