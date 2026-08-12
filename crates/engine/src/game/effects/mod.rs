@@ -2874,16 +2874,50 @@ fn filter_contains_last_created(filter: &TargetFilter) -> bool {
     crate::game::filter::filter_contains_last_created(filter)
 }
 
-/// The object-population `TargetFilter` a `QuantityRef` counts over, if it
-/// counts over one at all.
+/// Whether the object population a `CardTypeSetSource` reads is selected by a
+/// filter satisfying `filter_pred`.
+///
+/// Exhaustive: the three non-`Objects` sources name a zone, the source's exile
+/// set, or a tracked set, none of which carries a `TargetFilter`.
+fn card_type_set_source_counts_population_matching(
+    source: &crate::types::ability::CardTypeSetSource,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    use crate::types::ability::CardTypeSetSource;
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_pred(filter),
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
+}
+
+/// Whether the population `qty` counts over is selected by a `TargetFilter`
+/// satisfying `filter_pred`.
 ///
 /// Single enumeration of the "this ref reads a population" variant set, shared
 /// by every predicate that asks whether a magnitude depends on a particular
 /// resolution-local anaphor ledger (`LastZoneChanged`, `LastCreated`, …).
-/// Without it each such predicate re-listed the same eleven variants and a new
+/// Without it each such predicate re-listed the same variants and a new
 /// population-counting `QuantityRef` had to be threaded once per predicate.
-fn quantity_ref_population_filter(qty: &QuantityRef) -> Option<&TargetFilter> {
+///
+/// EXHAUSTIVE, no `_` arm. The wildcard this replaced classified every unlisted
+/// variant as filter-free, which was wrong for thirteen variants that already
+/// carried one (`SacrificedThisTurn`, `ZoneChangeCountThisTurn`,
+/// `DamageDealtThisTurn`, `TokensCreatedThisTurn`, …) and would have been wrong
+/// by default for every future one. A new `QuantityRef` now has to be classified
+/// here before it compiles, which is the point: "does this magnitude read a
+/// population?" is a decision, not a default.
+///
+/// Returning a predicate rather than an `Option<&TargetFilter>` is what lets
+/// `DamageDealtThisTurn` report BOTH of its filters; a single-filter accessor
+/// structurally could not.
+fn quantity_ref_counts_population_matching(
+    qty: &QuantityRef,
+    filter_pred: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
     match qty {
+        // Owned `TargetFilter` naming the counted population.
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
@@ -2893,28 +2927,112 @@ fn quantity_ref_population_filter(qty: &QuantityRef) -> Option<&TargetFilter> {
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
-        QuantityRef::DistinctCardTypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. } => filter_pred(filter),
+        // Same, under a field named for what it selects rather than `filter`.
+        QuantityRef::CounterAddedThisTurn { target, .. } => filter_pred(target),
+        // Boxed.
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_pred(filter),
+        // Optional narrowing on an otherwise unfiltered count.
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            filter.as_ref().is_some_and(filter_pred)
         }
-        | QuantityRef::DistinctSubtypes {
-            source: crate::types::ability::CardTypeSetSource::Objects { filter },
-            ..
-        } => Some(filter),
-        _ => None,
+        // CR 120.1 + CR 120.2: two independent populations — what dealt the damage
+        // and what received it. Either one can carry the anaphor.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_pred(source) || filter_pred(target)
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. } => {
+            card_type_set_source_counts_population_matching(source, filter_pred)
+        }
+        // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
+        // resolution/turn counters, and cost bookkeeping.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::TrackedSetAggregate { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
     }
 }
 
 /// Whether any magnitude in `expr` counts a population selected by a filter
 /// satisfying `filter_pred`. Traversal delegates to `QuantityExpr::any_ref`
 /// (the single composition-form authority) and the variant set to
-/// [`quantity_ref_population_filter`].
+/// [`quantity_ref_counts_population_matching`].
 fn quantity_expr_counts_population_matching(
     expr: &QuantityExpr,
     filter_pred: &dyn Fn(&TargetFilter) -> bool,
 ) -> bool {
     quantity_expr_any_ref(expr, &mut |qty| {
-        quantity_ref_population_filter(qty).is_some_and(filter_pred)
+        quantity_ref_counts_population_matching(qty, filter_pred)
     })
 }
 
@@ -29380,5 +29498,83 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+    /// CR 608.2c: the deferral gate asks whether a gated sub-ability's CONDITION
+    /// reads a resolution-local anaphor ledger. That question is answered by
+    /// walking every `TargetFilter` a `QuantityRef` counts over — and the
+    /// wildcard this replaced answered "no filter" for thirteen variants that
+    /// already carried one, so a magnitude like "damage dealt this turn by the
+    /// token created this way" silently read as anaphor-free and the trailing
+    /// sentence evaluated against a stale ledger mid-prompt.
+    ///
+    /// One representative per shape the exhaustive match had to classify: a
+    /// two-filter variant, an optional filter, a boxed filter, and a differently
+    /// named field.
+    #[test]
+    fn population_predicate_sees_filters_the_wildcard_arm_used_to_swallow() {
+        let counts = |qty: QuantityRef| {
+            condition_depends_on_last_created(&AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref { qty },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        };
+        let anaphor = || TargetFilter::LastCreated;
+        let plain = || TargetFilter::Typed(TypedFilter::creature());
+
+        // Two independent populations: either side carries the anaphor.
+        assert!(counts(QuantityRef::DamageDealtThisTurn {
+            source: Box::new(anaphor()),
+            target: Box::new(plain()),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: Default::default(),
+            channel: DamageChannel::Total,
+        }));
+        assert!(counts(QuantityRef::DamageDealtThisTurn {
+            source: Box::new(plain()),
+            target: Box::new(anaphor()),
+            aggregate: AggregateFunction::Sum,
+            group_by: None,
+            damage_kind: Default::default(),
+            channel: DamageChannel::Total,
+        }));
+        // Optional narrowing filter.
+        assert!(counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: Some(anaphor()),
+        }));
+        // Boxed filter.
+        assert!(counts(QuantityRef::TargetObjectManaValue {
+            filter: Box::new(anaphor()),
+        }));
+        // Field named for what it selects rather than `filter`.
+        assert!(counts(QuantityRef::CounterAddedThisTurn {
+            actor: crate::types::ability::CountScope::Controller,
+            counters: CounterMatch::Any,
+            target: anaphor(),
+        }));
+        // Nested one level down through a compound, and through the
+        // `ChosenDamageSource` inner filter the traversal used to skip.
+        assert!(counts(QuantityRef::TokensCreatedThisTurn {
+            player: PlayerScope::Controller,
+            filter: TargetFilter::ChosenDamageSource {
+                filter: Some(Box::new(anaphor())),
+            },
+        }));
+
+        // Negatives: the same variants without the anaphor, and a genuinely
+        // filter-free ref.
+        assert!(!counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: Some(plain()),
+        }));
+        assert!(!counts(QuantityRef::SpellsCastThisTurn {
+            scope: crate::types::ability::CountScope::Controller,
+            filter: None,
+        }));
+        assert!(!counts(QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        }));
     }
 }

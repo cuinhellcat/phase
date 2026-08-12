@@ -1521,21 +1521,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     )
 }
 
-/// CR 303.4g: what "there is no legal object or player for it to enchant" means
-/// for THIS entrant.
-///
-/// The rule splits on exactly one property — "If the Aura is a token, it isn't
-/// created" — so this is selected from the object's own CR 111.1 `is_token`
-/// flag and nothing else. A typed pair rather than a `bool` so both dispositions
-/// carry their rule at the use site.
-enum UnhostedAuraEntry {
-    /// The entrant is a token: it isn't created at all.
-    NotCreated,
-    /// The entrant is card-backed: it is already on the battlefield and cannot
-    /// be un-entered, so it stays there unattached and CR 704.5m sweeps it.
-    EnterUnattached,
-}
-
 /// CR 303.4g: undo a token battlefield entry that CR 303.4g says never happened.
 ///
 /// The inverse of the `state.objects.insert` + `zones::add_to_zone` pair
@@ -1549,11 +1534,41 @@ pub(crate) fn uncreate_unentered_aura_token(
     object_id: ObjectId,
     owner: PlayerId,
 ) {
-    // allow-raw-zone: this is the un-entry of a token that CR 303.4g says was
-    // never created, not a CR 400.7 zone change — there is no destination zone
-    // and no `ZoneChanged` to emit.
+    // The annotation has to sit on the mover line or the line directly above it
+    // (`scripts/zone_authority_census.py::census_file`), so the rationale is
+    // stated once here and the annotation itself is the one-liner below.
+    //
+    // This is the un-entry of a token that CR 303.4g says was never created, not
+    // a CR 400.7 zone change: there is no from-zone, no destination zone, and
+    // nothing may observe it — the whole point is that no `ZoneChanged`,
+    // `TokenCreated`, or CR 733 birth record is produced for an entry the rules
+    // deny. Routing it through `zone_pipeline` would manufacture exactly the
+    // observable event this arm exists to suppress.
+    // allow-raw-zone: undoes a CR 303.4g-denied token entry; not a CR 400.7 zone change, so no ZoneChanged may be emitted.
     zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
     state.objects.remove(&object_id);
+}
+
+/// CR 303.4g: deny a CARD-BACKED entrant's battlefield entry and put it into its
+/// owner's graveyard.
+///
+/// Sibling of [`uncreate_unentered_aura_token`] for the entrant the token clause
+/// does not cover. See `zone_pipeline::unhosted_aura_entry` for why the liminal
+/// seam's card-backed arm takes the graveyard disposition: the entrant has no
+/// prior zone to "remain" in, and the card must not simply cease to exist.
+fn place_unentered_aura_in_owners_graveyard(
+    state: &mut GameState,
+    object_id: ObjectId,
+    owner: PlayerId,
+) {
+    // allow-raw-zone: rewinds a CR 303.4g-denied battlefield entry; the entry never happened, so no ZoneChanged may be emitted.
+    zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
+    if let Some(object) = state.objects.get_mut(&object_id) {
+        // allow-raw-zone: places a CR 303.4g-denied entrant in its owner's graveyard; the denied entry is not a replaceable CR 400.7 event.
+        object.zone = Zone::Graveyard;
+    }
+    // allow-raw-zone: pairs with the zone assignment directly above for the same CR 303.4g-denied entry.
+    zones::add_to_zone(state, object_id, Zone::Graveyard, owner);
 }
 
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
@@ -1637,15 +1652,17 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         }
     });
 
-    // CR 303.4g: what "no legal host" means for THIS entrant. Selected from the
-    // object's own `is_token` (CR 111.1), which is exactly the discriminator the
-    // rule names — so `LiminalEntryKind::Meld`, a card-backed entrant, routes to
-    // `EnterUnattached` without a special case.
-    let unhosted_entry = if entry.object.is_token {
-        UnhostedAuraEntry::NotCreated
-    } else {
-        UnhostedAuraEntry::EnterUnattached
-    };
+    // CR 303.4g: what "no legal host" means for THIS entrant, decided from the
+    // liminal projection BEFORE it is installed. `ProposedEvent::TokenEntry`
+    // carries no from-zone — the entrant is a set of characteristics no zone list
+    // holds — so the origin is `NoPriorZone` and the shared authority in
+    // `zone_pipeline` maps it: a token isn't created, a card-backed entrant is put
+    // into its owner's graveyard. Neither may enter unattached and be left to the
+    // CR 704.5m state-based action; the rule denies the entry itself.
+    let unhosted_entry = crate::game::zone_pipeline::unhosted_aura_entry(
+        &entry.object,
+        crate::game::zone_pipeline::UnhostedAuraOrigin::NoPriorZone,
+    );
 
     state.objects.insert(entry_ref, entry.object);
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
@@ -1668,18 +1685,42 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     };
 
     // CR 303.4g: "If an Aura is entering the battlefield and there is no legal
-    // object or player for it to enchant … If the Aura is a token, it isn't
-    // created." Un-enter it before anything observes it: no CR 733 birth record,
-    // no `TokenCreated`, no battlefield `ZoneChanged`, no `last_created_token_ids`
-    // row, and — the observable difference from letting the CR 704.5m
-    // unattached-Aura SBA sweep it — nothing in the owner's graveyard.
+    // object or player for it to enchant, the Aura remains in its current zone,
+    // unless that zone is the stack. In that case, the Aura is put into its
+    // owner's graveyard instead of entering the battlefield. If the Aura is a
+    // token, it isn't created."
+    //
+    // EVERY disposition denies the entry — there is no arm that lets the entrant
+    // stay on the battlefield unattached for the CR 704.5m state-based action to
+    // sweep, because the rule says this entry never happens. Rewound before
+    // anything observes it: no CR 733 birth record (`birth_command` is still
+    // unrecorded here), no `TokenCreated`, no battlefield `ZoneChanged`, and no
+    // `last_created_token_ids` row.
     if matches!(
         &hosts,
         crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
             if legal_targets.is_empty()
-    ) && matches!(unhosted_entry, UnhostedAuraEntry::NotCreated)
-    {
-        uncreate_unentered_aura_token(state, entry_ref, owner);
+    ) {
+        match unhosted_entry {
+            // CR 303.4g + CR 111.1: "it isn't created" — and, unlike the CR 704.5m
+            // sweep it replaces, nothing lands in the owner's graveyard either.
+            crate::game::zone_pipeline::UnhostedAuraEntry::NotCreated => {
+                uncreate_unentered_aura_token(state, entry_ref, owner);
+            }
+            // Card-backed. Not reachable from any production caller today — the
+            // only production producer of `ProposedEvent::TokenEntry` is the
+            // liminal copy-token seam in `token_copy.rs`, whose
+            // `materialize_token_copy_body` sets `is_token` — but handled rather
+            // than assumed away, because the seam's contract is a `GameObject`
+            // and nothing in the type forbids a card-backed one. `NoPriorZone`
+            // cannot yield `RemainInCurrentZone`, so both remaining arms are the
+            // graveyard; they are listed exhaustively so a future origin that
+            // does yield it forces a decision here.
+            crate::game::zone_pipeline::UnhostedAuraEntry::OwnersGraveyard
+            | crate::game::zone_pipeline::UnhostedAuraEntry::RemainInCurrentZone => {
+                place_unentered_aura_in_owners_graveyard(state, entry_ref, owner);
+            }
+        }
         // CR 111.1 + CR 603.7: the anaphora slot still has to be republished, or
         // the batch continuation (which reads it back to seed the next token's
         // `created_ids`) would carry whatever an EARLIER, unrelated effect left
@@ -1700,9 +1741,8 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     }
 
     match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
-        // `NoLegalHost` reaches here only for a non-token entrant (the token
-        // arm returned above): a card-backed Aura is already on the
-        // battlefield and cannot be un-entered, so CR 704.5m owns it.
+        // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
+        // returned for every entrant, card-backed included.
         crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
         | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
         | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
@@ -7227,6 +7267,139 @@ mod tests {
             1,
             "the token effect should resolve once after the paused batch finishes"
         );
+    }
+
+    /// CR 303.4g on the liminal seam, for BOTH dispositions: an unhosted entrant
+    /// never enters, and what happens instead is selected by CR 111.1 token-ness.
+    ///
+    /// The card-backed half is not reachable from a production caller today (the
+    /// only production producer of `ProposedEvent::TokenEntry` is the liminal
+    /// copy-token seam in `token_copy.rs`, whose `materialize_token_copy_body`
+    /// sets `is_token`), which is precisely why it is pinned here: the seam takes
+    /// a `GameObject`, nothing in that type forbids a card-backed one, and the
+    /// arm it used to take — enter unattached and wait for the CR 704.5m
+    /// state-based action — is an entry CR 303.4g says never happens.
+    #[test]
+    fn an_unhosted_liminal_aura_entrant_never_enters_whatever_its_token_ness() {
+        use crate::types::game_state::LiminalEntry;
+        use crate::types::keywords::Keyword;
+
+        // `is_token` selects the disposition; everything else is identical.
+        for is_token in [true, false] {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Maker".to_string(),
+                Zone::Battlefield,
+            );
+
+            // The entrant: an Aura with `Enchant creature` in a game with no
+            // creature anywhere, so the CR 303.4f consult finds no legal host.
+            let (entry_ref, mut entrant) =
+                reserve_liminal_token_object(&mut state, PlayerId(0), "Unhosted Aura".to_string());
+            entrant.is_token = is_token;
+            entrant.card_types.core_types = vec![CoreType::Enchantment];
+            entrant.card_types.subtypes = vec!["Aura".to_string()];
+            entrant.base_card_types = entrant.card_types.clone();
+            let enchant = Keyword::Enchant(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::new(
+                    crate::types::ability::TypeFilter::Creature,
+                ),
+            ));
+            entrant.keywords = vec![enchant.clone()];
+            entrant.base_keywords = vec![enchant];
+            let timestamp = state.next_timestamp();
+            entrant.reset_for_battlefield_entry(state.turn_number, timestamp);
+
+            state.liminal_entries.insert(
+                entry_ref,
+                LiminalEntry {
+                    object: entrant,
+                    name: "Unhosted Aura".to_string(),
+                    source_id,
+                    controller: PlayerId(0),
+                    enters_attacking: false,
+                    attach_to: None,
+                    sacrifice_at: None,
+                    remaining_count: 0,
+                    created_ids: Vec::new(),
+                    copy_resume: None,
+                    spec_resume: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    kind: crate::types::game_state::LiminalEntryKind::Token,
+                    replacement_applied: std::collections::HashSet::new(),
+                },
+            );
+
+            let mut events = Vec::new();
+            assert!(
+                commit_liminal_token_entry_with_post_actions(
+                    &mut state,
+                    ProposedEvent::TokenEntry {
+                        entry_ref,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enter_with_counters: Vec::new(),
+                        applied: std::collections::HashSet::new(),
+                    },
+                    &mut events,
+                    TokenEntryEventEmission::Emit,
+                    Vec::new(),
+                ),
+                "a denied entry is not a pause — the batch loop must continue"
+            );
+
+            // Shared by both dispositions: the entry never happened, and nothing
+            // observed one.
+            assert!(
+                !state.battlefield.iter().any(|&id| id == entry_ref),
+                "CR 303.4g: the unhosted Aura must not be on the battlefield \
+                 (is_token = {is_token})"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref
+                )),
+                "CR 303.4g: no TokenCreated for an entry the rule denies"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        to: Zone::Battlefield,
+                        ..
+                    } if *object_id == entry_ref
+                )),
+                "CR 303.4g: no battlefield ZoneChanged for an entry the rule denies"
+            );
+
+            if is_token {
+                // CR 303.4g + CR 111.1: "it isn't created" — and, unlike the
+                // CR 704.5m sweep it replaces, nothing reaches any graveyard.
+                assert!(
+                    !state.objects.contains_key(&entry_ref),
+                    "a token CR 303.4g denies is not created at all"
+                );
+                assert!(state.players[0].graveyard.is_empty());
+            } else {
+                // CR 303.4g: a card-backed entrant is not destroyed — it is put
+                // into its owner's graveyard, the rule's own non-battlefield
+                // outcome for an entrant with nowhere to remain.
+                assert_eq!(
+                    state.objects[&entry_ref].zone,
+                    Zone::Graveyard,
+                    "a card-backed entrant CR 303.4g denies goes to its owner's graveyard"
+                );
+                assert!(
+                    state.players[0].graveyard.iter().any(|&id| id == entry_ref),
+                    "the owner's graveyard actually holds it"
+                );
+            }
+        }
     }
 
     #[test]

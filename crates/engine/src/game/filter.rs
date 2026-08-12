@@ -1488,20 +1488,93 @@ pub(crate) fn controller_ref_player(
         ControllerRef::ActivePlayer => Some(state.active_player),
     }
 }
+/// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
+///
+/// The single authority for `TargetFilter`'s recursive shape. Every predicate
+/// that asks "does this filter mention X anywhere" routes here instead of
+/// re-listing the nesting variants, because a predicate that lists them itself
+/// lists them from memory: `filter_contains_last_zone_changed` and its
+/// `last_created` twin both omitted `ChosenDamageSource`'s optional inner filter,
+/// so a `LastCreated` nested one level inside it read as absent.
+///
+/// The match is EXHAUSTIVE on purpose — no `_` arm. A `_ => false` silently
+/// classifies every future variant as a leaf, which is how that omission
+/// survived; with the wildcard gone, a new nesting variant does not compile until
+/// someone decides which side of this match it belongs on. The nesting set here
+/// is the same five `normalize_contextual_filter` recurses through, which is the
+/// other end of the same shape.
+pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
+    if leaf(filter) {
+        return true;
+    }
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(recurse),
+        TargetFilter::Not { filter } => recurse(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => recurse(filter),
+        // CR 609.7a: the source a "source of your choice" effect chose. CR 609.7b:
+        // the optional inner filter is the "red source"-style quality the shield
+        // rechecks, so it is a real nested filter. The `None` case ("a source of
+        // your choice", unqualified) is a leaf.
+        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
+        // Leaves: no nested `TargetFilter` to descend into.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(_)
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
 /// Whether `filter` references the resolution-local `last_zone_changed_ids`
 /// ledger population (bare or nested inside compound filters).
 pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::LastZoneChanged => true,
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_contains_last_zone_changed)
-        }
-        TargetFilter::Not { filter } => filter_contains_last_zone_changed(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_contains_last_zone_changed(filter)
-        }
-        _ => false,
-    }
+    filter_contains(filter, &|inner| {
+        matches!(inner, TargetFilter::LastZoneChanged)
+    })
 }
 
 /// Whether `filter` references the resolution-local `last_created_token_ids`
@@ -1512,15 +1585,7 @@ pub(crate) fn filter_contains_last_zone_changed(filter: &TargetFilter) -> bool {
 /// same recursion set, different published ledger. Kept beside it so the two
 /// resolution-local anaphors stay discoverable as one pair.
 pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::LastCreated => true,
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_contains_last_created)
-        }
-        TargetFilter::Not { filter } => filter_contains_last_created(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => filter_contains_last_created(filter),
-        _ => false,
-    }
+    filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -10469,6 +10534,46 @@ mod tests {
         assert!(!matches_target_filter(&state, attacker, &filter, attacker));
         assert!(!matches_target_filter(&state, newcomer, &filter, attacker));
         assert!(matches_target_filter(&state, veteran, &filter, attacker));
+    }
+
+    /// The nesting set `filter_contains` recurses through must match the one
+    /// `normalize_contextual_filter` rewrites through, or a filter that
+    /// normalization reaches is one the anaphor predicates cannot see.
+    /// `ChosenDamageSource`'s optional inner filter was exactly that gap: reached
+    /// by normalization, invisible to both `filter_contains_*` predicates, so a
+    /// nested `LastCreated` read as absent and the CR 608.2c deferral gate it
+    /// feeds let a prompt-suspended sub-ability evaluate against a stale ledger.
+    #[test]
+    fn filter_contains_recurses_through_a_chosen_damage_sources_inner_filter() {
+        let nested = |inner: TargetFilter| TargetFilter::ChosenDamageSource {
+            filter: Some(Box::new(inner)),
+        };
+
+        assert!(
+            filter_contains_last_created(&nested(TargetFilter::LastCreated)),
+            "a LastCreated nested inside ChosenDamageSource must be seen"
+        );
+        assert!(
+            filter_contains_last_zone_changed(&nested(TargetFilter::LastZoneChanged)),
+            "the LastZoneChanged twin has the same nesting set"
+        );
+        // Two levels down, through an intervening compound.
+        assert!(filter_contains_last_created(&nested(TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::LastCreated),
+                },
+            ],
+        })));
+        // Negative: the same shape without the anaphor, and the bare `None` form
+        // (which is a leaf, not a missed recursion).
+        assert!(!filter_contains_last_created(&nested(TargetFilter::Typed(
+            TypedFilter::creature()
+        ))));
+        assert!(!filter_contains_last_created(
+            &TargetFilter::ChosenDamageSource { filter: None }
+        ));
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
-use crate::game::game_object::AttachTarget;
+use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
 
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
@@ -1828,8 +1828,28 @@ pub(crate) fn apply_zone_delivery_tail(
     ZoneDeliveryResult::Done
 }
 
+/// CR 614.12 + CR 303.4f: the characteristics the CR 303.4f/g consult must read
+/// for `object_id` — "the characteristics of the permanent as it would exist on
+/// the battlefield".
+///
+/// A liminal entry IS that projection, and while it is pending the object still
+/// stored under the same id is the entrant's PRE-entry self: for a meld
+/// (`LiminalEntryKind::Meld`) that is the exiled front-face component card, which
+/// is not an Aura and carries none of the result face's `Enchant` abilities.
+/// Reading `state.objects` alone therefore made the consult blind to every
+/// card-backed liminal Aura entrant. Same dual lookup, in the same precedence,
+/// that the intrinsic enter-with-counters seeding in
+/// `consult_and_deliver_zone_change` and `copy_effect_for_source` already use.
+fn entering_object_projection(state: &GameState, object_id: ObjectId) -> Option<&GameObject> {
+    state
+        .liminal_entries
+        .get(&object_id)
+        .map(|entry| &entry.object)
+        .or_else(|| state.objects.get(&object_id))
+}
+
 fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {
-    let obj = state.objects.get(&object_id)?;
+    let obj = entering_object_projection(state, object_id)?;
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         return None;
     }
@@ -1889,6 +1909,18 @@ fn legal_aura_attachment_targets(
         // `matches_target_filter`, never the `find_legal_targets` enumerator, so
         // hexproof (CR 702.11) / shroud (CR 702.18) never remove a legal host.
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
+        // CR 701.3a + CR 702.16c: host-side prohibitions and protection.
+        //
+        // NARROWING, deliberate and named: `attachment_illegality` reads the
+        // ATTACHMENT from `state.objects`. For a liminal entrant that id still
+        // holds the pre-entry object (a meld's exiled component card), so the
+        // attachment-side halves of that check — "is the attacher an Aura", and
+        // the protection quality match — read pre-entry characteristics. The
+        // effect is only ever permissive (a non-Aura attacher skips both), never
+        // restrictive, and it is strictly better than the prior behaviour on this
+        // path, which ran no CR 303.4f/g consult at all. Closing it needs the
+        // entrant projection threaded through `attach.rs`, which is a wider
+        // single-authority change than this seam should make.
         .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
         .map(TargetRef::Object)
         .collect();
@@ -1914,6 +1946,65 @@ fn legal_aura_attachment_targets(
     }));
 
     targets
+}
+
+/// Where a CR 303.4g entrant would "remain", for a seam that is deciding an
+/// Aura's fate BEFORE the entry happens.
+///
+/// The rule's non-token dispositions are both phrased against the zone the Aura
+/// is entering from, so a caller must state which it has. A liminal projection
+/// has none: the entrant is a set of characteristics that no zone list holds yet.
+pub(crate) enum UnhostedAuraOrigin {
+    /// A CR 400.7 zone change: the `from` zone of the approved event.
+    Zone(Zone),
+    /// A liminal entry (`ProposedEvent::TokenEntry`): the entrant exists in no
+    /// zone, so there is nothing for it to "remain" in.
+    NoPriorZone,
+}
+
+/// CR 303.4g: the fate of an Aura that is entering the battlefield when "there
+/// is no legal object or player for it to enchant".
+///
+/// Three outcomes, because the rule states three — and NONE of them is "enter
+/// unattached and let the CR 704.5m state-based action sweep it". The rule
+/// denies the entry itself, so a seam that can still decide must decide here;
+/// anything the game could observe of that entry is an event the rules say never
+/// happened.
+pub(crate) enum UnhostedAuraEntry {
+    /// CR 303.4g: "If the Aura is a token, it isn't created."
+    NotCreated,
+    /// CR 303.4g: "the Aura remains in its current zone" — the entry does not
+    /// happen and the card stays exactly where it was.
+    RemainInCurrentZone,
+    /// CR 303.4g: "…unless that zone is the stack. In that case, the Aura is put
+    /// into its owner's graveyard instead of entering the battlefield."
+    OwnersGraveyard,
+}
+
+/// CR 303.4g: select the disposition from the two facts the rule keys on — the
+/// entrant's CR 111.1 token-ness, and where it is entering from.
+///
+/// [`UnhostedAuraOrigin::NoPriorZone`] takes the graveyard arm for a card-backed
+/// entrant: "remains in its current zone" has no referent for an entrant that is
+/// in none, which is the same shape as the stack case the rule already answers
+/// (an object whose pre-entry location cannot hold a permanent card). It is
+/// never the destructive reading — the card is never simply dropped.
+pub(crate) fn unhosted_aura_entry(
+    entrant: &GameObject,
+    origin: UnhostedAuraOrigin,
+) -> UnhostedAuraEntry {
+    // CR 111.1: token-ness is the ONLY discriminator the rule's token clause
+    // names, and it outranks the origin — a token is not created regardless of
+    // where the effect was putting it onto the battlefield from.
+    if entrant.is_token {
+        return UnhostedAuraEntry::NotCreated;
+    }
+    match origin {
+        UnhostedAuraOrigin::Zone(Zone::Stack) | UnhostedAuraOrigin::NoPriorZone => {
+            UnhostedAuraEntry::OwnersGraveyard
+        }
+        UnhostedAuraOrigin::Zone(_) => UnhostedAuraEntry::RemainInCurrentZone,
+    }
 }
 
 /// Disposition of an object that has just become an Aura while already on the
@@ -2235,6 +2326,156 @@ mod entering_aura_attachment_tests {
         let _ = entering_aura_hosts(&state, id);
         assert_eq!(state.objects[&id].attached_to, before.attached_to);
         assert_eq!(state.objects[&id].timestamp, before.timestamp);
+    }
+
+    /// An unattached card-backed Aura in `zone`, with `enchant creature`.
+    fn card_aura(state: &mut GameState, controller: PlayerId, zone: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(90_300),
+            controller,
+            "Card Aura".to_string(),
+            zone,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords.push(Keyword::Enchant(enchant_creature()));
+        obj.base_keywords = obj.keywords.clone();
+        id
+    }
+
+    /// CR 303.4g: "If the Aura is a token, it isn't created." Token-ness outranks
+    /// the origin — a token is never created regardless of where the effect was
+    /// putting it onto the battlefield from.
+    #[test]
+    fn a_token_entrant_is_never_created_whatever_its_origin() {
+        let mut state = GameState::new_two_player(1);
+        let id = aura(&mut state, P0, enchant_creature());
+        let entrant = state.objects[&id].clone();
+
+        for origin in [
+            UnhostedAuraOrigin::NoPriorZone,
+            UnhostedAuraOrigin::Zone(Zone::Stack),
+            UnhostedAuraOrigin::Zone(Zone::Graveyard),
+        ] {
+            assert!(matches!(
+                unhosted_aura_entry(&entrant, origin),
+                UnhostedAuraEntry::NotCreated
+            ));
+        }
+    }
+
+    /// CR 303.4g: a card-backed Aura "remains in its current zone, unless that
+    /// zone is the stack. In that case, the Aura is put into its owner's
+    /// graveyard instead of entering the battlefield." A liminal projection has
+    /// no current zone at all, so it takes the same non-destructive arm.
+    #[test]
+    fn a_card_backed_entrants_disposition_is_selected_by_its_origin() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Graveyard);
+        let entrant = state.objects[&id].clone();
+
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Graveyard)),
+            UnhostedAuraEntry::RemainInCurrentZone
+        ));
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Exile)),
+            UnhostedAuraEntry::RemainInCurrentZone
+        ));
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Stack)),
+            UnhostedAuraEntry::OwnersGraveyard
+        ));
+        assert!(matches!(
+            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::NoPriorZone),
+            UnhostedAuraEntry::OwnersGraveyard
+        ));
+    }
+
+    /// CR 303.4g through the real pipeline: an Aura card put onto the battlefield
+    /// from a NON-stack zone with no legal host remains where it was.
+    #[test]
+    fn unhosted_card_aura_from_a_non_stack_zone_remains_in_that_zone() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Graveyard);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: the Aura remains in its current zone"
+        );
+        assert!(!state.battlefield.iter().any(|&bid| bid == id));
+    }
+
+    /// CR 303.4g's stack exception, through the real pipeline: an Aura put onto
+    /// the battlefield FROM THE STACK with no legal host cannot remain there — it
+    /// goes to its owner's graveyard instead of entering.
+    ///
+    /// This is the assertion that flips when the exception is removed: before the
+    /// fix this path took the same unconditional `Remained` arm as the graveyard
+    /// case above and left the Aura sitting on the stack forever.
+    #[test]
+    fn unhosted_card_aura_from_the_stack_goes_to_its_owners_graveyard() {
+        let mut state = GameState::new_two_player(1);
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Graveyard,
+            "CR 303.4g: a stack-origin unhosted Aura is put into its owner's graveyard"
+        );
+        assert!(
+            state.players[0].graveyard.iter().any(|&gid| gid == id),
+            "the owner's graveyard actually holds it"
+        );
+        assert!(
+            !state.battlefield.iter().any(|&bid| bid == id),
+            "it is put into the graveyard INSTEAD OF entering the battlefield"
+        );
+    }
+
+    /// Reach-guard for the two pipeline tests above: the same move with a legal
+    /// host on the battlefield DOES enter and attach, so their negatives are not
+    /// passing because the entry was blocked somewhere upstream of CR 303.4f/g.
+    #[test]
+    fn a_hosted_card_aura_from_the_stack_enters_and_attaches() {
+        let mut state = GameState::new_two_player(1);
+        let host = creature(&mut state, P0, "Host");
+        let id = card_aura(&mut state, P0, Zone::Stack);
+        let mut events = Vec::new();
+
+        let result = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        );
+
+        assert!(matches!(result, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host)),
+            "CR 303.4f: the sole legal host is attached as the Aura enters"
+        );
     }
 }
 
@@ -3250,8 +3491,15 @@ fn execute_zone_move_with_applied_terminal(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
+            // CR 303.4g: set when the unhosted entrant came from the stack and so
+            // must be put into its owner's graveyard rather than remain. Applied
+            // after the borrow of `event` ends, by rewriting the approved event's
+            // destination — the entry is denied, and the graveyard placement IS
+            // the rule's substitute for it.
+            let mut unhosted_to_owners_graveyard = false;
             if let ProposedEvent::ZoneChange {
                 object_id,
+                from,
                 to: Zone::Battlefield,
                 attach_to,
                 controller_override,
@@ -3260,8 +3508,15 @@ fn execute_zone_move_with_applied_terminal(
             {
                 if attach_to.is_none() {
                     if let Some(enchant_filter) = aura_enchant_filter(state, *object_id) {
+                        // CR 614.12: read the entrant's projected characteristics,
+                        // not the pre-entry object still stored under this id — for
+                        // a meld the latter is the exiled component card and has
+                        // the wrong controller as well as the wrong typeline.
                         let controller = (*controller_override)
-                            .or_else(|| state.objects.get(object_id).map(|obj| obj.controller))
+                            .or_else(|| {
+                                entering_object_projection(state, *object_id)
+                                    .map(|obj| obj.controller)
+                            })
                             .unwrap_or(PlayerId(0));
                         let legal_targets = legal_aura_attachment_targets(
                             state,
@@ -3270,10 +3525,32 @@ fn execute_zone_move_with_applied_terminal(
                             &enchant_filter,
                         );
                         match legal_targets.as_slice() {
+                            // CR 303.4g: no legal object or player to enchant, so
+                            // this entry does not happen. Decided BEFORE
+                            // `deliver_replaced_zone_change`, i.e. before the
+                            // object is inserted into the battlefield, before the
+                            // meld commit journals anything, and before any entry
+                            // event — the rule denies the entry, so nothing may
+                            // observe one.
                             [] => {
-                                return ZoneMoveTerminalResult::Completed(
-                                    ZoneMoveCompletion::Remained,
-                                );
+                                match entering_object_projection(state, *object_id).map(|entrant| {
+                                    unhosted_aura_entry(entrant, UnhostedAuraOrigin::Zone(*from))
+                                }) {
+                                    Some(UnhostedAuraEntry::OwnersGraveyard) => {
+                                        unhosted_to_owners_graveyard = true;
+                                    }
+                                    // "The Aura remains in its current zone" —
+                                    // and, for a token already in a zone, "isn't
+                                    // created" has nothing left to withhold, so
+                                    // both leave the object exactly where it is.
+                                    Some(UnhostedAuraEntry::NotCreated)
+                                    | Some(UnhostedAuraEntry::RemainInCurrentZone)
+                                    | None => {
+                                        return ZoneMoveTerminalResult::Completed(
+                                            ZoneMoveCompletion::Remained,
+                                        );
+                                    }
+                                }
                             }
                             [TargetRef::Object(id)] => {
                                 *attach_to =
@@ -3292,6 +3569,17 @@ fn execute_zone_move_with_applied_terminal(
                 // CR 303.4i specified-host Remain is handled after delivery when
                 // `attach_to` fails / SBA (CR 704.5m). Pre-move filter checks while
                 // the Aura is still in GY falsely Remained legal Gift/Lynde hosts.
+            }
+            if unhosted_to_owners_graveyard {
+                // CR 303.4g: "…the Aura is put into its owner's graveyard instead
+                // of entering the battlefield." Retarget the already-approved
+                // event rather than re-entering the replacement pipeline: the
+                // graveyard placement is not a new, separately replaceable event —
+                // it is the rules-mandated substitute outcome of this one.
+                if let ProposedEvent::ZoneChange { to, attach_to, .. } = &mut event {
+                    *to = Zone::Graveyard;
+                    *attach_to = None;
+                }
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
                 let delivery_start = events.len();
