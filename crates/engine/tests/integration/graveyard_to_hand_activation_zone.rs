@@ -280,7 +280,6 @@ fn bestial_bloodline_activatable_from_graveyard_returns_to_hand() {
         "precondition: the Aura starts in the graveyard"
     );
     let ability = &runner.state().objects[&aura].abilities[0];
-    assert_eq!(ability.activation_zone, Some(Zone::Graveyard));
     assert!(
         ability.activation_restrictions.is_empty(),
         "precondition: no restriction can make this positive fail for a \
@@ -288,11 +287,25 @@ fn bestial_bloodline_activatable_from_graveyard_returns_to_hand() {
     );
 
     // ---- the assertions that fail if the fix is reverted ----
+    // NOTE ordering: the `activation_zone` assertion deliberately sits BELOW
+    // the runtime assertion, for the same reason it is absent from the Aura
+    // block in `sibling_battlefield_pump_ability_still_offered`. That value
+    // flips when the production line is reverted, so asserting it first would
+    // abort this test on a parser-level mismatch and the runtime claim — that
+    // the offer actually appears in `legal_actions` — would never be exercised
+    // on revert. Keep the runtime assertion first so this row discriminates on
+    // the seam it names. Do not "tidy" it back up with the preconditions.
     assert!(
         offers_activation(runner.state(), aura),
         "CR 113.6m: the ability must be offered from the graveyard; \
          legal_actions returned {:?}",
         legal_actions(runner.state())
+    );
+    assert_eq!(
+        runner.state().objects[&aura].abilities[0].activation_zone,
+        Some(Zone::Graveyard),
+        "CR 113.6m: the parser must have derived the graveyard as the \
+         activation zone"
     );
     let outcome = runner.activate(aura, 0).resolve();
     outcome.assert_zone(&[aura], Zone::Hand);
