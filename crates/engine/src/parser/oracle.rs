@@ -6762,16 +6762,53 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
 /// Effect-side companion to `activation_zone_from_self_cost`.
 ///
 /// CR 113.6m + CR 602.1: an activated ability whose *effect* moves the object
-/// it's printed on out of a particular non-battlefield zone (e.g. "Put this
-/// card from your hand onto the battlefield") functions only from that zone.
-/// The cost-based derivation cannot see this because the zone lives in the
-/// effect, not the cost. This walks the parsed effect chain for a self-
-/// `ChangeZone` whose `origin` is a non-battlefield zone and `destination` is
-/// the battlefield, returning that origin as the activation zone.
+/// it's printed on out of a particular non-battlefield zone functions only from
+/// that zone. The cost-based derivation cannot see this because the zone lives
+/// in the effect, not the cost. This walks the parsed effect chain for a self-
+/// `ChangeZone` with a non-battlefield `origin`, returning that origin as the
+/// activation zone.
+///
+/// **The rule quantifies over the ORIGIN zone only.** CR 113.6m reads "an
+/// ability whose cost or effect specifies that it moves the object it's on
+/// **out of a particular zone** functions only in that zone" — the destination
+/// appears nowhere in it. Both destinations are live in the corpus and both
+/// derive the same way: `→ Battlefield` (Reassembling Skeleton /
+/// Bloodsoaked Champion, CR 113.6m's own printed example) and `→ Hand`
+/// (Gutterbones / Bestial Bloodline, "Return this card from your graveyard to
+/// your hand"). Do not re-add a `destination` field to the pattern.
+///
+/// `origin != Zone::Battlefield` is the CR 113.6 default guard, **not** part of
+/// CR 113.6m: an ability whose effect moves its source *off* the battlefield
+/// already functions there by default (Cooped Up / Cage of Hands class), so
+/// there is nothing to derive.
+///
+/// The `sub_ability` recursion below is **kind-agnostic** — it recurses whatever
+/// the sub-ability's `AbilityKind` is. Lochmere Serpent depends on exactly that:
+/// its `Graveyard → Hand` self-move sits on a sub-ability whose kind is `Spell`,
+/// not `Activated`. Narrowing the recursion to activated sub-abilities would be
+/// a behavior change, not a tidy-up.
+///
+/// The traversal walks the chain **in written order** (top-level effect first,
+/// then `sub_ability`), which is CR 113.6m's "a previous part of its … effect"
+/// order. Three parts of CR 113.6m are deliberately **not** implemented because
+/// each governs a measurably empty class at this corpus vintage; each has its
+/// extension point named here:
+/// - the `unless` clause's effect half ("a previous part of its … effect
+///   specifies that the object is put into that zone") — 0 operative cards;
+///   extension point: skip a later self-move whose zone an earlier part filled.
+/// - the Aura half of the `unless` clause (satisfiable by a cost, an effect
+///   **or** a trigger condition specifying that the enchanted object leaves the
+///   battlefield) — none of the Auras in the class qualifies; extension point:
+///   a cost-chain inspection in this function.
+/// - CR 113.6m sentence 2 (an effect that creates a delayed triggered ability
+///   which moves the object out of a zone, CR 603.7) — 0 operative cards (the
+///   abilities carrying that shape are synthesized Unearth, CR 702.83, whose
+///   delayed move is `Battlefield → Exile`, i.e. the CR 113.6 default);
+///   extension point: an `Effect::CreateDelayedTrigger` arm here that recurses
+///   into the carried `AbilityDefinition`.
 fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
     if let Effect::ChangeZone {
         origin: Some(origin),
-        destination: Zone::Battlefield,
         target: TargetFilter::SelfRef,
         ..
     } = *def.effect
@@ -6843,9 +6880,33 @@ fn parse_activated_ability_ir(
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
     ctx.current_ability_index = prev_ability_index;
     let lowered_for_activation_zone = lower_ability_ir(&ir);
-    // CR 113.6m: fall back to the effect-side derivation — an ability whose
-    // effect moves the source out of a non-battlefield zone functions only
-    // from that zone. Cost-based derivation keeps priority.
+    // Three-authority precedence for the activation zone. The ORDER IS A RULES
+    // BOUNDARY, not a style choice — see Kogla and Yidaro below.
+    //
+    // 1. CR 113.6b: "An ability that states which zones it functions in
+    //    functions only from those zones." When the card states the zone there
+    //    is nothing to derive, and "only from those zones" is exclusive. Today
+    //    this link is reachable only from the whole-line dispatch sites that
+    //    stamp the shell directly (Channel, CR 207.2c; Forecast, CR 702.57a) and
+    //    from the `database/` synthesis writers — never from inside this
+    //    function, whose `ir` is built fresh from the post-colon effect text.
+    //    It is a deliberate forward guard for the day an explicit-zone grammar
+    //    routes through here, NOT dead code to be tidied away.
+    // 2. CR 113.6j + CR 118.3: an ability whose cost cannot be paid on the
+    //    battlefield functions from the zone where it can be paid, and a cost
+    //    cannot be paid without the resources for it.
+    // 3. CR 113.6m: an ability whose effect moves the source out of a
+    //    non-battlefield zone functions only from that zone.
+    //
+    // 2 ≻ 3 is discriminating on **Kogla and Yidaro**: "{2}{R}{G}, Discard this
+    // card: … Shuffle this card into your library from your graveyard, …".
+    // The cost yields `Hand` and the effect yields `Graveyard`; `Hand` is
+    // correct, because discarding is what put the card into the graveyard, so
+    // CR 113.6m's `unless` clause ("a previous part of its cost … specifies
+    // that the object is put into that zone") makes the effect side
+    // inapplicable by rule, and CR 118.3 makes a graveyard activation
+    // unpayable rather than merely suboptimal. Swapping these two `.or_else()`
+    // links regresses that card.
     ir.shell.activation_zone = lowered_for_activation_zone
         .activation_zone
         .or_else(|| activation_zone_from_self_cost(&cost))

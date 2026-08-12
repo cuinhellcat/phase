@@ -263,6 +263,7 @@ mod granted_alt_cost_hand_keyword;
 mod granted_bloodthirst_5802;
 mod granted_storm_snapshot;
 mod granted_sunburst_5337;
+mod graveyard_to_hand_activation_zone;
 mod greater_good_activation;
 mod green_suns_zenith_regression;
 mod griffin_rider_conditional_self_buff;
