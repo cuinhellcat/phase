@@ -3424,6 +3424,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Learn
         | Effect::NoteManaSpent
         | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
         | Effect::Harness
         | Effect::CollectEvidence { .. }
         | Effect::Specialize
@@ -4597,6 +4598,7 @@ fn rw_effect(
             enter_with_counters,
             enters_under: _,
             enter_tapped: _,
+            enters_attacking: _,
             face_down_profile: _,
             library_position: _,
             random_order: _,
@@ -4685,6 +4687,7 @@ fn rw_effect(
             rest_order: _,
             reveal: _,
             enter_tapped: _,
+            enters_attacking: _,
             source: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
@@ -4766,6 +4769,7 @@ fn rw_effect(
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             (p, None)
         }
+        Effect::CompletePlayerAction { .. } => (RwProfile::conservative(), None),
         Effect::Connive { target, count } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.writes_external.set(StateKind::HandLibrary);

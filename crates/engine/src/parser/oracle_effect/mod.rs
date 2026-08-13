@@ -5044,6 +5044,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             target: mass_target,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
@@ -29802,6 +29803,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
                 ])),
                 enters_under: None,
                 enter_tapped,
+                enters_attacking: false,
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
@@ -34143,6 +34145,7 @@ fn try_parse_put_zone_change_parts(
                         enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(
                             enter_tapped,
                         ),
+                        enters_attacking: false,
                         enter_with_counters: vec![],
                         face_down_profile: None,
                         library_position,
@@ -34336,7 +34339,7 @@ fn parse_battlefield_transformed_qualifier(tail_lower: &str) -> bool {
 /// `tail_lower` is the lowercase slice starting *immediately after* the
 /// destination needle (e.g. `" tapped and attacking that opponent."`); the
 /// leading space is part of the needle's word-boundary contract.
-fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
+pub(super) fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     // Word-boundary anchor for the qualifier clause: the qualifier must end at
     // a real boundary so " tapped" doesn't accidentally consume " tappedly".
     // EOF, whitespace, or sentence punctuation all qualify.
