@@ -6908,9 +6908,9 @@ fn parse_activated_ability_ir(
     //    function, whose `ir` is built fresh from the post-colon effect text.
     //    It is a deliberate forward guard for the day an explicit-zone grammar
     //    routes through here, NOT dead code to be tidied away.
-    // 2. CR 113.6j + CR 118.3: an ability whose cost cannot be paid on the
-    //    battlefield functions from the zone where it can be paid, and a cost
-    //    cannot be paid without the resources for it.
+    // 2. CR 113.6j + CR 118.3: a cost-derived source zone takes priority over
+    //    a conflicting effect origin. Battlefield remains the implicit default
+    //    representation unless that priority is needed.
     // 3. CR 113.6m: an ability whose effect moves the source out of a
     //    non-battlefield zone functions only from that zone.
     //
@@ -6921,12 +6921,20 @@ fn parse_activated_ability_ir(
     // CR 113.6m's `unless` clause ("a previous part of its cost … specifies
     // that the object is put into that zone") makes the effect side
     // inapplicable by rule, and CR 118.3 makes a graveyard activation
-    // unpayable rather than merely suboptimal. Swapping these two `.or_else()`
-    // links regresses that card.
-    ir.shell.activation_zone = lowered_for_activation_zone
-        .activation_zone
-        .or_else(|| activation_zone_from_self_cost(&cost))
-        .or_else(|| activation_zone_from_self_effect(&lowered_for_activation_zone));
+    // unpayable rather than merely suboptimal. Reversing this precedence
+    // regresses that card.
+    let cost_activation_zone = activation_zone_from_self_cost(&cost);
+    let effect_activation_zone = activation_zone_from_self_effect(&lowered_for_activation_zone);
+    ir.shell.activation_zone = lowered_for_activation_zone.activation_zone.or_else(|| {
+        match (cost_activation_zone, effect_activation_zone) {
+            // A self-sacrifice is paid from the battlefield, but Battlefield is
+            // the default activation zone. Preserve `None` until it must defeat
+            // a derived non-battlefield effect origin.
+            (Some(Zone::Battlefield), None) => None,
+            (Some(cost_zone), _) => Some(cost_zone),
+            (None, effect_zone) => effect_zone,
+        }
+    });
     ir.shell.cost = Some(cost);
     ir.shell.description = Some(description.to_string());
     if !constraints.restrictions.is_empty() {
