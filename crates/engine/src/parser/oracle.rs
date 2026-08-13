@@ -6925,7 +6925,7 @@ fn parse_activated_ability_ir(
     // regresses that card.
     let cost_activation_zone = activation_zone_from_self_cost(&cost);
     let effect_activation_zone = activation_zone_from_self_effect(&lowered_for_activation_zone);
-    ir.shell.activation_zone = lowered_for_activation_zone.activation_zone.or_else(|| {
+    ir.shell.activation_zone = lowered_for_activation_zone.activation_zone.or({
         match (cost_activation_zone, effect_activation_zone) {
             // A self-sacrifice is paid from the battlefield, but Battlefield is
             // the default activation zone. Preserve `None` until it must defeat
