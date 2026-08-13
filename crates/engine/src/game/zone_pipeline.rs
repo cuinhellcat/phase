@@ -16,11 +16,11 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    BatchCompletion, ExileLinkKind, GameState, LiminalEntryKind, LogicalZoneChangeGroup,
-    MergedCardComponentRoute, PendingBatchDeliveries, PendingBatchZoneChangeCause,
-    PendingBatchZoneMoveRequest, PendingCounterPostAction, PendingLiminalEntryResume,
-    PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor, ZoneDeliveryExileTracking,
-    ZoneMoveCompletion,
+    BatchCompletion, EnteringAuraAuthority, ExileLinkKind, GameState, LiminalEntryKind,
+    LogicalZoneChangeGroup, MergedCardComponentRoute, PendingBatchDeliveries,
+    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingCounterPostAction,
+    PendingLiminalEntryResume, PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor,
+    ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -2093,16 +2093,75 @@ pub(crate) enum EnteringAuraHosts {
     Hosts {
         controller: PlayerId,
         legal_targets: Vec<TargetRef>,
+        /// CR 614.12: the object whose characteristics `legal_targets` was
+        /// decided against, carried so the act half can judge CR 701.3a legality
+        /// against the SAME object rather than re-deriving it from the id.
+        entrant: EnteringAuraEntrant,
     },
+}
+
+/// CR 614.12: which object an entering Aura's attachment legality is judged
+/// against — the decide half's finding, carried to the act half.
+///
+/// The two halves are separated by at least a function boundary and, on the
+/// multi-host route, by a player-choice pause. Deriving the attachment side
+/// twice is what let them disagree: CR 303.4f offers a host that is legal for
+/// the Aura AS IT ENTERS, and CR 701.3b silently no-ops an attach at a host the
+/// gate then judges illegal. Naming the authority instead of re-deriving it
+/// makes that disagreement unrepresentable.
+#[derive(Debug, Clone)]
+pub(crate) enum EnteringAuraEntrant {
+    /// The object stored under the Aura's id already IS the entrant, so the act
+    /// half reads it LIVE. Deliberately not a snapshot: for these seams the
+    /// permanent is already on the battlefield with its final characteristics,
+    /// and a stale clone could only mask a legitimate mid-flight change.
+    Stored,
+    /// The stored object is not the entrant yet — the deciding seam supplied a
+    /// projection (a CR 707.9 copy exception applied by a later seam, or a
+    /// liminal entry whose id still holds the pre-entry component). The act half
+    /// must use it, or it will judge a different object than the chooser was
+    /// offered.
+    Projected(Box<GameObject>),
+}
+
+impl EnteringAuraEntrant {
+    /// The borrowed view the CR 701.3a legality gate consumes.
+    fn authority(&self) -> crate::game::effects::attach::AttachmentAuthority<'_> {
+        match self {
+            Self::Stored => crate::game::effects::attach::AttachmentAuthority::Stored,
+            Self::Projected(entrant) => {
+                crate::game::effects::attach::AttachmentAuthority::Projected(entrant)
+            }
+        }
+    }
 }
 
 /// Decide half of [`resolve_entering_aura_attachment`] — pure with respect to
 /// the game state.
 pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> EnteringAuraHosts {
-    let Some(entrant) = entering_object_projection(state, object_id) else {
+    // CR 614.12: a LIVE liminal entry means the id's stored object is not the
+    // entrant (a meld's exiled front face, a token whose body is still parked),
+    // so the projection has to travel to the act half as well — the same class
+    // of decide/act disagreement the copy-token seam hits. No production caller
+    // of this function reaches it with a live entry today (the liminal token
+    // seam removes its entry before consulting, and every
+    // `resolve_entering_aura_attachment` caller runs on a realized battlefield
+    // permanent), so this arm closes the class rather than fixing a live bug.
+    if let Some(entry) = state.liminal_entries.get(&object_id) {
+        let entrant = entry.object.clone();
+        return entering_aura_hosts_projected(state, object_id, &entrant);
+    }
+    let Some(entrant) = state.objects.get(&object_id) else {
         return EnteringAuraHosts::NotApplicable;
     };
-    entering_aura_hosts_projected(state, object_id, entrant)
+    entering_aura_hosts_with(
+        state,
+        object_id,
+        entrant,
+        // Read live by the act half: for these seams the stored object IS the
+        // entrant, and this preserves their exact pre-existing behaviour.
+        EnteringAuraEntrant::Stored,
+    )
 }
 
 /// CR 614.12: [`entering_aura_hosts`] against an explicitly supplied projection
@@ -2121,6 +2180,25 @@ pub(crate) fn entering_aura_hosts_projected(
     state: &GameState,
     object_id: ObjectId,
     entrant: &GameObject,
+) -> EnteringAuraHosts {
+    entering_aura_hosts_with(
+        state,
+        object_id,
+        entrant,
+        // The whole point of the projected entry point: the act half must judge
+        // CR 701.3a legality against this object, not against the id's stored
+        // one, or CR 303.4f can offer a host CR 701.3b then refuses to attach to.
+        EnteringAuraEntrant::Projected(Box::new(entrant.clone())),
+    )
+}
+
+/// Shared body of [`entering_aura_hosts`] and [`entering_aura_hosts_projected`],
+/// parameterized by which object the act half must judge legality against.
+fn entering_aura_hosts_with(
+    state: &GameState,
+    object_id: ObjectId,
+    entrant: &GameObject,
+    authority: EnteringAuraEntrant,
 ) -> EnteringAuraHosts {
     let Some(enchant_filter) = aura_enchant_filter_of(entrant) else {
         return EnteringAuraHosts::NotApplicable;
@@ -2156,19 +2234,34 @@ pub(crate) fn entering_aura_hosts_projected(
             &enchant_filter,
         ),
         controller,
+        entrant: authority,
     }
 }
 
 /// Act half of [`resolve_entering_aura_attachment`]: attach the sole legal host
 /// (CR 303.4f), or report the disposition the caller must handle.
+///
+/// CR 303.4f + CR 701.3b: every attach below goes through the decide half's
+/// [`EnteringAuraEntrant`]. The act half must not re-derive the attachment's
+/// characteristics from `object_id` — on the non-liminal copy-token seam that id
+/// still holds the pre-exception body, so a re-derived CR 701.3a gate can reject
+/// a host CR 303.4f legally offered and (CR 701.3b) no-op the attach, leaving the
+/// Aura for the CR 704.5m sweep.
 pub(crate) fn apply_entering_aura_hosts(
     state: &mut GameState,
     object_id: ObjectId,
     hosts: EnteringAuraHosts,
 ) -> EnteringAuraAttachment {
+    // Any authority parked by an earlier entering-Aura decision is spent or
+    // stale by the time another one is being ACTED on: the only way to reach
+    // this function with one parked is to have resumed past that pause (which
+    // takes it) or to have abandoned it. Cleared here rather than at the pause
+    // so no path can leave one behind.
+    state.entering_aura_authority = None;
     let EnteringAuraHosts::Hosts {
         controller,
         legal_targets,
+        entrant,
     } = hosts
     else {
         return EnteringAuraAttachment::NotApplicable;
@@ -2178,17 +2271,84 @@ pub(crate) fn apply_entering_aura_hosts(
         // caller decide the entrant's fate.
         [] => EnteringAuraAttachment::NoLegalHost,
         [TargetRef::Object(id)] => {
-            crate::game::effects::attach::attach_to(state, object_id, *id);
+            crate::game::effects::attach::attach_to_with_authority(
+                state,
+                object_id,
+                *id,
+                entrant.authority(),
+            );
             EnteringAuraAttachment::Attached
         }
         [TargetRef::Player(id)] => {
-            crate::game::effects::attach::attach_to_player(state, object_id, *id);
+            crate::game::effects::attach::attach_to_player_with_authority(
+                state,
+                object_id,
+                *id,
+                entrant.authority(),
+            );
             EnteringAuraAttachment::Attached
         }
-        _ => EnteringAuraAttachment::NeedsChoice {
-            controller,
-            legal_targets,
-        },
+        _ => {
+            // CR 303.4f: the choice returns to the event loop, so the entrant has
+            // to outlive this stack frame for the resume path's gate. Only a
+            // genuine projection is parked — a `Stored` authority would freeze a
+            // snapshot the resume path is better off reading live, and parking
+            // nothing is exactly the pre-existing behaviour every non-projected
+            // seam (Copy Enchantment's `BecomeCopy`, `ReturnAsAura`, the plain
+            // ZoneChange entry) already has.
+            if let EnteringAuraEntrant::Projected(entrant) = entrant {
+                state.entering_aura_authority = Some(EnteringAuraAuthority {
+                    aura_id: object_id,
+                    entrant,
+                });
+            }
+            EnteringAuraAttachment::NeedsChoice {
+                controller,
+                legal_targets,
+            }
+        }
+    }
+}
+
+/// CR 303.4f + CR 701.3b: attach an entering Aura to the host its controller
+/// chose, judged against the entrant the choice was offered for.
+///
+/// The single authority behind the `WaitingFor::ReturnAsAuraTarget` resume arm's
+/// attach. That arm is shared by seams that park no
+/// [`EnteringAuraAuthority`] — `ReturnAsAura` (Old-Growth Troll), the plain
+/// non-spell Aura ZoneChange entry, and the on-battlefield `BecomeCopy`
+/// realization — and for all of those the absent authority selects
+/// [`EnteringAuraEntrant::Stored`], i.e. byte-for-byte the `attach_to` /
+/// `attach_to_player` behaviour they had before.
+pub(crate) fn attach_chosen_entering_aura_host(
+    state: &mut GameState,
+    aura_id: ObjectId,
+    chosen: &TargetRef,
+) -> Option<TargetRef> {
+    // Taken unconditionally: a parked authority belongs to exactly one pause, so
+    // whichever pause is resuming, it must not survive into a later one. It is
+    // then honoured only for the Aura it was parked for.
+    let parked = state
+        .entering_aura_authority
+        .take()
+        .filter(|authority| authority.aura_id == aura_id)
+        .map(|authority| EnteringAuraEntrant::Projected(authority.entrant));
+    let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
+    match chosen {
+        TargetRef::Object(host_id) => crate::game::effects::attach::attach_to_with_authority(
+            state,
+            aura_id,
+            *host_id,
+            entrant.authority(),
+        ),
+        TargetRef::Player(host_player) => {
+            crate::game::effects::attach::attach_to_player_with_authority(
+                state,
+                aura_id,
+                *host_player,
+                entrant.authority(),
+            )
+        }
     }
 }
 
@@ -2352,10 +2512,16 @@ mod entering_aura_attachment_tests {
         let EnteringAuraHosts::Hosts {
             controller,
             legal_targets,
+            entrant,
         } = entering_aura_hosts(&state, id)
         else {
             panic!("an unattached Aura on the battlefield has a host verdict");
         };
+        assert!(
+            matches!(entrant, EnteringAuraEntrant::Stored),
+            "no liminal entry and no supplied projection: the act half must read \
+             the stored object live, not a snapshot"
+        );
         assert_eq!(
             controller, P1,
             "CR 303.4f: the chooser is the Aura's controller, not the active player"
@@ -2809,6 +2975,154 @@ mod entering_aura_attachment_tests {
             state.objects[&id].attached_to,
             Some(crate::game::game_object::AttachTarget::Object(host)),
             "CR 303.4f: the sole legal host is attached as the Aura enters"
+        );
+    }
+
+    /// A Serra's Emissary-shaped permanent: its controller has CR 702.16c
+    /// protection from the card type it chose as it entered (CR 205.2).
+    fn chosen_card_type_protection(
+        state: &mut GameState,
+        controller: PlayerId,
+        chosen: CoreType,
+    ) -> ObjectId {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::statics::StaticMode;
+
+        let id = create_object(
+            state,
+            CardId(90_400),
+            controller,
+            format!("Emissary vs {chosen:?}"),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.chosen_attributes
+            .push(ChosenAttribute::CardType(chosen));
+        let protection = crate::types::ability::StaticDefinition::new(
+            StaticMode::PlayerProtection(ProtectionTarget::ChosenCardType),
+        )
+        .affected(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        obj.static_definitions.push(protection.clone());
+        obj.base_static_definitions = std::sync::Arc::new(vec![protection]);
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+        id
+    }
+
+    /// CR 303.4f + CR 701.3b + CR 303.4i on the PLAYER half of the act half: the
+    /// attach must be judged against the entrant the decide half was given, not
+    /// against the object stored under the Aura's id.
+    ///
+    /// `attach_to_player` carries its own CR 303.4i legality gate, so the object
+    /// half's fix does not cover it. This is a SEAM test rather than a
+    /// production-pipeline one, and deliberately so: `player_protection_from_object`
+    /// is the only projection-sensitive input to that gate, and of the qualities it
+    /// implements at the player level only `ChosenCardType` reads the attachment's
+    /// characteristics — while every copy exception the parser produces moves the
+    /// card-type set in the RESTRICTIVE direction. No production input can
+    /// therefore reach this arm today; the fixture states the seam contract
+    /// directly instead of inventing a card. See the note on
+    /// `yenna_aura_token_copy::chosen_player_host_resume_survives_the_color_exception`.
+    ///
+    /// P1 is protected from artifacts, P0 from enchantments. The STORED body is an
+    /// artifact enchantment (illegal for both); the ENTRANT is a plain enchantment
+    /// (illegal for P0, legal for P1) — the shape a `SetCardTypes` copy exception
+    /// yields. The revert-failing assertion is `attached_to == Some(Player(P1))`:
+    /// with the act half reading the stored body, P1's protection from artifacts
+    /// rejects the attach and CR 701.3b leaves the Aura unattached.
+    #[test]
+    fn player_host_attach_uses_the_supplied_entrant() {
+        let mut state = GameState::new_two_player(1);
+        chosen_card_type_protection(&mut state, P0, CoreType::Enchantment);
+        chosen_card_type_protection(&mut state, P1, CoreType::Artifact);
+        let id = card_aura_enchanting_players(&mut state, P0, Zone::Battlefield);
+        {
+            let obj = state.objects.get_mut(&id).expect("aura");
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        // The CR 614.12 entrant: the same object without the artifact type.
+        let mut entrant = state.objects[&id].clone();
+        entrant
+            .card_types
+            .core_types
+            .retain(|t| *t != CoreType::Artifact);
+        entrant.base_card_types = entrant.card_types.clone();
+
+        let hosts = entering_aura_hosts_projected(&state, id, &entrant);
+        let EnteringAuraHosts::Hosts { legal_targets, .. } = &hosts else {
+            panic!("an unattached Curse on the battlefield has a host verdict");
+        };
+        assert_eq!(
+            legal_targets,
+            &vec![TargetRef::Player(P1)],
+            "reach-guard: judged against the ENTRANT, P1 is the sole legal player \
+             host (P0 is protected from enchantments either way)"
+        );
+
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, hosts),
+            EnteringAuraAttachment::Attached
+        ));
+        assert_eq!(
+            state.objects[&id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Player(P1)),
+            "CR 303.4i: the player gate must read the ENTRANT — the stored body's \
+             artifact type is not the Aura that is entering"
+        );
+    }
+
+    /// CR 303.4f: the multi-host pause parks the entrant, and only a real
+    /// projection — never a `Stored` authority — is parked.
+    ///
+    /// Parking a snapshot for a seam whose stored object already IS the entrant
+    /// would freeze characteristics the resume is better off reading live, and
+    /// would change behaviour for the three pre-existing `ReturnAsAuraTarget`
+    /// producers that share the resume arm.
+    #[test]
+    fn only_a_projected_entrant_is_parked_across_the_host_choice() {
+        let mut state = GameState::new_two_player(1);
+        creature(&mut state, P0, "Host A");
+        creature(&mut state, P0, "Host B");
+        let id = aura(&mut state, P0, enchant_creature());
+
+        let stored_hosts = entering_aura_hosts(&state, id);
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, stored_hosts),
+            EnteringAuraAttachment::NeedsChoice { .. }
+        ));
+        assert!(
+            state.entering_aura_authority.is_none(),
+            "a `Stored` authority is never parked — the resume reads the object live"
+        );
+
+        let entrant = state.objects[&id].clone();
+        let projected_hosts = entering_aura_hosts_projected(&state, id, &entrant);
+        assert!(matches!(
+            apply_entering_aura_hosts(&mut state, id, projected_hosts),
+            EnteringAuraAttachment::NeedsChoice { .. }
+        ));
+        let parked = state
+            .entering_aura_authority
+            .as_ref()
+            .expect("a projected entrant is parked for the resume");
+        assert_eq!(parked.aura_id, id);
+
+        // Spent by the resume, and honoured only for its own Aura.
+        let other = aura(&mut state, P0, enchant_creature());
+        assert!(
+            attach_chosen_entering_aura_host(&mut state, other, &TargetRef::Object(id)).is_none()
+                || state.entering_aura_authority.is_none(),
+            "a resume for a different Aura must not consume the parked entrant as its own"
+        );
+        assert!(
+            state.entering_aura_authority.is_none(),
+            "the parked authority never survives a `ReturnAsAuraTarget` resume"
         );
     }
 }

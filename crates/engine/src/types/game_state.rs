@@ -13713,6 +13713,33 @@ impl ResolvingTriggerContext {
     }
 }
 
+/// CR 303.4f + CR 614.12: the entrant an entering Aura's host choice was decided
+/// against, parked across the [`WaitingFor::ReturnAsAuraTarget`] pause that asks
+/// its controller which of several legal hosts to enchant.
+///
+/// CR 303.4f requires the chooser to pick "a legal object or player according to
+/// the Aura's enchant ability and any other applicable effects" — i.e. according
+/// to the Aura AS IT ENTERS. When the choice pauses, the act half runs in a later
+/// `apply` call and can no longer see the deciding seam's stack frame, so the
+/// entrant travels here. Without it the act half re-derives CR 701.3a legality
+/// from `state.objects[aura_id]`, which on the non-liminal copy-token path still
+/// holds the PRE-exception body: a copy exception that changes the Aura's color
+/// (CR 707.9b) would make the chosen host's protection (CR 702.16c) reject an
+/// attachment CR 303.4f had legally offered, and CR 701.3b would turn the attach
+/// into a silent no-op, leaving the token for the CR 704.5m sweep.
+///
+/// `None` for every seam whose stored object already IS the entrant, so the
+/// shared resume path is unchanged for them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnteringAuraAuthority {
+    /// The Aura the parked entrant belongs to. The `ReturnAsAuraTarget` resume
+    /// path is shared with seams that park nothing, so the id is matched before
+    /// the entrant is honoured.
+    pub aura_id: ObjectId,
+    /// CR 614.12: the characteristics the Aura will have on the battlefield.
+    pub entrant: Box<GameObject>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
     pub object: GameObject,
@@ -14061,6 +14088,24 @@ declare_game_state! {
     pub liminal_entries: HashMap<ObjectId, LiminalEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_liminal_entry_resume: Option<PendingLiminalEntryResume>,
+    /// CR 303.4f + CR 614.12: see [`EnteringAuraAuthority`]. Written only by
+    /// `zone_pipeline::apply_entering_aura_hosts` when it hands an entering
+    /// Aura's host choice to a player and the deciding seam judged legality
+    /// against a projection the stored object does not match yet; taken by the
+    /// `WaitingFor::ReturnAsAuraTarget` resume arm.
+    ///
+    /// Pause-scoped, and therefore INTENTIONALLY omitted from
+    /// `impl PartialEq for GameState` (same treatment as
+    /// `resolving_continuation_attach_host`): the pause it belongs to is already
+    /// compared through `waiting_for`, and a projection snapshot is not board
+    /// state a CR 104.4b loop can accumulate in.
+    ///
+    /// Not redacted by `visibility::filter_state_for_viewer` (unlike
+    /// `liminal_entries`, which can hold a face-down/meld projection no viewer
+    /// may see): this entrant is a token that is already on the battlefield, so
+    /// its characteristics are public information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entering_aura_authority: Option<EnteringAuraAuthority>,
     /// CR 614.12a: set by `continue_replacement` when an optional `MayCost`
     /// accept's payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with multiple eligible lands). It re-parks the
@@ -19655,6 +19700,7 @@ impl GameState {
             pending_replacement: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
+            entering_aura_authority: None,
             replacement_may_cost_paused: false,
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
@@ -21586,6 +21632,15 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // never involve these, so no certification-death.
         liminal_entries: _,
         pending_liminal_entry_resume: _,
+        // `entering_aura_authority` (CR 303.4f entering-Aura host authority):
+        // EXCLUDED from `impl PartialEq for GameState`, and that is the SAFE
+        // direction here rather than the dangerous one. It is `Some` only while
+        // `waiting_for == ReturnAsAuraTarget` — a state the loop sampler never
+        // records (samples are taken at the Priority window) — and it is taken
+        // by the resume arm, so it is `None` at every sample beat. It is a
+        // read-only snapshot of an object `objects` already carries, never an
+        // accumulator: no value can grow across iterations in it.
+        entering_aura_authority: _,
         last_discover_value: _,
         // Post-rebase upstream additions (rebased onto d1a1e995e), classified by ONE-SIDED-SAFETY
         // (COMPARED is fail-safe; EXCLUSION is the fail-DANGEROUS direction — a field is excluded

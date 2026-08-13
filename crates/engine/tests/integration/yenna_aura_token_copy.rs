@@ -15,8 +15,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
-use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::keywords::{Keyword, ProtectionTarget};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -1227,4 +1227,317 @@ fn two_non_liminal_copies_each_choose_their_own_host() {
             "CR 614.1c: every token in the batch still seeds its entry counters"
         );
     }
+}
+
+// ── The entering-Aura ATTACHMENT AUTHORITY ───────────────────────────────────
+//
+// The decide half (`entering_aura_hosts_projected`) and the act half
+// (`apply_entering_aura_hosts` / the `ReturnAsAuraTarget` resume) must judge the
+// SAME object. On the non-liminal copy path they were derived separately: the
+// decide half read the CR 707.9 projection, the act half re-derived CR 701.3a
+// legality from `state.objects[token]`, which on that path still holds the
+// PRE-exception body until `apply_token_modifications` runs.
+//
+// A colour exception is the sharpest instrument for that split. The fixtures
+// below copy a WHITE Aura with an "except it's blue" exception, over hosts whose
+// CR 702.16c protection is keyed to the colour on ONE side of the exception:
+//
+//   * protection from WHITE  → illegal for the source, LEGAL for the entrant
+//   * protection from BLUE   → legal for the source, ILLEGAL for the entrant
+//
+// so the fixture discriminates in both directions at once. It is not enough for
+// the act half to skip its legality check — a "trust the offered list" fix would
+// pass the first arm and still be wrong; it has to check against the entrant.
+
+/// CR 707.9b: "except it's blue" — the exception under test.
+fn recolored_blue() -> ContinuousModification {
+    ContinuousModification::SetColor {
+        colors: vec![ManaColor::Blue],
+    }
+}
+
+/// [`fylgja_copy_scenario_with`]'s colour-exception sibling: P0 copies P1's
+/// **white** Fylgja with an "except it's blue" exception, and each of P0's
+/// candidate hosts carries protection from the colour named in
+/// `host_protections`.
+///
+/// Fylgja is retained deliberately — its verbatim CR 614.1c "enters with four
+/// healing counters" self-replacement is what forces the NON-LIMINAL copy seam,
+/// which is the seam whose two halves disagreed. The `Enchant` keyword is
+/// overridden the same way [`fylgja_copy_scenario_with`] overrides it, so the
+/// copy's hosts are P0's creatures rather than P1's.
+fn recolored_fylgja_scenario(
+    host_protections: &[ManaColor],
+) -> (GameRunner, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let maker = scenario
+        .add_enchantment_from_oracle(P0, "Copy Engine", "")
+        .with_ability(Effect::CopyTokenOf {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: vec![recolored_blue()],
+        })
+        .id();
+    let host_ids: Vec<ObjectId> = host_protections
+        .iter()
+        .enumerate()
+        .map(|(i, color)| {
+            scenario
+                .add_creature(P0, &format!("Host {i}"), 2, 2)
+                .with_keyword(Keyword::Protection(ProtectionTarget::Color(*color)))
+                .id()
+        })
+        .collect();
+    let their_host = scenario.add_creature(P1, "Their Ally", 2, 2).id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P1, "Fylgja", FYLGJA)
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )))
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let source = runner.state_mut().objects.get_mut(&aura).unwrap();
+        source.attached_to = Some(AttachTarget::Object(their_host));
+        // CR 707.2 + CR 105.2a: `intrinsic_copiable_values` reads `base_color`,
+        // so this is the colour the copy is made from. `color` is set alongside
+        // it because that is what the CR 702.16c gate reads on the STORED token
+        // body — i.e. the value the act half wrongly judged against.
+        source.base_color = vec![ManaColor::White];
+        source.color = vec![ManaColor::White];
+    }
+    (runner, maker, aura, host_ids)
+}
+
+/// The token copy of Fylgja on the battlefield, and its host.
+fn fylgja_token(runner: &GameRunner, source: ObjectId) -> Option<(ObjectId, Option<AttachTarget>)> {
+    battlefield_named(runner, "Fylgja")
+        .into_iter()
+        .find(|id| *id != source)
+        .map(|id| (id, runner.state().objects[&id].attached_to))
+}
+
+/// Reach-guard shared by the colour-exception tests: the fixture really is a
+/// WHITE source, and the entrant really did come out BLUE. Without both, a green
+/// assertion below would prove nothing about which body the act half read.
+fn assert_color_exception_landed(runner: &GameRunner, source: ObjectId, token: ObjectId) {
+    assert_eq!(
+        runner.state().objects[&source].color,
+        vec![ManaColor::White],
+        "fixture: the copy SOURCE is white, so protection-from-white is what the \
+         pre-exception body would trip"
+    );
+    assert_eq!(
+        runner.state().objects[&token].color,
+        vec![ManaColor::Blue],
+        "CR 707.9b: the copy exception really recoloured the entrant (got {:?})",
+        runner.state().objects[&token].color
+    );
+}
+
+/// CR 303.4f + CR 701.3b + CR 702.16c on the AUTO-ATTACH half: with exactly one
+/// host legal for the entrant, the token must end up attached to it.
+///
+/// `Host 0` has protection from BLUE (legal for the white source, illegal for the
+/// blue entrant); `Host 1` has protection from WHITE (illegal for the source,
+/// legal for the entrant). CR 303.4f's "legal … according to the Aura" makes
+/// `Host 1` the sole legal host.
+///
+/// The revert-failing assertion is `attached == Some(Object(hosts[1]))`. With the
+/// act half re-deriving legality from the stored PRE-exception (white) body,
+/// `attach_to` judges `Host 1` protected and CR 701.3b makes the attach a silent
+/// no-op — the token enters unattached and CR 704.5m sweeps it, so the assertion
+/// fails on `None` (or on the token being absent entirely).
+#[test]
+fn auto_attached_copy_uses_the_entrant_after_its_color_exception() {
+    let (mut runner, maker, aura, hosts) =
+        recolored_fylgja_scenario(&[ManaColor::Blue, ManaColor::White]);
+
+    activate(&mut runner, maker);
+    let observed = drive(
+        &mut runner,
+        &[TargetRef::Object(aura)],
+        HostAnswers::Answer(&[]),
+    );
+
+    assert!(
+        observed.host_prompts.is_empty(),
+        "CR 303.4f: exactly one host is legal for the entrant, so there is nothing \
+         to ask — this test is pinned to the AUTO-attach half"
+    );
+    let (token, attached) = fylgja_token(&runner, aura).unwrap_or_else(|| {
+        panic!(
+            "CR 303.4f + CR 704.5m: the token copy must survive on the battlefield, \
+             attached to the host chosen for the post-exception entrant"
+        )
+    });
+    assert_color_exception_landed(&runner, aura, token);
+    assert_eq!(
+        attached,
+        Some(AttachTarget::Object(hosts[1])),
+        "CR 701.3b: the act half must judge the ENTRANT (blue), so the \
+         protection-from-white host is legal and the protection-from-blue host is not"
+    );
+}
+
+/// The PLAYER-host mirror, driven through the same production pipeline: a Curse
+/// -class copy whose colour exception lands, chosen host answered through
+/// `GameAction::ChooseTarget`, and the token attached to the chosen player.
+///
+/// HONEST SCOPE — this one is a routing / non-regression test, not a
+/// revert-discriminating one, and the reason is a property of the card pool
+/// rather than of the fix. `attach_to_player`'s CR 303.4i gate reads exactly one
+/// projection-sensitive input: `player_protection_from_object`. At the PLAYER
+/// level that resolver implements `Everything`, `FromPlayer` and `ChosenCardType`
+/// and is deliberately inert for `Color` — no card in the pool grants a player
+/// protection from a colour (the seven `PlayerProtection` cards are Absolute
+/// Virtue, Noble Heritage, Perch Protection, Runed Halo, Teferi's Protection,
+/// The One Ring, The Stasis Coffin), so a colour exception cannot flip a player
+/// host's legality. The type-keyed quality that IS live can only get MORE
+/// restrictive under the copy exceptions the parser produces. The player half of
+/// the act-half gate is therefore pinned at the seam instead, by
+/// `zone_pipeline::entering_aura_attachment_tests::
+/// player_host_attach_uses_the_supplied_entrant`.
+#[test]
+fn chosen_player_host_resume_survives_the_color_exception() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let maker = scenario
+        .add_enchantment_from_oracle(P0, "Copy Engine", "")
+        .with_ability(Effect::CopyTokenOf {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: Vec::new(),
+            additional_modifications: vec![recolored_blue()],
+        })
+        .id();
+    // Fylgja's verbatim CR 614.1c "enters with four healing counters"
+    // self-replacement is what selects the NON-LIMINAL copy seam — the seam under
+    // test. Only the `Enchant` keyword is overridden, to the player-scoped filter
+    // a Curse carries, exactly as `fylgja_copy_scenario_with` overrides it to a
+    // controller-scoped creature filter.
+    let aura = scenario
+        .add_enchantment_from_oracle(P1, "Fylgja", FYLGJA)
+        .with_subtypes(vec!["Aura", "Curse"])
+        .with_keyword(Keyword::Enchant(TargetFilter::Player))
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let source = runner.state_mut().objects.get_mut(&aura).unwrap();
+        source.attached_to = Some(AttachTarget::Player(P0));
+        source.base_color = vec![ManaColor::White];
+        source.color = vec![ManaColor::White];
+    }
+
+    activate(&mut runner, maker);
+    let observed = drive(
+        &mut runner,
+        &[TargetRef::Object(aura)],
+        HostAnswers::Answer(&[TargetRef::Player(P1)]),
+    );
+
+    assert_eq!(
+        observed.host_prompts.len(),
+        1,
+        "CR 303.4f: two legal players is a choice"
+    );
+    assert!(
+        observed.host_prompts[0]
+            .1
+            .iter()
+            .all(|target| matches!(target, TargetRef::Player(_))),
+        "CR 303.4f: a Curse's legal hosts are PLAYERS (got {:?})",
+        observed.host_prompts[0].1
+    );
+    let (token, attached) = fylgja_token(&runner, aura).unwrap_or_else(|| {
+        panic!("CR 303.4f + CR 704.5m: the Curse token copy must survive its host choice")
+    });
+    assert_color_exception_landed(&runner, aura, token);
+    assert_eq!(
+        attached,
+        Some(AttachTarget::Player(P1)),
+        "CR 303.4f: the player-host resume attaches to the CHOSEN player"
+    );
+    assert!(
+        runner.state().entering_aura_authority.is_none(),
+        "the parked entering-Aura authority is spent by the resume, never left behind"
+    );
+}
+
+/// CR 303.4f on the CHOICE half: the `WaitingFor::ReturnAsAuraTarget` resume path
+/// attaches through the same authority.
+///
+/// Both hosts carry protection from WHITE, so both are legal for the blue entrant
+/// and neither is legal for the white source — the controller is asked, and the
+/// answer must actually attach.
+///
+/// This is the arm the auto-attach tests cannot reach: the choice returns to the
+/// event loop, so the entrant has to survive a pause. The revert-failing
+/// assertion is `attached == Some(Object(hosts[1]))`; with the resume arm calling
+/// the unprojected `attach_to`, the stored white body is protected against by
+/// BOTH offered hosts, the attach no-ops (CR 701.3b) and CR 704.5m sweeps the
+/// token the player just chose a host for.
+#[test]
+fn chosen_host_resume_uses_the_entrant_after_its_color_exception() {
+    let (mut runner, maker, aura, hosts) =
+        recolored_fylgja_scenario(&[ManaColor::White, ManaColor::White]);
+
+    activate(&mut runner, maker);
+    let observed = drive(
+        &mut runner,
+        &[TargetRef::Object(aura)],
+        HostAnswers::Answer(&[TargetRef::Object(hosts[1])]),
+    );
+
+    assert_eq!(
+        observed.host_prompts.len(),
+        1,
+        "CR 303.4f: two hosts are legal for the entrant, so this test is pinned to \
+         the CHOICE half"
+    );
+    assert_eq!(
+        observed.host_prompts[0].1.len(),
+        2,
+        "CR 702.16c: both protection-from-white hosts are legal for the BLUE entrant \
+         (got {:?})",
+        observed.host_prompts[0].1
+    );
+    let (token, attached) = fylgja_token(&runner, aura).unwrap_or_else(|| {
+        panic!(
+            "CR 303.4f + CR 704.5m: the token must survive the host choice it was \
+             legally offered"
+        )
+    });
+    assert_color_exception_landed(&runner, aura, token);
+    assert_eq!(
+        attached,
+        Some(AttachTarget::Object(hosts[1])),
+        "CR 303.4f: the resume must attach to the CHOSEN host, judged against the \
+         entrant the choice was offered for"
+    );
+    assert_eq!(
+        runner.state().objects[&token]
+            .counters
+            .values()
+            .sum::<u32>(),
+        4,
+        "CR 614.1c: the rest of the parked entry tail still runs after the resume"
+    );
+    assert!(
+        runner.state().entering_aura_authority.is_none(),
+        "the parked entering-Aura authority is spent by the resume, never left behind"
+    );
 }

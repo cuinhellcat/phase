@@ -654,6 +654,79 @@ fn resolve_attached_to_source_lki_attachment(
         })
 }
 
+/// CR 614.12 + CR 701.3a/b: whose characteristics the ATTACHMENT side of an
+/// attachment-legality gate is read from.
+///
+/// CR 701.3b makes an attach attempt at an illegal host a silent no-op, so the
+/// gate below is the ONLY thing standing between a decided attachment and a
+/// permanent left dangling for the CR 704.5m sweep. A seam that decided the host
+/// was legal must therefore be able to make the gate read the SAME object it
+/// decided against: an entrant whose CR 707.9 copy exceptions have not yet been
+/// stamped onto the object stored under its id is a different object for
+/// protection (CR 702.16c) and attachment-restriction (CR 301.5) purposes than
+/// the one the decision saw.
+///
+/// Borrowed rather than owned: the projection is owned by the deciding seam (or
+/// by the state slot that parks it across a player-choice pause), and the gate
+/// only reads it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AttachmentAuthority<'a> {
+    /// The object stored under the attachment's id already IS the attachment.
+    /// Read it live, so a change to the permanent between a decision and this
+    /// gate is never masked by a stale snapshot.
+    Stored,
+    /// CR 614.12: the attachment as it will exist on the battlefield, supplied
+    /// by the seam that holds it because the stored object does not match it yet.
+    Projected(&'a crate::game::game_object::GameObject),
+}
+
+/// CR 303.4 + CR 301.5: is the attachment an Aura, per the supplied authority?
+///
+/// Player hosts are Auras-only (see [`attach_to_player`]); a copy exception that
+/// adds or removes the `Aura` subtype (CR 205.1a) changes the answer, so this
+/// reads the authority rather than the stored object.
+fn authority_is_aura(
+    state: &GameState,
+    attachment_id: ObjectId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    let attachment = match authority {
+        AttachmentAuthority::Stored => state.objects.get(&attachment_id),
+        AttachmentAuthority::Projected(projection) => Some(projection),
+    };
+    attachment.is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
+}
+
+/// [`can_attach_to_object`] against an explicit [`AttachmentAuthority`].
+pub(crate) fn can_attach_to_object_with_authority(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    match authority {
+        AttachmentAuthority::Stored => can_attach_to_object(state, attachment_id, target_id),
+        AttachmentAuthority::Projected(projection) => {
+            can_attach_to_object_projected(state, attachment_id, Some(projection), target_id)
+        }
+    }
+}
+
+/// [`can_attach_to_player`] against an explicit [`AttachmentAuthority`].
+pub(crate) fn can_attach_to_player_with_authority(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    match authority {
+        AttachmentAuthority::Stored => can_attach_to_player(state, attachment_id, target_player),
+        AttachmentAuthority::Projected(projection) => {
+            can_attach_to_player_projected(state, Some(projection), target_player)
+        }
+    }
+}
+
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.
@@ -662,7 +735,24 @@ pub fn attach_to(
     attachment_id: ObjectId,
     target_id: ObjectId,
 ) -> Option<TargetRef> {
-    if !can_attach_to_object(state, attachment_id, target_id) {
+    attach_to_with_authority(state, attachment_id, target_id, AttachmentAuthority::Stored)
+}
+
+/// CR 614.12 + CR 701.3a: [`attach_to`] whose CR 701.3b legality gate reads the
+/// supplied [`AttachmentAuthority`] instead of the stored object.
+///
+/// Only the GATE is projected. The edit itself — `attached_to`, the host's
+/// `attachments` list, the CR 613.7e timestamp, the resolved-commands journal
+/// row — is
+/// applied to the object actually stored under `attachment_id`, because that is
+/// the object that will carry the attachment.
+pub(crate) fn attach_to_with_authority(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    authority: AttachmentAuthority<'_>,
+) -> Option<TargetRef> {
+    if !can_attach_to_object_with_authority(state, attachment_id, target_id, authority) {
         return None;
     }
 
@@ -1371,6 +1461,24 @@ pub fn attach_to_player(
     attachment_id: ObjectId,
     target_player: PlayerId,
 ) -> Option<TargetRef> {
+    attach_to_player_with_authority(
+        state,
+        attachment_id,
+        target_player,
+        AttachmentAuthority::Stored,
+    )
+}
+
+/// CR 614.12 + CR 303.4i: [`attach_to_player`] whose CR 701.3b legality gate
+/// reads the supplied [`AttachmentAuthority`] instead of the stored object.
+/// Player-host sibling of [`attach_to_with_authority`]; the same "gate is
+/// projected, edit is not" split applies.
+pub(crate) fn attach_to_player_with_authority(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> Option<TargetRef> {
     // CR 301.5: Equipment or Fortification cannot attach to a player.
     // CR 303.4: Only Auras may have a player host. Any non-Aura attachment is
     // silently rejected here so the only paths into a `Player` `attached_to`
@@ -1379,14 +1487,10 @@ pub fn attach_to_player(
     // attachment subtypes cannot slip through by
     // accident — the contract is "Auras only", not "anything that isn't
     // currently equipment".
-    let is_aura = state
-        .objects
-        .get(&attachment_id)
-        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
-    if !is_aura {
+    if !authority_is_aura(state, attachment_id, authority) {
         return None;
     }
-    if !can_attach_to_player(state, attachment_id, target_player) {
+    if !can_attach_to_player_with_authority(state, attachment_id, target_player, authority) {
         return None;
     }
 
