@@ -1666,6 +1666,7 @@ pub fn player_protection_from_object(
                 // a player; object-level grants of these qualities flow through the
                 // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
                 ProtectionTarget::ChosenColor
+                | ProtectionTarget::ChosenPlayer
                 | ProtectionTarget::Color(_)
                 | ProtectionTarget::Multicolored
                 | ProtectionTarget::Quality(_)

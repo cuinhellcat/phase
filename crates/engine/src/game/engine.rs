@@ -16105,36 +16105,9 @@ mod stage2_injector_tests {
                 // shifts combine with #6958's paid-cast outcome exclusion and
                 // #6976's conditional-branch exclusions. None creates an
                 // `OptionalEffect` prompt. Re-pinned against the merged source.
-                // Re-pinned against the merged source; this remains coordinate
-                // evidence only, not a sixth prompt producer. The existing
-                // producers are at these current `WaitingFor::OptionalEffectChoice`
-                // construction sites.
-                // #7303 fix round 2 (base e8db46ca7): `:6447/:6524/:9719 ⇒
-                //   `:6540/:6617/:9812`, uniform +93 above all three. Re-derived, not
-                //   assumed. `git diff -U0` on this file has exactly five hunks: four at
-                //   `:3071–:3081` (the `_ => false` wildcard in
-                //   `condition_depends_on_last_created` replaced by the exhaustive
-                //   `condition_reads_filter_population`; net `+28 −2 +0 +67` = `+93`) and
-                //   one at `:29566` (`mod tests`, i.e. BELOW all three). Whole-file delta
-                //   is `+93` plus the test block, so nothing was inserted between the
-                //   producers. Predicted `6447+93`, `6524+93`, `9719+93` equal the observed
-                //   coordinates exactly. Identity re-established: each producer at its new
-                //   coordinate is byte-identical to `e8db46ca7:effects/mod.rs` at its old
-                //   one, and so is its ±6-line window (md5 `bc0baefa…`, `6448e086…`,
-                //   `4831945d…` on both sides). The window is what establishes identity
-                //   here: all three producers are the SAME one-line mint text, so a bare
-                //   line comparison could not tell them apart. (Spelling that text out in
-                //   this comment would make the row's own source a 38th census hit — the
-                //   needle is assembled at run time precisely to stop that, but only for
-                //   the needle itself.) Set preservation: the two asserts above ran FIRST and
-                //   both fired GREEN on the run that caught this (total **37**, partition
-                //   **5/7/25**), and the other two entries
-                //   (`scoped_library_search.rs:452`, `engine.rs:12004`) did not move at all.
-                //   The change is a filter-traversal classifier; it constructs no
-                //   `WaitingFor` of any kind.
-                "game/effects/mod.rs:6540".to_string(),
-                "game/effects/mod.rs:6617".to_string(),
-                "game/effects/mod.rs:9812".to_string(),
+                "game/effects/mod.rs:6306".to_string(),
+                "game/effects/mod.rs:6383".to_string(),
+                "game/effects/mod.rs:9578".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

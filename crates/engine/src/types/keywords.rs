@@ -502,6 +502,11 @@ pub enum ProtectionTarget {
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
     ChosenCardType,
+    /// CR 702.16k: "Protection from the chosen player" — resolved at runtime
+    /// from the protected permanent's persisted player choice. Covers objects
+    /// the chosen player controls and objects they own that no other player
+    /// controls.
+    ChosenPlayer,
     /// CR 702.16j: "Protection from everything" — protection from each object
     /// regardless of that object's characteristic values. Matches every source
     /// in `source_matches_protection_target`.
@@ -2884,6 +2889,9 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
+        // CR 702.16: "the chosen player" resolves from the
+        // protected permanent's persisted `ChosenAttribute::Player`.
+        "the chosen player" | "chosen player" => ProtectionTarget::ChosenPlayer,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
         // CR 702.16k: "protection from each of your opponents" (Figure of
@@ -4108,6 +4116,22 @@ mod tests {
         assert_eq!(
             parse_protection_target("from artifacts"),
             ProtectionTarget::Quality("from artifacts".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_protection_target_chosen_player() {
+        assert_eq!(
+            parse_protection_target("the chosen player"),
+            ProtectionTarget::ChosenPlayer
+        );
+        assert_eq!(
+            parse_protection_target("chosen player"),
+            ProtectionTarget::ChosenPlayer
+        );
+        assert_eq!(
+            Keyword::from_str("Protection:the chosen player").unwrap(),
+            Keyword::Protection(ProtectionTarget::ChosenPlayer)
         );
     }
 
