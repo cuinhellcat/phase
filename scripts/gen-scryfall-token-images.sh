@@ -95,13 +95,25 @@ mkdir -p "$(dirname "$OUTPUT")"
 # done on every later run — the silent-empty-table failure this script has
 # already had once, reached through the other door.
 #
-# The `.tmp` suffix is what `.gitignore` covers for staging files in this
-# directory (`client/public/*.tmp`, added for gen-card-data.sh); without it an
-# interrupted run leaves an untracked 2 MB file in a tracked tree. `mktemp`
-# creates at 0600; the mode is pinned to 644 because this file is served as a
-# static asset alongside the other sidecars in client/public, and that must not
-# depend on the umask of whoever ran the build.
-TMP=$(mktemp "$OUTPUT.XXXXXX.tmp")
+# The random run has to be the LAST component of the template. Accepting a
+# suffix after it is a GNU extension, documented as such in GNU mktemp(1) under
+# `--suffix` ("implied if TEMPLATE does not end in X"); the underlying
+# mkstemp(3) contract is EINVAL unless the final six characters are XXXXXX
+# (checked directly against libc: `$OUTPUT.XXXXXX.tmp` gives errno 22,
+# `$OUTPUT.tmp.XXXXXX` succeeds). `$OUTPUT.XXXXXX.tmp` was reported failing on
+# macOS in review of #7335, a platform this repo ships desktop builds for
+# (shell-release.yml:164). Trailing X is portable everywhere and is the house
+# form here: gen-card-data.sh:248 and lib/mtgjson-fetch.sh:70 both stage so.
+#
+# `.gitignore` carries `client/public/*.tmp.*` for the name that produces. The
+# existing `client/public/*.tmp` covers the fixed-name staging files in
+# gen-card-data.sh and does not match a randomised tail; with no rule at all, an
+# interrupted run leaves an untracked 2 MB file in a tracked tree.
+#
+# `mktemp` creates at 0600. The mode is pinned to 644 because this file is
+# served as a static asset alongside the other sidecars in client/public, and
+# that must not depend on the umask of whoever ran the build.
+TMP=$(mktemp "$OUTPUT.tmp.XXXXXX")
 trap 'rm -f "$TMP"' EXIT INT TERM
 chmod 644 "$TMP"
 
