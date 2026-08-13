@@ -56,6 +56,9 @@ client/public/parser-warning-patterns.json
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
+# scryfall_finalize_download stages its rename diagnostic beside the target;
+# gen-scryfall-token-images.sh is the first caller to aim it at a tracked dir.
+client/public/*.mv-error.*
 
 # Coverage
 client/coverage/
