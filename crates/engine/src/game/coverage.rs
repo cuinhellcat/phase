@@ -3819,6 +3819,24 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
             ),
         ));
     }
+    // CR 113.6b + CR 113.6j + CR 113.6m: the zone this ability functions from.
+    // `None` is the CR 113.6 battlefield default and emits nothing, so an
+    // unqualified signature stays byte-identical.
+    //
+    // Emitted UNCONDITIONALLY, unlike the narrowly scoped `repeat_for` above.
+    // This is a rules-load-bearing parse output — `can_activate_ability_now`
+    // gates legality on it and the candidate enumerators key their hand,
+    // graveyard and library loops off it, so a change to this field moves cards
+    // between "offered" and "not offered". Scoping it would reproduce exactly
+    // the blindness this exists to remove.
+    //
+    // The key is "activates from", NOT "from": `effect_details` already emits
+    // "from" for a `ChangeZone` origin and `trigger_details` for a trigger
+    // origin, and `build_ability_item` silently drops duplicate keys — reusing
+    // "from" would hide this on precisely the abilities it exists to watch.
+    if let Some(zone) = &def.activation_zone {
+        d.push(("activates from".into(), fmt_zone(zone)));
+    }
     d
 }
 
@@ -11276,6 +11294,83 @@ pub fn format_semantic_audit_markdown(summary: &SemanticAuditSummary) -> String 
 
 #[cfg(test)]
 mod tests {
+
+    /// #7317 — an ability's `activation_zone` must reach the parse-diff
+    /// signature, under a key that does NOT collide with the `from` that
+    /// `effect_details` already emits for a `ChangeZone` origin.
+    ///
+    /// The collision is the whole point. `build_ability_item` drops duplicate
+    /// keys, and the abilities this field matters most on are exactly the ones
+    /// whose effect already occupies `from` — a graveyard self-return carries
+    /// `from: graveyard` for the effect's origin and needs a second, distinct
+    /// key for the zone it is activated from. Naming this one `from` would make
+    /// it invisible on precisely those abilities.
+    ///
+    /// The `None` row is the #5507 requirement restated: an ordinary
+    /// battlefield ability must emit NO zone key at all, byte-identical to
+    /// before, so this addition cannot churn the ~12k abilities that default to
+    /// the battlefield under CR 113.6.
+    #[test]
+    fn activation_zone_reaches_parse_details_without_colliding_with_effect_origin() {
+        use crate::types::ability::AbilityKind;
+        use crate::types::zones::Zone;
+
+        // A graveyard self-return: the shape where the collision bites.
+        let graveyard_self_return = || Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let details = |zone: Option<Zone>| -> Vec<(String, String)> {
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, graveyard_self_return());
+            def.activation_zone = zone;
+            build_ability_item(&def).details
+        };
+
+        // (1) `None` — the CR 113.6 battlefield default. No zone key emitted.
+        let default_zone = details(None);
+        assert!(
+            !default_zone.iter().any(|(k, _)| k == "activates from"),
+            "a battlefield-default ability must emit no activation-zone key, so \
+             existing signatures stay byte-identical (#5507's requirement)"
+        );
+
+        // (2) `Some(Graveyard)` — both keys present, and distinct.
+        let gated = details(Some(Zone::Graveyard));
+        assert!(
+            gated.iter().any(|(k, v)| k == "from" && v == "graveyard"),
+            "the effect's own origin must still render under `from`: {gated:?}"
+        );
+        assert!(
+            gated
+                .iter()
+                .any(|(k, v)| k == "activates from" && v == "graveyard"),
+            "the activation zone must render under its own key; had it been \
+             named `from`, build_ability_item's dedup would have dropped it \
+             silently and this ability would look unchanged (#7317): {gated:?}"
+        );
+
+        // The point of the separate key: the two zones are independent, and a
+        // signature must distinguish them. Cage of Hands returns itself to hand
+        // from the battlefield; Gutterbones returns itself to hand from the
+        // graveyard. Same effect shape, different activation zone.
+        assert_ne!(
+            details(Some(Zone::Graveyard)),
+            details(Some(Zone::Exile)),
+            "two activation zones on the same effect are different parses and \
+             must not collapse to the same sticky signature"
+        );
+    }
 
     /// Matrix row 19 — `parse_details` renders each DECLARED mana role under its
     /// OWN key. Under the old role-blind rendering, Carpet of Flowers (count
