@@ -575,7 +575,12 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             state.liminal_entries.insert(
                 token_id,
                 LiminalEntry {
-                    object: token,
+                    // CR 111.1: the projection this entry will create is a
+                    // token, carried as the witness the `TokenEntry` seam acts
+                    // on rather than as a flag it has to trust.
+                    object: crate::types::game_state::LiminalEntrant::Token(
+                        crate::types::game_state::TokenProjection::materialize(token),
+                    ),
                     name: name.clone(),
                     source_id,
                     controller,

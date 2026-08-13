@@ -1027,7 +1027,7 @@ impl ProposedEvent {
             ProposedEvent::TokenEntry { entry_ref, .. } => state
                 .liminal_entries
                 .get(entry_ref)
-                .map(|entry| entry.object.controller)
+                .map(|entry| entry.object.projected().controller)
                 .unwrap_or(PlayerId(0)),
             // CR 701.3a: The attaching Aura/Equipment's controller is the
             // affected player — they are the one who would choose a

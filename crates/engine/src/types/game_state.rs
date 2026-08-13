@@ -13740,9 +13740,129 @@ pub struct EnteringAuraAuthority {
     pub entrant: Box<GameObject>,
 }
 
+/// CR 111.1: a token projection — "a marker used to represent any permanent
+/// that isn't represented by a card".
+///
+/// A witness type, not a convenience wrapper. CR 303.4g ends with "If the Aura
+/// is a token, it isn't created", so the seam that denies an unhosted entry has
+/// to know whether its entrant is a token — and a plain [`GameObject`] can only
+/// be *expected* to have `is_token` set, never proven to. That left the seam
+/// carrying a disposition for a card-backed entrant the type still admitted.
+/// The single constructor sets the flag and no accessor hands out a
+/// `&mut GameObject`, so "this entrant is a token" holds by construction
+/// wherever this type appears.
+#[derive(Debug, Clone)]
+pub struct TokenProjection(GameObject);
+
+impl TokenProjection {
+    /// CR 111.1: project characteristics as a token. Marking is part of the
+    /// construction, so the invariant cannot be missed by a caller that forgot.
+    pub fn materialize(mut object: GameObject) -> Self {
+        object.is_token = true;
+        Self(object)
+    }
+
+    pub fn projected(&self) -> &GameObject {
+        &self.0
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        self.0
+    }
+
+    /// CR 614.1c: an entry replacement can still settle the entrant's tapped
+    /// state before it enters. Deliberately narrow — a general
+    /// `&mut GameObject` would let a caller clear the CR 111.1 flag this type
+    /// exists to carry.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        self.0.tapped = tapped;
+    }
+}
+
+/// CR 614.12: the entrant of a liminal (decided-but-not-yet-entered) projection.
+///
+/// Two kinds of entrant reach `GameState::liminal_entries`, and CR 303.4g makes
+/// the difference load-bearing rather than cosmetic:
+///
+/// * a token, which exists in no zone at all until its entry commits, and
+/// * the CR 701.42 meld result, whose components are real cards sitting in
+///   exile.
+///
+/// Storing both as a bare `GameObject` erased that distinction at exactly the
+/// seam that has to act on it.
+#[derive(Debug, Clone)]
+pub enum LiminalEntrant {
+    /// CR 111.1: the entrant of a `ProposedEvent::TokenEntry`. It is in no zone,
+    /// so CR 303.4g's zone-phrased dispositions cannot apply to it — only the
+    /// rule's token clause can.
+    Token(TokenProjection),
+    /// CR 701.42: a card-backed projection. It always enters from a real prior
+    /// zone through `ProposedEvent::ZoneChange`, so CR 303.4g's card
+    /// dispositions ("remains in its current zone", or the stack's
+    /// owner's-graveyard placement) are decided on that path — which
+    /// re-proposes the graveyard placement as a fresh, replacement-consulted
+    /// event (CR 614.6).
+    Card(GameObject),
+}
+
+impl LiminalEntrant {
+    /// CR 614.12: the characteristics the entrant will have on the battlefield,
+    /// whichever kind of entrant it is.
+    pub fn projected(&self) -> &GameObject {
+        match self {
+            Self::Token(token) => token.projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    pub fn into_projected(self) -> GameObject {
+        match self {
+            Self::Token(token) => token.into_projected(),
+            Self::Card(object) => object,
+        }
+    }
+
+    /// CR 111.1: whether this projection is a token, answered by the stored
+    /// witness rather than by trusting a flag on the projected object.
+    pub fn is_token_projection(&self) -> bool {
+        matches!(self, Self::Token(_))
+    }
+
+    /// CR 614.1c: settle the entrant's tapped state before it enters.
+    pub fn set_tapped(&mut self, tapped: bool) {
+        match self {
+            Self::Token(token) => token.set_tapped(tapped),
+            Self::Card(object) => object.tapped = tapped,
+        }
+    }
+}
+
+/// The serialized form is the projected object itself, unchanged from when this
+/// field was a bare `GameObject`: the witness is a compile-time distinction, and
+/// CR 111.1 token-ness is already a persisted characteristic of the projection.
+impl Serialize for LiminalEntrant {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.projected().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LiminalEntrant {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let object = GameObject::deserialize(deserializer)?;
+        // CR 111.1: reading the witness back off the projection is exact — the
+        // two constructors are the two sides of this test, and nothing else can
+        // produce a `LiminalEntrant`.
+        Ok(if object.is_token {
+            Self::Token(TokenProjection(object))
+        } else {
+            Self::Card(object)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
-    pub object: GameObject,
+    pub object: LiminalEntrant,
     pub name: String,
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -22750,6 +22870,45 @@ mod tests {
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+
+    /// The `LiminalEntrant` witness is a compile-time distinction with no wire
+    /// footprint: it serializes as the bare projected object, exactly as this
+    /// field did before the witness existed, and CR 111.1 token-ness — already a
+    /// persisted characteristic — selects the variant on the way back in.
+    #[test]
+    fn a_liminal_entrant_round_trips_as_its_projected_object() {
+        for is_token in [true, false] {
+            let mut object = GameObject::new(
+                ObjectId(7),
+                CardId(3),
+                PlayerId(0),
+                "Projection".to_string(),
+                Zone::Battlefield,
+            );
+            object.is_token = is_token;
+            let entrant = if is_token {
+                LiminalEntrant::Token(TokenProjection::materialize(object.clone()))
+            } else {
+                LiminalEntrant::Card(object.clone())
+            };
+
+            let entrant_json = serde_json::to_string(&entrant).expect("entrant serializes");
+            assert_eq!(
+                entrant_json,
+                serde_json::to_string(&object).expect("object serializes"),
+                "the wire form is the projected object itself"
+            );
+
+            let restored: LiminalEntrant =
+                serde_json::from_str(&entrant_json).expect("entrant restores");
+            assert_eq!(
+                restored.is_token_projection(),
+                is_token,
+                "CR 111.1: the witness survives the round trip"
+            );
+            assert_eq!(restored.projected().name, object.name);
+        }
+    }
 
     #[derive(Serialize)]
     struct TupleKeyFixture<'a> {

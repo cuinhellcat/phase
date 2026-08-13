@@ -1782,7 +1782,7 @@ pub(super) fn handle_copy_target_choice(
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
                     (
-                        entry.object.owner,
+                        entry.object.projected().owner,
                         copy.clone(),
                         entry.enter_tapped,
                         entry.enter_with_counters.clone(),
@@ -2252,6 +2252,7 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
     if let Some(entry) = state.liminal_entries.get(&source_id) {
         return entry
             .object
+            .projected()
             .replacement_definitions
             .iter_all()
             .filter_map(|replacement| replacement.execute.as_deref())
@@ -2304,7 +2305,7 @@ pub(super) fn apply_post_replacement_effect(
                     state
                         .liminal_entries
                         .get(&obj_id)
-                        .map(|entry| &entry.object)
+                        .map(|entry| entry.object.projected())
                 })
                 .map(|obj| {
                     (
@@ -7255,7 +7256,9 @@ mod tests {
         state.liminal_entries.insert(
             liminal_id,
             LiminalEntry {
-                object: liminal,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
                 name: "Liminal Mockingbird".to_string(),
                 source_id: ObjectId(999),
                 controller: PlayerId(0),

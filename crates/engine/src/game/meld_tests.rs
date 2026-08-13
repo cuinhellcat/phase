@@ -1204,7 +1204,8 @@ fn meld_replacement_pause_keeps_result_projection_detached() {
     assert_eq!(state.objects[&source].name, "Gisela, the Broken Blade");
     assert_eq!(state.objects[&partner].name, "Bruna, the Fading Light");
     assert_eq!(
-        state.liminal_entries[&source].object.name, RESULT_NAME,
+        state.liminal_entries[&source].object.projected().name,
+        RESULT_NAME,
         "replacement matching sees the detached result projection"
     );
 

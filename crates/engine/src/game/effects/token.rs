@@ -1430,7 +1430,7 @@ fn liminal_copy_token_continuation_for_event(
     let entry = state.liminal_entries.get(entry_ref)?;
     let copy = entry.copy_resume.clone()?;
     Some(LiminalCopyTokenContinuation {
-        owner: entry.object.owner,
+        owner: entry.object.projected().owner,
         copy,
         enter_tapped: entry.enter_tapped,
         enter_with_counters: entry.enter_with_counters.clone(),
@@ -1523,6 +1523,13 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
 
 /// CR 303.4g: undo a token battlefield entry that CR 303.4g says never happened.
 ///
+/// The ONLY unhosted-entry disposition the liminal seam has, because the only
+/// entrant that seam can hold is a [`crate::types::game_state::TokenProjection`]
+/// (CR 111.1). The rule's card-backed dispositions are phrased against a
+/// from-zone, so they live where a from-zone exists: the
+/// `ProposedEvent::ZoneChange` path in `zone_pipeline`, which re-proposes the
+/// owner's-graveyard placement as a fresh, replacement-consulted event.
+///
 /// The inverse of the `state.objects.insert` + `zones::add_to_zone` pair
 /// immediately above the CR 303.4f/g consult, and nothing more. In particular it
 /// does NOT roll back `state.next_object_id`: the id was drawn by
@@ -1549,49 +1556,6 @@ pub(crate) fn uncreate_unentered_aura_token(
     state.objects.remove(&object_id);
 }
 
-/// CR 303.4g: deny a CARD-BACKED entrant's battlefield entry and put it into its
-/// owner's graveyard.
-///
-/// Sibling of [`uncreate_unentered_aura_token`] for the entrant the token clause
-/// does not cover. See `zone_pipeline::unhosted_aura_entry` for why the liminal
-/// seam's card-backed arm takes the graveyard disposition: the entrant has no
-/// prior zone to "remain" in, and the card must not simply cease to exist.
-///
-/// WHY THIS ONE IS NOT PIPELINE-ROUTED, unlike its ZoneChange twin. The
-/// stack-origin arm in `zone_pipeline` proposes a fresh, replacement-aware
-/// Stack → Graveyard move, so a `Moved` graveyard→exile redirect (Rest in Peace /
-/// Leyline of the Void) fires on it. That is only expressible because that
-/// entrant HAS a from-zone. This one does not: `ProposedEvent::TokenEntry`
-/// carries no origin, and the object is on the battlefield here solely because
-/// the seam raw-inserted it a few lines above to run the consult. Routing
-/// Battlefield → Graveyard through `move_object` would emit
-/// `ZoneChanged { from: Some(Battlefield) }` and make the game observe a CR 700.4
-/// death for an entry CR 303.4g says never happened — strictly worse than the
-/// missing `ZoneChanged` it would buy. There is no `from: None` graveyard
-/// proposal in the pipeline to route instead (`record_and_emit_entry_from_no_zone`
-/// is battlefield-only).
-///
-/// This is reachable only defensively: `materialize_token_copy_body` sets
-/// `is_token` on every entrant the one production `TokenEntry` producer builds
-/// (`token_copy.rs`), so `unhosted_aura_entry` takes the `NotCreated` arm for all
-/// of them. Closing it properly means giving the pipeline a from-nothing,
-/// replacement-consulting placement — worth doing when a production card-backed
-/// liminal entrant exists, not before.
-fn place_unentered_aura_in_owners_graveyard(
-    state: &mut GameState,
-    object_id: ObjectId,
-    owner: PlayerId,
-) {
-    // allow-raw-zone: rewinds a CR 303.4g-denied battlefield entry; the entry never happened, so no ZoneChanged may be emitted.
-    zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
-    if let Some(object) = state.objects.get_mut(&object_id) {
-        // allow-raw-zone: places a CR 303.4g-denied entrant in its owner's graveyard; the denied entry is not a replaceable CR 400.7 event.
-        object.zone = Zone::Graveyard;
-    }
-    // allow-raw-zone: pairs with the zone assignment directly above for the same CR 303.4g-denied entry.
-    zones::add_to_zone(state, object_id, Zone::Graveyard, owner);
-}
-
 pub(crate) fn commit_liminal_token_entry_with_post_actions(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1608,6 +1572,23 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     else {
         return true;
     };
+    // CR 111.1: the entrant of a `ProposedEvent::TokenEntry` is a TOKEN
+    // projection — the marker that represents a permanent no card represents,
+    // and that therefore sits in no zone until this entry commits.
+    // `state.liminal_entries` also holds the card-backed CR 701.42 meld
+    // projection, whose components are real cards in exile and which enters
+    // through `ProposedEvent::ZoneChange` from that real prior zone. A
+    // `TokenEntry` naming one would name nothing this seam may act on, so the
+    // entry is left exactly where it is — the same no-op as an entry that has
+    // already been taken, and, unlike a raw graveyard placement, an outcome
+    // that puts no object anywhere.
+    if !state
+        .liminal_entries
+        .get(&entry_ref)
+        .is_some_and(|entry| entry.object.is_token_projection())
+    {
+        return true;
+    }
     let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
         return true;
     };
@@ -1617,8 +1598,10 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         .chain(entry.enter_with_counters.iter())
         .cloned()
         .collect();
-    entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
-    let owner = entry.object.owner;
+    entry
+        .object
+        .set_tapped(enter_tapped.resolve(entry.object.projected().tapped));
+    let owner = entry.object.projected().owner;
 
     // CR 733: the settled copy-token birth journals at the single liminal insert
     // seam. `copy_resume` is `Some` for every production liminal entry of kind
@@ -1652,20 +1635,21 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
             }
         };
         ResolvedTokenCreationCommand {
-            object: ObjectIncarnationRef::from_object(&entry.object),
+            object: ObjectIncarnationRef::from_object(entry.object.projected()),
             owner,
-            entry_timestamp: entry.object.timestamp,
+            entry_timestamp: entry.object.projected().timestamp,
             // CR 302.6: the entered-turn the liminal build already stamped, read
             // back off the object rather than re-read from the live turn.
             entry_turn: entry
                 .object
+                .projected()
                 .entered_battlefield_turn
                 .unwrap_or(state.turn_number),
             body: ResolvedTokenBody::Copy {
                 copy,
                 modifications,
             },
-            resulting_tapped: entry.object.tapped,
+            resulting_tapped: entry.object.projected().tapped,
             // `reserve_liminal_token_object` advanced the allocator to exactly
             // one past this id when it drew it, however many were drawn since.
             resulting_next_object_id: entry_ref.0 + 1,
@@ -1673,19 +1657,9 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         }
     });
 
-    // CR 303.4g: what "no legal host" means for THIS entrant, decided from the
-    // liminal projection BEFORE it is installed. `ProposedEvent::TokenEntry`
-    // carries no from-zone — the entrant is a set of characteristics no zone list
-    // holds — so the origin is `NoPriorZone` and the shared authority in
-    // `zone_pipeline` maps it: a token isn't created, a card-backed entrant is put
-    // into its owner's graveyard. Neither may enter unattached and be left to the
-    // CR 704.5m state-based action; the rule denies the entry itself.
-    let unhosted_entry = crate::game::zone_pipeline::unhosted_aura_entry(
-        &entry.object,
-        crate::game::zone_pipeline::UnhostedAuraOrigin::NoPriorZone,
-    );
-
-    state.objects.insert(entry_ref, entry.object);
+    state
+        .objects
+        .insert(entry_ref, entry.object.into_projected());
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
     zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
 
@@ -1731,37 +1705,29 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
     // owner's graveyard instead of entering the battlefield. If the Aura is a
     // token, it isn't created."
     //
-    // EVERY disposition denies the entry — there is no arm that lets the entrant
-    // stay on the battlefield unattached for the CR 704.5m state-based action to
-    // sweep, because the rule says this entry never happens. Rewound before
-    // anything observes it: no CR 733 birth record (`birth_command` is still
-    // unrecorded here), no `TokenCreated`, no battlefield `ZoneChanged`, and no
+    // The entry is denied — there is no arm that lets the entrant stay on the
+    // battlefield unattached for the CR 704.5m state-based action to sweep,
+    // because the rule says this entry never happens. Rewound before anything
+    // observes it: no CR 733 birth record (`birth_command` is still unrecorded
+    // here), no `TokenCreated`, no battlefield `ZoneChanged`, and no
     // `last_created_token_ids` row.
     if matches!(
         &hosts,
         crate::game::zone_pipeline::EnteringAuraHosts::Hosts { legal_targets, .. }
             if legal_targets.is_empty()
     ) {
-        match unhosted_entry {
-            // CR 303.4g + CR 111.1: "it isn't created" — and, unlike the CR 704.5m
-            // sweep it replaces, nothing lands in the owner's graveyard either.
-            crate::game::zone_pipeline::UnhostedAuraEntry::NotCreated => {
-                uncreate_unentered_aura_token(state, entry_ref, owner);
-            }
-            // Card-backed. Not reachable from any production caller today — the
-            // only production producer of `ProposedEvent::TokenEntry` is the
-            // liminal copy-token seam in `token_copy.rs`, whose
-            // `materialize_token_copy_body` sets `is_token` — but handled rather
-            // than assumed away, because the seam's contract is a `GameObject`
-            // and nothing in the type forbids a card-backed one. `NoPriorZone`
-            // cannot yield `RemainInCurrentZone`, so both remaining arms are the
-            // graveyard; they are listed exhaustively so a future origin that
-            // does yield it forces a decision here.
-            crate::game::zone_pipeline::UnhostedAuraEntry::OwnersGraveyard
-            | crate::game::zone_pipeline::UnhostedAuraEntry::RemainInCurrentZone => {
-                place_unentered_aura_in_owners_graveyard(state, entry_ref, owner);
-            }
-        }
+        // CR 303.4g + CR 111.1: "If the Aura is a token, it isn't created" is the
+        // ONLY disposition available here, and it is available by construction:
+        // this seam's entrant is a `LiminalEntrant::Token`, whose CR 111.1
+        // token-ness is a property of the type rather than an expectation about
+        // a flag. The rule's two card-backed dispositions are phrased against
+        // the zone the Aura is entering FROM, which is why they belong to — and
+        // only exist on — the `ProposedEvent::ZoneChange` path in
+        // `zone_pipeline`, where the owner's-graveyard placement is re-proposed
+        // as a fresh event so CR 614.6 graveyard→exile redirects (Rest in Peace,
+        // Leyline of the Void) still apply to it. Nothing is placed anywhere
+        // here, so there is no placement for a replacement to miss.
+        uncreate_unentered_aura_token(state, entry_ref, owner);
         // CR 111.1 + CR 603.7: the anaphora slot still has to be republished, or
         // the batch continuation (which reads it back to seed the next token's
         // `created_ids`) would carry whatever an EARLIER, unrelated effect left
@@ -7310,137 +7276,274 @@ mod tests {
         );
     }
 
-    /// CR 303.4g on the liminal seam, for BOTH dispositions: an unhosted entrant
-    /// never enters, and what happens instead is selected by CR 111.1 token-ness.
-    ///
-    /// The card-backed half is not reachable from a production caller today (the
-    /// only production producer of `ProposedEvent::TokenEntry` is the liminal
-    /// copy-token seam in `token_copy.rs`, whose `materialize_token_copy_body`
-    /// sets `is_token`), which is precisely why it is pinned here: the seam takes
-    /// a `GameObject`, nothing in that type forbids a card-backed one, and the
-    /// arm it used to take — enter unattached and wait for the CR 704.5m
-    /// state-based action — is an entry CR 303.4g says never happens.
-    #[test]
-    fn an_unhosted_liminal_aura_entrant_never_enters_whatever_its_token_ness() {
-        use crate::types::game_state::LiminalEntry;
+    /// A Rest in Peace-class board-wide `Moved` graveyard→exile redirect,
+    /// deliberately NOT a creature: a creature would be a legal host for
+    /// `enchant creature` and CR 303.4g would never be reached.
+    fn add_graveyard_to_exile_redirect(state: &mut GameState) -> ObjectId {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let rip = create_object(
+            state,
+            CardId(90_400),
+            PlayerId(1),
+            "Rest in Peace".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&rip)
+            .expect("just created")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Exile,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    )),
+            );
+        rip
+    }
+
+    /// Build the unhosted liminal Aura fixture: an Aura with `Enchant creature`
+    /// in a game with no creature anywhere, so the CR 303.4f consult finds no
+    /// legal host and CR 303.4g decides the entry.
+    fn unhosted_liminal_aura_entrant(state: &mut GameState) -> (ObjectId, GameObject) {
         use crate::types::keywords::Keyword;
 
-        // `is_token` selects the disposition; everything else is identical.
-        for is_token in [true, false] {
-            let mut state = GameState::new_two_player(42);
-            let source_id = create_object(
-                &mut state,
-                CardId(1),
-                PlayerId(0),
-                "Maker".to_string(),
-                Zone::Battlefield,
-            );
+        let (entry_ref, mut entrant) =
+            reserve_liminal_token_object(state, PlayerId(0), "Unhosted Aura".to_string());
+        entrant.card_types.core_types = vec![CoreType::Enchantment];
+        entrant.card_types.subtypes = vec!["Aura".to_string()];
+        entrant.base_card_types = entrant.card_types.clone();
+        let enchant = Keyword::Enchant(TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Creature),
+        ));
+        entrant.keywords = vec![enchant.clone()];
+        entrant.base_keywords = vec![enchant];
+        let timestamp = state.next_timestamp();
+        entrant.reset_for_battlefield_entry(state.turn_number, timestamp);
+        (entry_ref, entrant)
+    }
 
-            // The entrant: an Aura with `Enchant creature` in a game with no
-            // creature anywhere, so the CR 303.4f consult finds no legal host.
-            let (entry_ref, mut entrant) =
-                reserve_liminal_token_object(&mut state, PlayerId(0), "Unhosted Aura".to_string());
-            entrant.is_token = is_token;
-            entrant.card_types.core_types = vec![CoreType::Enchantment];
-            entrant.card_types.subtypes = vec!["Aura".to_string()];
-            entrant.base_card_types = entrant.card_types.clone();
-            let enchant = Keyword::Enchant(TargetFilter::Typed(
-                crate::types::ability::TypedFilter::new(
-                    crate::types::ability::TypeFilter::Creature,
+    fn liminal_entry_for(
+        object: crate::types::game_state::LiminalEntrant,
+        source_id: ObjectId,
+    ) -> crate::types::game_state::LiminalEntry {
+        crate::types::game_state::LiminalEntry {
+            object,
+            name: "Unhosted Aura".to_string(),
+            source_id,
+            controller: PlayerId(0),
+            enters_attacking: false,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: std::collections::HashSet::new(),
+        }
+    }
+
+    /// CR 303.4g + CR 111.1 on the liminal seam: an unhosted entrant never
+    /// enters, and because this seam's entrant is a `LiminalEntrant::Token`, "if
+    /// the Aura is a token, it isn't created" is the whole disposition — nothing
+    /// is placed in any zone.
+    ///
+    /// A Rest in Peace-class graveyard→exile redirect is on the battlefield
+    /// throughout. Its only job is to be available: the seam performs no
+    /// placement for it to redirect, so both the graveyard and exile stay empty.
+    /// That is the point of the narrowing — the placement that used to bypass
+    /// this redirect does not exist any more, rather than existing and being
+    /// routed correctly.
+    #[test]
+    fn an_unhosted_liminal_aura_token_is_not_created_and_reaches_no_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Maker".to_string(),
+            Zone::Battlefield,
+        );
+        let rip = add_graveyard_to_exile_redirect(&mut state);
+        // Reach guard: the anaphora slot starts non-empty, so the republish
+        // below is observable rather than vacuously equal.
+        state.last_created_token_ids = vec![ObjectId(4_242)];
+
+        let (entry_ref, entrant) = unhosted_liminal_aura_entrant(&mut state);
+        state.liminal_entries.insert(
+            entry_ref,
+            liminal_entry_for(
+                crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(entrant),
                 ),
-            ));
-            entrant.keywords = vec![enchant.clone()];
-            entrant.base_keywords = vec![enchant];
-            let timestamp = state.next_timestamp();
-            entrant.reset_for_battlefield_entry(state.turn_number, timestamp);
+                source_id,
+            ),
+        );
 
-            state.liminal_entries.insert(
-                entry_ref,
-                LiminalEntry {
-                    object: entrant,
-                    name: "Unhosted Aura".to_string(),
-                    source_id,
-                    controller: PlayerId(0),
-                    enters_attacking: false,
-                    attach_to: None,
-                    sacrifice_at: None,
-                    remaining_count: 0,
-                    created_ids: Vec::new(),
-                    copy_resume: None,
-                    spec_resume: None,
+        let mut events = Vec::new();
+        assert!(
+            commit_liminal_token_entry_with_post_actions(
+                &mut state,
+                ProposedEvent::TokenEntry {
+                    entry_ref,
                     enter_tapped: EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
-                    kind: crate::types::game_state::LiminalEntryKind::Token,
-                    replacement_applied: std::collections::HashSet::new(),
+                    applied: std::collections::HashSet::new(),
                 },
-            );
+                &mut events,
+                TokenEntryEventEmission::Emit,
+                Vec::new(),
+            ),
+            "a denied entry is not a pause — the batch loop must continue"
+        );
 
-            let mut events = Vec::new();
-            assert!(
-                commit_liminal_token_entry_with_post_actions(
-                    &mut state,
-                    ProposedEvent::TokenEntry {
-                        entry_ref,
-                        enter_tapped: EtbTapState::Unspecified,
-                        enter_with_counters: Vec::new(),
-                        applied: std::collections::HashSet::new(),
-                    },
-                    &mut events,
-                    TokenEntryEventEmission::Emit,
-                    Vec::new(),
-                ),
-                "a denied entry is not a pause — the batch loop must continue"
-            );
-
-            // Shared by both dispositions: the entry never happened, and nothing
-            // observed one.
-            assert!(
-                !state.battlefield.iter().any(|&id| id == entry_ref),
-                "CR 303.4g: the unhosted Aura must not be on the battlefield \
-                 (is_token = {is_token})"
-            );
-            assert!(
-                !events.iter().any(|event| matches!(
-                    event,
-                    GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref
+        // CR 303.4g + CR 111.1: "it isn't created" — the object does not exist.
+        assert!(
+            !state.objects.contains_key(&entry_ref),
+            "a token CR 303.4g denies is not created at all"
+        );
+        assert!(!state.battlefield.iter().any(|&id| id == entry_ref));
+        // Nothing observed the entry: no birth, no battlefield ZoneChanged.
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref
+            )),
+            "CR 303.4g: no TokenCreated for an entry the rule denies"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == entry_ref
+            )),
+            "CR 303.4g: no ZoneChanged at all for an entry the rule denies"
+        );
+        assert!(
+            state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .all(|entry| !matches!(
+                    entry.command,
+                    Some(crate::types::resolved_commands::ResolvedRulesCommand::TokenCreation(_))
                 )),
-                "CR 303.4g: no TokenCreated for an entry the rule denies"
-            );
-            assert!(
-                !events.iter().any(|event| matches!(
-                    event,
-                    GameEvent::ZoneChanged {
-                        object_id,
-                        to: Zone::Battlefield,
-                        ..
-                    } if *object_id == entry_ref
-                )),
-                "CR 303.4g: no battlefield ZoneChanged for an entry the rule denies"
-            );
+            "CR 733: no birth is journaled for a token that isn't created"
+        );
+        // CR 111.1: the anaphora slot names the tokens THIS effect created, so
+        // it is republished as this batch's list (empty here) rather than left
+        // holding the earlier, unrelated effect's tokens.
+        assert!(state.last_created_token_ids.is_empty());
+        // Nothing reached a graveyard, so the redirect that was standing by had
+        // nothing to redirect either.
+        assert!(state
+            .players
+            .iter()
+            .all(|player| player.graveyard.is_empty()));
+        assert!(
+            !state.exile.iter().any(|&id| id == entry_ref),
+            "the redirect must not have anything to redirect"
+        );
+        assert!(
+            state.objects.contains_key(&rip),
+            "reach guard: the redirect was on the battlefield the whole time"
+        );
+        assert!(state.liminal_entries.is_empty());
+    }
 
-            if is_token {
-                // CR 303.4g + CR 111.1: "it isn't created" — and, unlike the
-                // CR 704.5m sweep it replaces, nothing reaches any graveyard.
-                assert!(
-                    !state.objects.contains_key(&entry_ref),
-                    "a token CR 303.4g denies is not created at all"
-                );
-                assert!(state.players[0].graveyard.is_empty());
-            } else {
-                // CR 303.4g: a card-backed entrant is not destroyed — it is put
-                // into its owner's graveyard, the rule's own non-battlefield
-                // outcome for an entrant with nowhere to remain.
-                assert_eq!(
-                    state.objects[&entry_ref].zone,
-                    Zone::Graveyard,
-                    "a card-backed entrant CR 303.4g denies goes to its owner's graveyard"
-                );
-                assert!(
-                    state.players[0].graveyard.iter().any(|&id| id == entry_ref),
-                    "the owner's graveyard actually holds it"
-                );
-            }
-        }
+    /// The card-backed half of the old dual-disposition test, kept as the
+    /// regression for what replaced it: a card-backed projection reaching this
+    /// seam is now inert instead of being raw-placed into a graveyard.
+    ///
+    /// `LiminalEntrant::Card` is the CR 701.42a meld result — a permanent
+    /// "represented by two cards" — which enters through
+    /// `ProposedEvent::ZoneChange` from the exile its components sit in, and
+    /// whose CR 303.4g dispositions are decided there (see
+    /// `zone_pipeline::the_stack_origin_graveyard_placement_consults_moved_redirects`
+    /// for the replacement-consulted graveyard placement on that path). A
+    /// `TokenEntry` naming one names nothing this seam may act on.
+    ///
+    /// Revert-failing assertion: `graveyard.is_empty()`. The deleted
+    /// `place_unentered_aura_in_owners_graveyard` put this entrant into its
+    /// owner's graveyard with raw `zones::` calls, past the Rest in Peace-class
+    /// redirect that is on the battlefield here — so before the change this
+    /// assertion failed, and the exile assertion below failed too.
+    #[test]
+    fn a_card_backed_liminal_projection_is_never_placed_by_the_token_entry_seam() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Maker".to_string(),
+            Zone::Battlefield,
+        );
+        add_graveyard_to_exile_redirect(&mut state);
+
+        let (entry_ref, entrant) = unhosted_liminal_aura_entrant(&mut state);
+        state.liminal_entries.insert(
+            entry_ref,
+            liminal_entry_for(
+                crate::types::game_state::LiminalEntrant::Card(entrant),
+                source_id,
+            ),
+        );
+
+        let mut events = Vec::new();
+        assert!(
+            commit_liminal_token_entry_with_post_actions(
+                &mut state,
+                ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: std::collections::HashSet::new(),
+                },
+                &mut events,
+                TokenEntryEventEmission::Emit,
+                Vec::new(),
+            ),
+            "declining an entrant that is not this seam's is not a pause"
+        );
+
+        assert!(
+            state
+                .players
+                .iter()
+                .all(|player| player.graveyard.is_empty()),
+            "no raw graveyard placement may happen on this path"
+        );
+        assert!(
+            state.exile.is_empty(),
+            "and nothing was routed to the redirect's destination either"
+        );
+        assert!(!state.objects.contains_key(&entry_ref));
+        assert!(!state.battlefield.iter().any(|&id| id == entry_ref));
+        assert!(events.is_empty(), "nothing observable happened: {events:?}");
+        assert!(
+            state.liminal_entries.contains_key(&entry_ref),
+            "the projection is left exactly where it was, not consumed"
+        );
     }
 
     #[test]
@@ -7493,7 +7596,6 @@ mod tests {
         let source_id = ObjectId(100);
         let (entry_ref, mut token) =
             reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
-        token.is_token = true;
         apply_copiable_values_to_liminal_object(
             &mut token,
             &values,
@@ -7506,7 +7608,9 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
-                object: token,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(token),
+                ),
                 name: values.name.clone(),
                 source_id,
                 controller: PlayerId(0),

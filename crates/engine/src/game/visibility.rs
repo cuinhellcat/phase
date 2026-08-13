@@ -2246,12 +2246,16 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
-                object: crate::game::game_object::GameObject::new(
-                    entry_ref,
-                    CardId(99),
-                    PlayerId(0),
-                    "Liminal Token".to_string(),
-                    Zone::Battlefield,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(
+                        crate::game::game_object::GameObject::new(
+                            entry_ref,
+                            CardId(99),
+                            PlayerId(0),
+                            "Liminal Token".to_string(),
+                            Zone::Battlefield,
+                        ),
+                    ),
                 ),
                 name: "Liminal Token".to_string(),
                 source_id: ObjectId(1),

@@ -2392,7 +2392,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 let Some(mut obj) = state
                     .liminal_entries
                     .get(object_id)
-                    .map(|entry| entry.object.clone())
+                    .map(|entry| entry.object.projected().clone())
                     .or_else(|| state.objects.get(object_id).cloned())
                 else {
                     return false;
@@ -2420,7 +2420,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             } else if let Some(entry) = state.liminal_entries.get(object_id) {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *object_id,
                     filter,
                     ctx.source_id,
@@ -2439,7 +2439,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             state.liminal_entries.get(entry_ref).is_some_and(|entry| {
                 filter_inner_for_object(
                     state,
-                    &entry.object,
+                    entry.object.projected(),
                     *entry_ref,
                     filter,
                     ctx.source_id,

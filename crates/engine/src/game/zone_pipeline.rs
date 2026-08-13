@@ -1832,7 +1832,7 @@ fn entering_object_projection(state: &GameState, object_id: ObjectId) -> Option<
     state
         .liminal_entries
         .get(&object_id)
-        .map(|entry| &entry.object)
+        .map(|entry| entry.object.projected())
         .or_else(|| state.objects.get(&object_id))
 }
 
@@ -1964,20 +1964,6 @@ fn legal_aura_attachment_targets(
     targets
 }
 
-/// Where a CR 303.4g entrant would "remain", for a seam that is deciding an
-/// Aura's fate BEFORE the entry happens.
-///
-/// The rule's non-token dispositions are both phrased against the zone the Aura
-/// is entering from, so a caller must state which it has. A liminal projection
-/// has none: the entrant is a set of characteristics that no zone list holds yet.
-pub(crate) enum UnhostedAuraOrigin {
-    /// A CR 400.7 zone change: the `from` zone of the approved event.
-    Zone(Zone),
-    /// A liminal entry (`ProposedEvent::TokenEntry`): the entrant exists in no
-    /// zone, so there is nothing for it to "remain" in.
-    NoPriorZone,
-}
-
 /// CR 303.4g: the fate of an Aura that is entering the battlefield when "there
 /// is no legal object or player for it to enchant".
 ///
@@ -1998,28 +1984,25 @@ pub(crate) enum UnhostedAuraEntry {
 }
 
 /// CR 303.4g: select the disposition from the two facts the rule keys on — the
-/// entrant's CR 111.1 token-ness, and where it is entering from.
+/// entrant's CR 111.1 token-ness, and the zone it is entering from.
 ///
-/// [`UnhostedAuraOrigin::NoPriorZone`] takes the graveyard arm for a card-backed
-/// entrant: "remains in its current zone" has no referent for an entrant that is
-/// in none, which is the same shape as the stack case the rule already answers
-/// (an object whose pre-entry location cannot hold a permanent card). It is
-/// never the destructive reading — the card is never simply dropped.
-pub(crate) fn unhosted_aura_entry(
-    entrant: &GameObject,
-    origin: UnhostedAuraOrigin,
-) -> UnhostedAuraEntry {
+/// Every entrant this authority answers for HAS a from-zone, because both of the
+/// rule's non-token dispositions are phrased against one ("remains in its
+/// current zone", "unless that zone is the stack"). That is the whole population
+/// of the `ProposedEvent::ZoneChange` entry path. The other entry path,
+/// `ProposedEvent::TokenEntry`, carries a `LiminalEntrant::Token` — a CR 111.1
+/// token, in no zone at all — for which the rule's token clause is the only
+/// applicable disposition, so that seam never asks this question.
+pub(crate) fn unhosted_aura_entry(entrant: &GameObject, from: Zone) -> UnhostedAuraEntry {
     // CR 111.1: token-ness is the ONLY discriminator the rule's token clause
     // names, and it outranks the origin — a token is not created regardless of
-    // where the effect was putting it onto the battlefield from.
+    // which zone the effect was putting it onto the battlefield from.
     if entrant.is_token {
         return UnhostedAuraEntry::NotCreated;
     }
-    match origin {
-        UnhostedAuraOrigin::Zone(Zone::Stack) | UnhostedAuraOrigin::NoPriorZone => {
-            UnhostedAuraEntry::OwnersGraveyard
-        }
-        UnhostedAuraOrigin::Zone(_) => UnhostedAuraEntry::RemainInCurrentZone,
+    match from {
+        Zone::Stack => UnhostedAuraEntry::OwnersGraveyard,
+        _ => UnhostedAuraEntry::RemainInCurrentZone,
     }
 }
 
@@ -2148,7 +2131,7 @@ pub(crate) fn entering_aura_hosts(state: &GameState, object_id: ObjectId) -> Ent
     // `resolve_entering_aura_attachment` caller runs on a realized battlefield
     // permanent), so this arm closes the class rather than fixing a live bug.
     if let Some(entry) = state.liminal_entries.get(&object_id) {
-        let entrant = entry.object.clone();
+        let entrant = entry.object.projected().clone();
         return entering_aura_hosts_projected(state, object_id, &entrant);
     }
     let Some(entrant) = state.objects.get(&object_id) else {
@@ -2577,21 +2560,17 @@ mod entering_aura_attachment_tests {
     }
 
     /// CR 303.4g: "If the Aura is a token, it isn't created." Token-ness outranks
-    /// the origin — a token is never created regardless of where the effect was
-    /// putting it onto the battlefield from.
+    /// the origin — a token is never created regardless of which zone the effect
+    /// was putting it onto the battlefield from.
     #[test]
     fn a_token_entrant_is_never_created_whatever_its_origin() {
         let mut state = GameState::new_two_player(1);
         let id = aura(&mut state, P0, enchant_creature());
         let entrant = state.objects[&id].clone();
 
-        for origin in [
-            UnhostedAuraOrigin::NoPriorZone,
-            UnhostedAuraOrigin::Zone(Zone::Stack),
-            UnhostedAuraOrigin::Zone(Zone::Graveyard),
-        ] {
+        for from in [Zone::Stack, Zone::Graveyard, Zone::Exile] {
             assert!(matches!(
-                unhosted_aura_entry(&entrant, origin),
+                unhosted_aura_entry(&entrant, from),
                 UnhostedAuraEntry::NotCreated
             ));
         }
@@ -2599,8 +2578,14 @@ mod entering_aura_attachment_tests {
 
     /// CR 303.4g: a card-backed Aura "remains in its current zone, unless that
     /// zone is the stack. In that case, the Aura is put into its owner's
-    /// graveyard instead of entering the battlefield." A liminal projection has
-    /// no current zone at all, so it takes the same non-destructive arm.
+    /// graveyard instead of entering the battlefield."
+    ///
+    /// Every entrant this authority answers for has a from-zone: it is asked
+    /// only from the `ProposedEvent::ZoneChange` entry path. The other entry
+    /// path carries a CR 111.1 `LiminalEntrant::Token`, for which the rule's
+    /// token clause is the only applicable disposition, so a from-nothing
+    /// card-backed entrant is not a state this authority (or the type it is
+    /// asked about) can be in.
     #[test]
     fn a_card_backed_entrants_disposition_is_selected_by_its_origin() {
         let mut state = GameState::new_two_player(1);
@@ -2608,19 +2593,15 @@ mod entering_aura_attachment_tests {
         let entrant = state.objects[&id].clone();
 
         assert!(matches!(
-            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Graveyard)),
+            unhosted_aura_entry(&entrant, Zone::Graveyard),
             UnhostedAuraEntry::RemainInCurrentZone
         ));
         assert!(matches!(
-            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Exile)),
+            unhosted_aura_entry(&entrant, Zone::Exile),
             UnhostedAuraEntry::RemainInCurrentZone
         ));
         assert!(matches!(
-            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::Zone(Zone::Stack)),
-            UnhostedAuraEntry::OwnersGraveyard
-        ));
-        assert!(matches!(
-            unhosted_aura_entry(&entrant, UnhostedAuraOrigin::NoPriorZone),
+            unhosted_aura_entry(&entrant, Zone::Stack),
             UnhostedAuraEntry::OwnersGraveyard
         ));
     }
@@ -2690,10 +2671,13 @@ mod entering_aura_attachment_tests {
     /// Honest scope: this does NOT discriminate against the destination-rewrite
     /// form this arm replaced — that delivered the same event and emitted the same
     /// pair. It pins the property against the OTHER regression available here, a
-    /// raw `zones::` placement of the kind the liminal card-backed sibling still
-    /// uses, which emits nothing at all and so fires no "put into a graveyard from
-    /// anywhere" trigger. The revert-discriminating assertion for the routing
-    /// change itself is in the redirect test below.
+    /// raw `zones::` placement, which emits nothing at all and so fires no "put
+    /// into a graveyard from anywhere" trigger. (The liminal seam's card-backed
+    /// sibling was exactly such a raw placement; it no longer exists — a
+    /// `ProposedEvent::TokenEntry` entrant is a CR 111.1 token by construction,
+    /// so this path is the only place a CR 303.4g graveyard placement happens.)
+    /// The revert-discriminating assertion for the routing change itself is in
+    /// the redirect test below.
     #[test]
     fn the_stack_origin_graveyard_placement_emits_a_zone_changed() {
         let mut state = GameState::new_two_player(1);
@@ -4055,7 +4039,7 @@ fn execute_zone_move_with_applied_terminal(
         if let Some(obj) = state
             .liminal_entries
             .get(&obj_id)
-            .map(|entry| &entry.object)
+            .map(|entry| entry.object.projected())
             .or_else(|| state.objects.get(&obj_id))
         {
             // CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
@@ -4181,9 +4165,9 @@ fn execute_zone_move_with_applied_terminal(
                             // event — the rule denies the entry, so nothing may
                             // observe one.
                             [] => {
-                                match entering_object_projection(state, *object_id).map(|entrant| {
-                                    unhosted_aura_entry(entrant, UnhostedAuraOrigin::Zone(*from))
-                                }) {
+                                match entering_object_projection(state, *object_id)
+                                    .map(|entrant| unhosted_aura_entry(entrant, *from))
+                                {
                                     Some(UnhostedAuraEntry::OwnersGraveyard) => {
                                         unhosted_to_owners_graveyard = true;
                                     }
