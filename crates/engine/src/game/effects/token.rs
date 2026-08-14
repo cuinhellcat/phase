@@ -2997,10 +2997,37 @@ fn resolve_attach_host(
         // `TargetRef::Object` in `ability.targets`. Player-host Auras (CR 303.4
         // permits a player host) are not yet implemented — no current card creates
         // a token attached to a player, so a Player slot yields `None` here.
-        _ => ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
-            TargetRef::Player(_) => None,
-        }),
+        _ => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+                TargetRef::Player(_) => None,
+            })
+            // CR 608.2k: when the ability chose no target at all, the host
+            // pronoun cannot be a back-reference to one — its antecedent is the
+            // untargeted object the trigger condition already named ("When this
+            // creature enters, create a Monster Role token attached to IT").
+            // The event context is the single authority for that object, so the
+            // fallback routes through the same resolver the `TriggeringSource`
+            // arm above uses rather than reading `source_id` directly: for a
+            // token copy created by a resolving chain the two differ, and the
+            // event's subject is the one the sentence refers to.
+            //
+            // Without this the host stays unbound, the Aura token enters
+            // attached to nothing, and the CR 704.5m SBA moves it to the
+            // graveyard where CR 111.7 ends it — a Role that flickers in and out
+            // of existence within one resolution and never reaches the board.
+            .or_else(|| {
+                ability.targets.is_empty().then(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::TriggeringSource,
+                        ability.source_id,
+                    )
+                    .map(target_ref_to_attach_target)
+                })?
+            }),
     }
 }
 

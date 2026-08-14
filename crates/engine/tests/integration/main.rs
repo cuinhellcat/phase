@@ -954,6 +954,7 @@ mod search_delivery_observer_dedup;
 mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;
 mod selenia_vigilance_grant;
+mod self_attached_aura_token_host;
 mod self_destruct_target_power;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
