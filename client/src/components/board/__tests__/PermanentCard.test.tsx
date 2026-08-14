@@ -146,9 +146,23 @@ function renderPermanent(
   );
 }
 
-function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
+/**
+ * The engine's projection for host 1: `members` is everything it publishes as
+ * attached to that host — its whole subtree — and `objectIds` the subset it also
+ * published a one-step pick for. A member without a pick is the ordinary case:
+ * the engine publishes picks per direct host and only for a child with exactly
+ * one legal choice.
+ */
+function interactionForAttachedObjects(
+  objectIds: number[],
+  members: number[] = objectIds,
+): ViewerInteraction {
   const interactionId = "attachment-interaction" as InteractionId;
   const choiceId = (objectId: number) => `attachment-${objectId}` as InteractionChoiceId;
+  const submission = (objectId: number) => ({
+    interactionId,
+    response: { type: "choose" as const, data: { choiceId: choiceId(objectId) } },
+  });
   return {
     waitingForKind: { simultaneous: null, terminal: false, code: "choose" },
     authorizedSubmitters: [0],
@@ -171,22 +185,34 @@ function interactionForAttachedObjects(objectIds: number[]): ViewerInteraction {
     }],
     attachmentFans: {
       1: {
-      hostId: 1,
-      children: objectIds.map((objectId) => ({
-        objectId,
-        submission: {
-          interactionId,
-          response: { type: "choose", data: { choiceId: choiceId(objectId) } },
-        },
-      })),
+        hostId: 1,
+        children: objectIds.map((objectId) => ({ objectId, submission: submission(objectId) })),
+      },
+    },
+    attachmentViews: members.length === 0 ? {} : {
+      1: {
+        hostId: 1,
+        cards: members.map((objectId) => ({
+          objectId,
+          submission: objectIds.includes(objectId) ? submission(objectId) : null,
+        })),
       },
     },
     availability: { type: "inputRequired" },
-  };
+  } as ViewerInteraction;
 }
 
 function interactionForAttachedObject(objectId: number): ViewerInteraction {
   return interactionForAttachedObjects([objectId]);
+}
+
+/**
+ * A projection that publishes membership and no pick at all — what the engine
+ * sends whenever nothing about these cards is currently choosable, which is most
+ * of the time. The badge and the fan read it either way.
+ */
+function membershipOnly(members: number[]): ViewerInteraction {
+  return interactionForAttachedObjects([], members);
 }
 
 /**
@@ -252,8 +278,10 @@ describe("PermanentCard", () => {
       spellCosts: {},
       // Reset alongside the rest of the engine-published state: without this the
       // rows that publish an attachment fan leak it into every later row, so the
-      // suite only passed because they happened to be declared last.
-      viewerInteraction: null,
+      // suite only passed because they happened to be declared last. Membership
+      // itself is always published — object 2 hangs on the host and object 3 on
+      // object 2 — because the fan and the badge now read it from here.
+      viewerInteraction: membershipOnly([2, 3]),
     });
     useUiStore.setState({
       selectedObjectId: null,
@@ -643,7 +671,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     const button = screen.getByRole("button", {
-      name: "View Test Creature's attached card",
+      name: "View Test Creature's 2 attached cards",
     });
 
     fireEvent.pointerDown(button);
@@ -658,7 +686,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     const button = screen.getByRole("button", {
-      name: "View Test Creature's attached card",
+      name: "View Test Creature's 2 attached cards",
     });
 
     expect(button).toHaveStyle({
@@ -1047,7 +1075,13 @@ describe("PermanentCard", () => {
     const gameState = keepguardUnderCoopedUp();
     gameState.objects[1] = { ...gameState.objects[1], attachments: [] };
     gameState.battlefield = [1];
-    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    // Nothing is attached, so the engine publishes no membership for this host —
+    // and the badge is gated on that, not on a scan of the snapshot.
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: membershipOnly([]),
+    });
 
     const { container } = renderPermanent();
 
@@ -1089,11 +1123,16 @@ describe("PermanentCard", () => {
       useGameStore.setState({
         gameState: nextState,
         waitingFor: nextState.waiting_for,
+        // The engine republishes membership with the state it belongs to; the
+        // fan follows that, not the raw `attachments` array.
+        viewerInteraction: membershipOnly([]),
       });
     });
 
-    expect(queryAllByLabelText("Test Creature").length).toBeGreaterThan(0);
+    // The last member left the battlefield, so the fan has nothing to spread and
+    // tears itself down rather than lingering as a lone host card over the board.
     expect(queryAllByLabelText("Test Equipment")).toHaveLength(0);
+    expect(queryAllByLabelText("Test Creature")).toHaveLength(0);
   });
 
   it("auto-expands collapsed attachments when one is a valid target", () => {

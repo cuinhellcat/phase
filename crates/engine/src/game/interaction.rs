@@ -37,17 +37,17 @@ use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
     InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
-    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAvailability,
-    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
-    InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
-    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
-    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
-    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
-    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
-    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
-    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
-    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionAttachmentFan, InteractionAttachmentFanChild, InteractionAttachmentView,
+    InteractionAttachmentViewCard, InteractionAvailability, InteractionChoice, InteractionChoiceId,
+    InteractionChoiceStatus, InteractionDamageAssignmentMode, InteractionGroupConstraint,
+    InteractionId, InteractionIntentCode, InteractionManaAbilityActivationScope,
+    InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
+    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
+    InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
+    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
+    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
+    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
+    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
     InteractionShortcutPreviewFamily, InteractionShortcutReply, InteractionShortcutResponseCode,
@@ -7420,6 +7420,9 @@ pub fn derive_viewer_interaction(
     viewer: PlayerId,
 ) -> ViewerInteraction {
     debug_assert_interaction_consistency(authoritative_state);
+    // Membership follows visibility, so it is built before any authorization,
+    // session or bounding gate and carried by every projection below.
+    let attachment_views = attachment_views_for_viewer(filtered_state);
     let authorized_submitters = turn_control::authorized_submitters(authoritative_state);
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
@@ -7431,6 +7434,7 @@ pub fn derive_viewer_interaction(
             auto_pass_recommended: false,
             opportunities: Vec::new(),
             attachment_fans: BTreeMap::new(),
+            attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Terminal {
                 outcome: InteractionOutcomeCode::Terminal,
             },
@@ -7447,6 +7451,7 @@ pub fn derive_viewer_interaction(
             auto_pass_recommended: false,
             opportunities: Vec::new(),
             attachment_fans: BTreeMap::new(),
+            attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Waiting,
         };
     }
@@ -7465,6 +7470,7 @@ pub fn derive_viewer_interaction(
             auto_pass_recommended: false,
             opportunities: Vec::new(),
             attachment_fans: BTreeMap::new(),
+            attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::AuthorityUnbound,
             },
@@ -7481,6 +7487,7 @@ pub fn derive_viewer_interaction(
             auto_pass_recommended: false,
             opportunities: Vec::new(),
             attachment_fans: BTreeMap::new(),
+            attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::InvalidAuthorityState,
             },
@@ -7508,6 +7515,7 @@ pub fn derive_viewer_interaction(
             auto_pass_recommended: false,
             opportunities: Vec::new(),
             attachment_fans: BTreeMap::new(),
+            attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::PayloadTooLarge,
             },
@@ -7554,6 +7562,8 @@ pub fn derive_viewer_interaction(
     let availability = first_progress
         .or(first_fallback)
         .unwrap_or(default_availability);
+    let mut attachment_views = attachment_views;
+    bind_attachment_view_submissions(&mut attachment_views, &attachment_fans);
     let mut view = ViewerInteraction {
         waiting_for_kind: kind,
         authorized_submitters: authorized_submitters
@@ -7567,11 +7577,13 @@ pub fn derive_viewer_interaction(
         ) && authoritative_state.auto_pass.contains_key(&viewer),
         opportunities,
         attachment_fans,
+        attachment_views,
         availability,
     };
     if bound_outbound_view(&view).is_err() {
         view.opportunities.clear();
         view.attachment_fans.clear();
+        view.attachment_views.clear();
         view.availability = InteractionAvailability::Unsupported {
             reason: InteractionReasonCode::PayloadTooLarge,
         };
@@ -7750,6 +7762,104 @@ fn attachment_fan_submission(
         interaction_id: interaction_id.clone(),
         response,
     })
+}
+
+/// Publish what is attached to every object the viewer can see.
+///
+/// Membership is a board fact — an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), not a property of the current prompt — so this reads
+/// the filtered projection alone and runs on every path, including the ones
+/// that carry no opportunity: an opponent's turn, an open prompt, a finished
+/// game. Publishing it only where picks exist would make an Aura disappear from
+/// the one surface that shows it as soon as a sibling Equipment became
+/// clickable.
+///
+/// Both directions of every relationship must agree, the same guard
+/// [`attachment_fans_for_object_choices`] applies, so authority-only or stale
+/// back-links cannot reach a consumer.
+fn attachment_views_for_viewer(
+    filtered_state: &GameState,
+) -> BTreeMap<u64, InteractionAttachmentView> {
+    let mut views = BTreeMap::new();
+    for host_id in filtered_state.objects.keys().copied() {
+        // Seeded with the host: an attachment cycle would otherwise walk
+        // forever, and no host may appear as a card beneath itself.
+        let mut seen = HashSet::from([host_id]);
+        let mut cards = Vec::new();
+        collect_attachment_subtree(filtered_state, host_id, &mut seen, &mut cards);
+        if cards.is_empty() || cards.len() > MAX_INTERACTION_LIST_LEN {
+            continue;
+        }
+        views.insert(
+            host_id.0,
+            InteractionAttachmentView {
+                host_id: host_id.0,
+                cards: cards
+                    .into_iter()
+                    .map(|object_id| InteractionAttachmentViewCard {
+                        object_id: object_id.0,
+                        submission: None,
+                    })
+                    .collect(),
+            },
+        );
+    }
+    if views.len() > MAX_INTERACTION_LIST_LEN {
+        return BTreeMap::new();
+    }
+    views
+}
+
+/// Depth-first pre-order, so a nested attachment follows the card it hangs on
+/// and consumers can lay the subtree out without re-deriving its shape.
+fn collect_attachment_subtree(
+    filtered_state: &GameState,
+    host_id: ObjectId,
+    seen: &mut HashSet<ObjectId>,
+    out: &mut Vec<ObjectId>,
+) {
+    let Some(host) = filtered_state.objects.get(&host_id) else {
+        return;
+    };
+    for child_id in &host.attachments {
+        let Some(child) = filtered_state.objects.get(child_id) else {
+            continue;
+        };
+        if !matches!(child.attached_to, Some(AttachTarget::Object(id)) if id == host_id) {
+            continue;
+        }
+        if !seen.insert(*child_id) {
+            continue;
+        }
+        out.push(*child_id);
+        collect_attachment_subtree(filtered_state, *child_id, seen, out);
+    }
+}
+
+/// Bind the published picks onto the membership the engine already owns.
+///
+/// The fans are keyed by the child's DIRECT host, so a card published beneath a
+/// nested attachment must still reach the view of the outermost host it hangs
+/// under. Object ids are unique, so a flat index is exact: it cannot move a
+/// pick onto a different card, and every host that legitimately lists the card
+/// gets the same submission.
+fn bind_attachment_view_submissions(
+    views: &mut BTreeMap<u64, InteractionAttachmentView>,
+    fans: &BTreeMap<u64, InteractionAttachmentFan>,
+) {
+    if fans.is_empty() {
+        return;
+    }
+    let submissions: HashMap<u64, &InteractionSubmission> = fans
+        .values()
+        .flat_map(|fan| fan.children.iter())
+        .map(|child| (child.object_id, &child.submission))
+        .collect();
+    for view in views.values_mut() {
+        for card in &mut view.cards {
+            card.submission = submissions.get(&card.object_id).map(|s| (*s).clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8061,6 +8171,17 @@ fn bound_outbound_view(view: &ViewerInteraction) -> Result<(), InteractionReason
         for child in &fan.children {
             budget.string(child.submission.interaction_id.as_str())?;
             bound_outbound_response(&child.submission.response, &mut budget)?;
+        }
+    }
+    budget.list(view.attachment_views.len())?;
+    for attachment_view in view.attachment_views.values() {
+        budget.list(attachment_view.cards.len())?;
+        for card in &attachment_view.cards {
+            let Some(submission) = &card.submission else {
+                continue;
+            };
+            budget.string(submission.interaction_id.as_str())?;
+            bound_outbound_response(&submission.response, &mut budget)?;
         }
     }
     if let InteractionAvailability::ProgressAvailable { witness } = &view.availability {

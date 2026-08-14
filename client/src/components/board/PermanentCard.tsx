@@ -473,9 +473,11 @@ export const PermanentCard = memo(function PermanentCard({
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
   const viewerInteraction = useGameStore((s) => s.viewerInteraction);
-  const interactionAttachmentFan = useMemo(
-    () =>
-      viewerInteraction?.attachmentFans[objectId] ?? null,
+  // The engine's own list of what is attached to this permanent, with a
+  // submission on each card it published a pick for. Same field `AttachmentFan`
+  // renders, so the badge's label can never promise a card the fan won't show.
+  const attachmentView = useMemo(
+    () => viewerInteraction?.attachmentViews[objectId] ?? null,
     [objectId, viewerInteraction],
   );
 
@@ -505,10 +507,13 @@ export const PermanentCard = memo(function PermanentCard({
 
   const ptDisplay = computePTDisplay(obj);
   const isSelected = selectedObjectId === objectId;
-  // The viewer-scoped engine projection owns both the direct-attachment
-  // relationship and whether one is actionable for this interaction. The
-  // board must not rediscover either fact from the raw snapshot.
-  const attachmentsActionable = interactionAttachmentFan !== null;
+  // The viewer-scoped engine projection owns both the attachment relationship
+  // and whether one is actionable for this interaction. The board must not
+  // rediscover either fact from the raw snapshot. "Actionable" is per card:
+  // the projection lists every attachment and marks the ones it published a
+  // pick for, so this asks whether ANY of them carries one.
+  const attachmentsActionable =
+    attachmentView?.cards.some((card) => card.submission !== null) ?? false;
   const attachmentsLifted =
     obj.attachments.length > 0
     && (attachmentsLiftedByAncestor || isInHoveredAttachmentTree);
@@ -517,14 +522,12 @@ export const PermanentCard = memo(function PermanentCard({
   const attachmentPathIds = new Set([...attachmentRenderPath, objectId]);
   const renderableAttachmentIds = visibleAttachmentIds.filter((id) => !attachmentPathIds.has(id));
   const hiddenAttachmentCount = obj.attachments.length - visibleAttachmentIds.length;
-  // What the fan will actually put on screen, for the `⧉` control's label. While
-  // an interaction is live `AttachmentFan` builds its cards from the projection's
-  // children, not from `obj.attachments`, so counting the raw snapshot here would
-  // promise more cards than the fan shows (an Aura + an Equipment where only the
-  // Equipment is a legal choice reads "2 attached cards" over a one-card fan) —
-  // and would rediscover from the snapshot exactly what the note above forbids.
-  const attachmentFanCardCount =
-    interactionAttachmentFan?.children.length ?? obj.attachments.length;
+  // What the fan will actually put on screen, for the `⧉` control's label: the
+  // very list the fan renders. Counting `obj.attachments` here would be both a
+  // second derivation and a wrong number — the projection also carries the
+  // attachments OF the attachments, which the fan shows and the peek stack
+  // cannot.
+  const attachmentFanCardCount = attachmentView?.cards.length ?? 0;
   const exileLinksExpanded = exileLinks.length <= 1 || isHovered || isSelected || isInspected;
   const visibleExileLinks = exileLinksExpanded ? exileLinks : exileLinks.slice(0, 1);
   const hiddenExileCount = exileLinks.length - visibleExileLinks.length;
@@ -1159,7 +1162,10 @@ export const PermanentCard = memo(function PermanentCard({
           corner is the better trade; the floor needs a layout-level answer
           (badge sizes are shared with `+N` and the group-expand control at
           `GroupedPermanent.tsx:279`, which caps its own overhang at 12px). */}
-      {obj.attachments.length > 0 && attachmentsExpanded && (
+      {/* Gated on the projected count, not on `obj.attachments`: the control
+          opens a fan built from the projection, so if the engine published no
+          membership there is nothing behind the badge to show. */}
+      {attachmentFanCardCount > 0 && attachmentsExpanded && (
         <button
           type="button"
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"

@@ -458,6 +458,221 @@ fn attachment_fans_are_per_interaction_filtered_and_direct() {
     );
 }
 
+/// Attaches `attachment` to `host` and asserts the engine wrote both directions
+/// of the relationship, so a later membership assertion cannot pass on a
+/// half-built fixture.
+fn attach_and_assert_linked(state: &mut GameState, attachment: ObjectId, host: ObjectId) {
+    engine::game::effects::attach::attach_to(state, attachment, host);
+    assert!(
+        state.objects[&host].attachments.contains(&attachment),
+        "fixture guard: the host must list its attachment"
+    );
+    assert_eq!(
+        state.objects[&attachment].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(host)),
+        "fixture guard: the attachment must point back at its host"
+    );
+}
+
+/// A host wearing two attachments, one of them itself a host, with exactly one
+/// published pick in the whole subtree.
+///
+/// This is the shape that made membership and affordance look like one question:
+/// the engine publishes a fan per DIRECT host and only for a child with exactly
+/// one legal choice, so a consumer that read the fans as the membership list
+/// dropped the two cards nothing was published for — off the only surface that
+/// shows what is attached at all.
+#[test]
+fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "View Host", 2, 2).id();
+    let inner = scenario.add_creature(P0, "View Inner", 1, 1).id();
+    let nested = scenario.add_creature(P0, "View Nested", 1, 1).id();
+    let sibling = scenario.add_creature(P0, "View Sibling", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, inner, host);
+        attach_and_assert_linked(state, nested, inner);
+        attach_and_assert_linked(state, sibling, host);
+        state.objects.get_mut(&nested).unwrap().tapped = true;
+        // Only the nested card is a candidate, so only the INTERMEDIATE host
+        // gets a fan — the outer host gets none at all.
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![nested],
+            max: 1,
+        };
+        bind(state, "attachment-view");
+    }
+
+    let view = priority_view(runner.state());
+    assert_eq!(
+        view.attachment_fans.keys().copied().collect::<Vec<_>>(),
+        vec![inner.0],
+        "reach guard: the engine publishes its pick under the direct host only"
+    );
+
+    let outer = view
+        .attachment_views
+        .get(&host.0)
+        .expect("the outer host publishes its own membership");
+    assert_eq!(
+        outer
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![inner.0, nested.0, sibling.0],
+        "membership is the whole subtree in depth-first order, not the published picks"
+    );
+    assert!(
+        outer.cards[0].submission.is_none() && outer.cards[2].submission.is_none(),
+        "a card the engine published no pick for is still a member, without a submission"
+    );
+    let nested_submission = outer.cards[1]
+        .submission
+        .clone()
+        .expect("a pick published under a nested host reaches the outer host's view");
+
+    let intermediate = view
+        .attachment_views
+        .get(&inner.0)
+        .expect("an attachment that is itself a host publishes its own membership");
+    assert_eq!(
+        intermediate
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![nested.0],
+        "a nested host lists what hangs on it, and never itself"
+    );
+
+    submit_interaction(runner.state_mut(), P0, nested_submission).expect(
+        "the submission published in the view resolves through production interaction dispatch",
+    );
+    assert!(
+        !runner.state().objects[&nested].tapped,
+        "the nested card's published submission applies its selected untap"
+    );
+}
+
+/// Membership answers a different question than the fan does, and must not
+/// inherit its authorization gate: an attached permanent is an object in play
+/// (CR 301.5 / CR 303.4), so it stays visible while another player holds the
+/// turn. Both directions of the relationship still have to agree.
+#[test]
+fn attachment_views_follow_visibility_while_fans_follow_authorization() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Link Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Link Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        state.objects.get_mut(&attachment).unwrap().tapped = true;
+        state.waiting_for = WaitingFor::ChooseUntapSubset {
+            player: P0,
+            group: vec![attachment],
+            max: 1,
+        };
+        bind(state, "attachment-view-links");
+    }
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert!(
+        unauthorized.attachment_fans.is_empty(),
+        "reach guard: the pick sidecar stays authorization-scoped"
+    );
+    let opponent_view = unauthorized
+        .attachment_views
+        .get(&host.0)
+        .expect("the opponent still sees what is attached to a battlefield permanent");
+    assert_eq!(
+        opponent_view
+            .cards
+            .iter()
+            .map(|card| card.object_id)
+            .collect::<Vec<_>>(),
+        vec![attachment.0]
+    );
+    assert!(
+        opponent_view.cards[0].submission.is_none(),
+        "a viewer who may not submit is offered nothing to submit"
+    );
+
+    let mut stale_back_link = filter_state_for_viewer(runner.state(), P0);
+    stale_back_link
+        .objects
+        .get_mut(&host)
+        .expect("fixture host remains visible")
+        .attachments
+        .clear();
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_back_link, P0)
+            .attachment_views
+            .is_empty(),
+        "a host that no longer lists the attachment publishes no membership for it"
+    );
+
+    let mut stale_forward_link = filter_state_for_viewer(runner.state(), P0);
+    stale_forward_link
+        .objects
+        .get_mut(&attachment)
+        .expect("fixture attachment remains visible")
+        .attached_to = None;
+    assert!(
+        derive_viewer_interaction(runner.state(), &stale_forward_link, P0)
+            .attachment_views
+            .is_empty(),
+        "an attachment that no longer points back at its host publishes no membership"
+    );
+}
+
+/// The projection crosses the generated adapter as the client reads it: camel
+/// case on the wire, a `null` submission for a card with no published pick.
+#[test]
+fn attachment_views_survive_the_adapter_round_trip() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wire Host", 2, 2).id();
+    let attachment = scenario.add_creature(P0, "Wire Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, attachment, host);
+        bind(state, "attachment-view-wire");
+    }
+
+    let view = priority_view(runner.state());
+    assert!(view.attachment_views.contains_key(&host.0));
+    let wire = serde_json::to_string(&view).expect("serialize the viewer projection");
+    assert!(
+        wire.contains("\"attachmentViews\"") && wire.contains("\"objectId\""),
+        "the adapter reads camel case: {wire}"
+    );
+    assert!(
+        wire.contains("\"submission\":null"),
+        "a member with no published pick crosses the wire as null: {wire}"
+    );
+    let decoded: engine::types::interaction::ViewerInteraction =
+        serde_json::from_str(&wire).expect("deserialize the viewer projection");
+    assert_eq!(decoded.attachment_views, view.attachment_views);
+
+    // A projection written before this field existed still loads.
+    let mut legacy: serde_json::Value = serde_json::from_str(&wire).expect("reparse as value");
+    legacy
+        .as_object_mut()
+        .expect("the projection is an object")
+        .remove("attachmentViews");
+    let legacy: engine::types::interaction::ViewerInteraction =
+        serde_json::from_value(legacy).expect("a projection without the field still loads");
+    assert!(legacy.attachment_views.is_empty());
+}
+
 #[test]
 fn authority_requires_explicit_binding_and_rebinding_invalidates_old_capabilities() {
     let mut state = GameState::new_two_player(42);
