@@ -18,13 +18,14 @@
 //! in CI, where only the curated fixture exists; the two shipped cards are then
 //! replayed end to end behind the fixture guard this suite uses elsewhere.
 
-use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    Effect, PtValue, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, EffectScope, PtValue, QuantityExpr, TapStateChange,
+    TargetFilter, TypedFilter,
 };
+use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -138,7 +139,8 @@ fn untargeted_role_token_enchants_the_creature_that_entered() {
         runner.state().objects[&subject]
             .attachments
             .contains(&token.id),
-        "both directions of the attachment relationship are written (CR 301.5)"
+        "CR 701.3a: the Role is attached to that creature; the reverse list is \
+         the engine invariant that says so from the host's side"
     );
 }
 
@@ -269,84 +271,184 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
     );
 }
 
-/// A Role token created "attached to" a context or reference filter, by an
-/// ability that ALSO selected an object target.
-///
-/// The host filter and the ability's target slots answer different questions:
-/// only a filter that describes a target slot (CR 115.1a) may read what the
-/// ability chose. A context filter names its object through its own authority,
-/// so the selected object must not become the host by default — that would let
-/// "attached to the exiled card" silently enchant whatever else the ability
-/// happened to target.
-fn resolve_role_token_attached_to(
-    attach_to: TargetFilter,
-) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario.add_creature(P0, "Context Host Source", 2, 2).id();
-    let selected = scenario.add_creature(P0, "Selected Bystander", 2, 2).id();
-    let mut runner = scenario.build();
+fn role_token_effect(attach_to: TargetFilter) -> Effect {
+    Effect::Token {
+        name: "Monster Role".to_string(),
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types: vec![
+            "Enchantment".to_string(),
+            "Aura".to_string(),
+            "Role".to_string(),
+        ],
+        colors: Vec::new(),
+        keywords: Vec::new(),
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: Some(attach_to),
+        enters_attacking: false,
+        supertypes: Vec::new(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
+    }
+}
 
-    let ability = ResolvedAbility::new(
-        Effect::Token {
-            name: "Monster Role".to_string(),
-            power: PtValue::Fixed(0),
-            toughness: PtValue::Fixed(0),
-            types: vec![
-                "Enchantment".to_string(),
-                "Aura".to_string(),
-                "Role".to_string(),
-            ],
-            colors: Vec::new(),
-            keywords: Vec::new(),
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
-            owner: TargetFilter::Controller,
-            attach_to: Some(attach_to),
-            enters_attacking: false,
-            supertypes: Vec::new(),
-            static_abilities: Vec::new(),
-            enter_with_counters: Vec::new(),
-        },
-        vec![TargetRef::Object(selected)],
-        source,
-        P0,
-    );
-    let mut events = Vec::new();
-    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
-        .expect("the token effect resolves");
+/// A permanent whose activated ability taps a chosen creature and then creates
+/// a Role token "attached to" `attach_to` — one ability holding both a selected
+/// object target and a host filter, which is the shape where the two can be
+/// confused. Everything runs through the production path: activation, target
+/// selection, stack resolution and state-based actions.
+struct RoleChain {
+    runner: engine::game::scenario::GameRunner,
+    source: ObjectId,
+    selected: ObjectId,
+    partner: ObjectId,
+}
 
-    (runner, source, selected)
+impl RoleChain {
+    fn build(attach_to: TargetFilter) -> Self {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let selected = scenario.add_creature(P0, "Selected Bystander", 2, 2).id();
+        let partner = scenario.add_creature(P0, "Paired Partner", 2, 2).id();
+        let source = scenario
+            .add_creature(P0, "Chain Source", 2, 2)
+            .with_ability_definition(AbilityDefinition {
+                sub_ability: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    role_token_effect(attach_to),
+                ))),
+                ..AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::SetTapState {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                )
+            })
+            .id();
+        Self {
+            runner: scenario.build(),
+            source,
+            selected,
+            partner,
+        }
+    }
+
+    /// Activates the ability on `selected`, settles the stack, and returns the
+    /// Role token the resolution created.
+    ///
+    /// The creation is read from the resolution's own events, not from the
+    /// final board: a Role that ends up with no host is unattached, the
+    /// CR 704.5m state-based action moves it to the graveyard and CR 111.7 ends
+    /// it there — so a board-only check could not tell "created and swept" from
+    /// "never created", and the negative rows below would pass on a resolution
+    /// that never reached the token clause at all.
+    fn run(&mut self) -> ObjectId {
+        let source = self.source;
+        let selected = self.selected;
+        let outcome = self
+            .runner
+            .activate(source, 0)
+            .target_object(selected)
+            .resolve();
+        let created: Vec<ObjectId> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        self.runner.advance_until_stack_empty();
+        assert!(
+            self.runner.state().objects[&selected].tapped,
+            "reach guard: the parent effect ran, so resolution reached the token clause"
+        );
+        assert_eq!(
+            created.len(),
+            1,
+            "reach guard: exactly one Role token was created"
+        );
+        created[0]
+    }
+
+    /// The host the created token ended up with, or `None` where the token was
+    /// left unattached (and therefore no longer exists).
+    fn host_of(&self, token: ObjectId) -> Option<AttachTarget> {
+        self.runner
+            .state()
+            .objects
+            .get(&token)
+            .and_then(|object| object.attached_to)
+    }
+
+    fn attachments_of(&self, object: ObjectId) -> usize {
+        self.runner.state().objects[&object].attachments.len()
+    }
 }
 
 #[test]
 fn a_context_filter_host_never_falls_back_to_the_selected_target() {
     // CR 400.7j + CR 608.2k: "the object paid as a cost" names nothing here, so
     // the token gets no host — it must NOT inherit the chosen target.
-    let (runner, _source, selected) = resolve_role_token_attached_to(TargetFilter::CostPaidObject);
-    assert!(
-        runner.state().objects[&selected].attachments.is_empty(),
+    let mut chain = RoleChain::build(TargetFilter::CostPaidObject);
+    let token = chain.run();
+    assert_eq!(
+        chain.attachments_of(chain.selected),
+        0,
         "a reference filter that resolves to nothing must leave the selected \
          target unenchanted"
     );
-    assert!(
-        role_tokens(&runner)
-            .iter()
-            .all(|token| token.attached_to.is_none()),
+    assert_eq!(
+        chain.host_of(token),
+        None,
         "no Role may be attached at all when its declared authority named no host"
     );
 
     // The discriminating half: a context filter that DOES name an object
     // resolves through its own authority, and that object is the host even
     // though a different object sits in the ability's target slot.
-    let (runner, source, selected) = resolve_role_token_attached_to(TargetFilter::SelfRef);
+    let mut chain = RoleChain::build(TargetFilter::SelfRef);
+    let token = chain.run();
     assert_eq!(
-        only_role_token(&runner).attached_to,
-        Some(AttachTarget::Object(source)),
+        chain.host_of(token),
+        Some(AttachTarget::Object(chain.source)),
         "the filter's own authority names the host, not the selected target"
     );
-    assert!(
-        runner.state().objects[&selected].attachments.is_empty(),
-        "the selected target stays unenchanted"
+    assert_eq!(chain.attachments_of(chain.selected), 0);
+}
+
+/// CR 702.95b: `SourceOrPaired` matches the source and the creature it is
+/// paired with. `TargetFilter::is_context_ref` classifies it as an automatic
+/// context reference — it is never a chosen target slot — so it must not read
+/// `ability.targets`. It names two objects rather than one host, and no host
+/// authority exists for that here, so it fails closed until one does.
+#[test]
+fn a_paired_source_filter_never_inherits_the_selected_target() {
+    let mut chain = RoleChain::build(TargetFilter::SourceOrPaired);
+    let (source, partner) = (chain.source, chain.partner);
+    {
+        let state = chain.runner.state_mut();
+        state.objects.get_mut(&source).expect("source").paired_with = Some(partner);
+        state
+            .objects
+            .get_mut(&partner)
+            .expect("partner")
+            .paired_with = Some(source);
+    }
+    let token = chain.run();
+
+    assert_eq!(
+        chain.attachments_of(chain.selected),
+        0,
+        "a paired-source reference must not enchant the object the ability selected"
+    );
+    assert_eq!(
+        chain.host_of(token),
+        None,
+        "with no single host authority for the pair, the Role gets no host at all"
     );
 }
