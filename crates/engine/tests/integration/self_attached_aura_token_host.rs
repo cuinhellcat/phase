@@ -52,6 +52,38 @@ fn pool(generic: usize, colors: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
+/// Twisted Sewer-Witch's and Asinine Antics' shape: the same host filter, bound
+/// once per iteration instead of once per ability.
+const FOR_EACH_ETB: &str = "When this creature enters, for each creature you control, create a \
+     Wicked Role token attached to that creature.";
+
+/// The hosts of every Role in play, sorted, so a row can compare sets without
+/// depending on object-id order.
+fn sorted_hosts(runner: &engine::game::scenario::GameRunner) -> Vec<u64> {
+    let mut hosts: Vec<u64> = role_tokens(runner)
+        .iter()
+        .map(|token| {
+            assert_eq!(
+                token.zone,
+                Zone::Battlefield,
+                "every Role must survive the unattached-Aura check"
+            );
+            match token.attached_to {
+                Some(AttachTarget::Object(id)) => id.0,
+                other => panic!("a Role must have an object host, got {other:?}"),
+            }
+        })
+        .collect();
+    hosts.sort_unstable();
+    hosts
+}
+
+fn sorted_ids(ids: &[ObjectId]) -> Vec<u64> {
+    let mut ids: Vec<u64> = ids.iter().map(|id| id.0).collect();
+    ids.sort_unstable();
+    ids
+}
+
 fn role_tokens(
     runner: &engine::game::scenario::GameRunner,
 ) -> Vec<&engine::game::game_object::GameObject> {
@@ -179,19 +211,41 @@ fn shipped_self_attached_role_cards_keep_their_role() {
 }
 
 /// The loop case, which shares the same `ParentTarget` host but binds it per
-/// iteration: Asinine Antics enchants every creature its opponents control. Each
-/// Role must land on its own iteration host — a fallback that outranked the
-/// loop's rebind would pile them all onto one permanent.
+/// iteration. Each Role must land on its own iteration host — a fallback that
+/// outranked the loop's rebind would pile them all onto one permanent, or onto
+/// the creature that entered.
+///
+/// Built from Oracle text so the claim is exercised in CI, then replayed on
+/// Asinine Antics where the full export is available.
 #[test]
 fn for_each_role_tokens_enchant_their_own_iteration_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, colorless(4));
+    let buddy = scenario.add_creature(P0, "Loop Buddy", 1, 1).id();
+    let subject = scenario
+        .add_creature_to_hand_from_oracle(P0, "Loop Role Host", 3, 3, FOR_EACH_ETB)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(subject).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        sorted_hosts(&runner),
+        sorted_ids(&[buddy, subject]),
+        "one Role per creature, each on its own iteration host"
+    );
+
     let Some(db) = load_db() else {
         return;
     };
     if db.get_face_by_name("Asinine Antics").is_none() {
-        eprintln!("skipping: Asinine Antics is not in integration_cards.json.gz");
+        eprintln!(
+            "skipping the shipped replay: Asinine Antics is not in integration_cards.json.gz"
+        );
         return;
     }
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, pool(2, &[ManaType::Blue, ManaType::Blue]));
@@ -204,25 +258,9 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
     runner.cast(antics).resolve();
     runner.advance_until_stack_empty();
 
-    let mut hosts: Vec<u64> = role_tokens(&runner)
-        .iter()
-        .map(|token| {
-            assert_eq!(
-                token.zone,
-                Zone::Battlefield,
-                "every Role of the loop survives the unattached-Aura check"
-            );
-            match token.attached_to {
-                Some(AttachTarget::Object(id)) => id.0,
-                other => panic!("a loop Role must have an object host, got {other:?}"),
-            }
-        })
-        .collect();
-    hosts.sort_unstable();
-    let mut expected = vec![first.0, second.0];
-    expected.sort_unstable();
     assert_eq!(
-        hosts, expected,
-        "one Role per opponent creature, each on its own iteration host"
+        sorted_hosts(&runner),
+        sorted_ids(&[first, second]),
+        "Asinine Antics enchants each opponent creature separately"
     );
 }

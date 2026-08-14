@@ -2973,7 +2973,10 @@ pub(crate) fn resolve_token_spec(
 /// the chosen target out of `ability.targets`. Returns `None` when no legal
 /// host has been bound — the apply path then leaves the token unattached and
 /// the CR 704.5m SBA (an unattached Aura) moves the orphaned Aura to the
-/// graveyard.
+/// graveyard. That observed path is itself a divergence from CR 303.4i, which
+/// says an Aura token whose host is undefined is not created at all; the missing
+/// guard is tracked separately (#7302). Binding the host correctly is what keeps
+/// a card off that path, not a substitute for the guard.
 ///
 /// This does NOT duplicate attach legality: the actual attach is performed by
 /// `attach::attach_to` / `attach::attach_to_player`, the single authority for
@@ -2990,45 +2993,52 @@ fn resolve_attach_host(
             crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
                 .map(target_ref_to_attach_target)
         }
-        // ParentTarget and any targeting filter resolve to the chosen target
-        // carried in `ability.targets`. ParentTarget is bound per-iteration by the
-        // for-each rebind; a `Typed` targeting filter is the single-target
-        // "attached to target creature" case (CR 115.1a). Both read the first
-        // `TargetRef::Object` in `ability.targets`. Player-host Auras (CR 303.4
-        // permits a player host) are not yet implemented — no current card creates
-        // a token attached to a player, so a Player slot yields `None` here.
-        _ => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
-                TargetRef::Player(_) => None,
-            })
-            // CR 608.2k: when the ability chose no target at all, the host
-            // pronoun cannot be a back-reference to one — its antecedent is the
-            // untargeted object the trigger condition already named ("When this
-            // creature enters, create a Monster Role token attached to IT").
-            // The event context is the single authority for that object, so the
-            // fallback routes through the same resolver the `TriggeringSource`
-            // arm above uses rather than reading `source_id` directly: for a
-            // token copy created by a resolving chain the two differ, and the
-            // event's subject is the one the sentence refers to.
-            //
-            // Without this the host stays unbound, the Aura token enters
-            // attached to nothing, and the CR 704.5m SBA moves it to the
-            // graveyard where CR 111.7 ends it — a Role that flickers in and out
-            // of existence within one resolution and never reaches the board.
-            .or_else(|| {
-                ability.targets.is_empty().then(|| {
-                    crate::game::targeting::resolve_event_context_target(
-                        state,
-                        &TargetFilter::TriggeringSource,
-                        ability.source_id,
-                    )
-                    .map(target_ref_to_attach_target)
-                })?
-            }),
+        // The bare-pronoun host ("attached to it"). It normally reads the chosen
+        // target out of `ability.targets` — the for-each rebind binds it per
+        // iteration — but the pronoun also appears in abilities that choose no
+        // target at all, where there is no back-reference for it to make.
+        //
+        // CR 608.2k: such a pronoun names the specific untargeted object the
+        // ability's trigger condition already referred to ("When this creature
+        // enters, create a Monster Role token attached to IT"). The event context
+        // is the single authority for that object, so the fallback routes through
+        // the same resolver the `TriggeringSource` arm above uses rather than
+        // reading `source_id`: Gylwain, Casting Director creates the Role for
+        // ANOTHER creature that entered, and the event's subject — not the source
+        // — is the one its sentence refers to.
+        //
+        // The fallback is confined to this arm and to an ability that chose
+        // NOTHING. A typed targeting filter that legally selected zero targets
+        // ("attached to target creature you control" with no legal target) keeps
+        // its own no-host outcome: nothing in its text names an untargeted
+        // object, so CR 608.2k does not reach it.
+        TargetFilter::ParentTarget => first_object_host(ability).or_else(|| {
+            ability.targets.is_empty().then(|| {
+                crate::game::targeting::resolve_event_context_target(
+                    state,
+                    &TargetFilter::TriggeringSource,
+                    ability.source_id,
+                )
+                .map(target_ref_to_attach_target)
+            })?
+        }),
+        // Any targeting filter resolves to the chosen target carried in
+        // `ability.targets` — the single-target "attached to target creature"
+        // case (CR 115.1a). Player-host Auras (CR 303.4 permits a player host)
+        // are not yet implemented — no current card creates a token attached to
+        // a player, so a Player slot yields `None` here.
+        _ => first_object_host(ability),
     }
+}
+
+/// The first object target the ability chose, which is the host every targeting
+/// attachment filter reads. Mirrors `attach::resolve_object_filter`'s
+/// ParentTarget arm.
+fn first_object_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
+        TargetRef::Player(_) => None,
+    })
 }
 
 /// Convert a resolved `TargetRef` into an `AttachTarget` host. Player and Object
