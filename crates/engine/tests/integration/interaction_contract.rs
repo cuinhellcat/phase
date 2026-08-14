@@ -673,6 +673,37 @@ fn attachment_views_survive_the_adapter_round_trip() {
     assert!(legacy.attachment_views.is_empty());
 }
 
+/// Hangs one more copy of the engine-written attachment `seed` on `host`,
+/// writing both directions exactly as `attach::attach_to` wrote them for the
+/// seed itself. Cloning rather than re-attaching keeps a ten-thousand-row
+/// fixture cheap without inventing a relationship shape of its own.
+fn clone_attachment_onto(
+    state: &mut GameState,
+    seed: ObjectId,
+    host: ObjectId,
+    next_id: &mut u64,
+) -> ObjectId {
+    let id = ObjectId(*next_id);
+    *next_id += 1;
+    let mut copy = state.objects[&seed].clone();
+    copy.id = id;
+    copy.attachments.clear();
+    copy.attached_to = Some(engine::game::game_object::AttachTarget::Object(host));
+    state.objects.insert(id, copy);
+    state.battlefield.push_back(id);
+    state
+        .objects
+        .get_mut(&host)
+        .expect("host exists")
+        .attachments
+        .push(id);
+    id
+}
+
+fn next_object_id(state: &GameState) -> u64 {
+    state.objects.keys().map(|id| id.0).max().unwrap_or(0) + 1
+}
+
 /// Membership is derived before the authorization, session and slot gates, so
 /// an early return carries as much of it as the derived path does. Only the
 /// whole-projection bound charges the map and every card in it: each view below
@@ -692,18 +723,11 @@ fn an_early_return_fails_closed_on_the_aggregate_attachment_budget() {
     {
         let state = runner.state_mut();
         attach_and_assert_linked(state, seed, host);
-        // Replay the shape the engine just wrote until the host wears the
-        // per-view maximum, so no single view is oversized on its own.
-        let engine_written = state.objects[&seed].clone();
-        let mut next_id = state.objects.keys().map(|id| id.0).max().unwrap_or(0) + 1;
+        // Fill the host to the per-view maximum, so no single view is oversized
+        // on its own and only the aggregate can object.
+        let mut next_id = next_object_id(state);
         while state.objects[&host].attachments.len() < MAX_INTERACTION_LIST_LEN {
-            let id = ObjectId(next_id);
-            next_id += 1;
-            let mut copy = engine_written.clone();
-            copy.id = id;
-            state.objects.insert(id, copy);
-            state.battlefield.push_back(id);
-            state.objects.get_mut(&host).unwrap().attachments.push(id);
+            clone_attachment_onto(state, seed, host, &mut next_id);
         }
         bind(state, "attachment-view-budget");
     }
@@ -734,6 +758,77 @@ fn an_early_return_fails_closed_on_the_aggregate_attachment_budget() {
         !unauthorized.can_submit,
         "the fail-closed projection keeps the authority answer it was already carrying"
     );
+}
+
+/// A single direct host whose own subtree passes the per-view cap.
+///
+/// This shape used to be absorbed inside the membership derivation — the host
+/// was skipped, and an over-limit host map was replaced by an empty one — which
+/// handed the budget gate a small, plausible projection it had no reason to
+/// reject. The viewer then read a bounded empty map as an authoritative
+/// "nothing is attached", which is the one answer the engine must never invent.
+///
+/// Read through the unauthorized early return, which is the cheap seat: the
+/// derived path would enumerate every legal action over ten thousand
+/// permanents, and `a_deep_attachment_chain_fails_closed_on_the_aggregate`
+/// already carries the same claim through it.
+#[test]
+fn an_oversized_attachment_tree_fails_closed_instead_of_publishing_an_empty_map() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Wide Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Wide Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        let mut next_id = next_object_id(state);
+        while state.objects[&host].attachments.len() <= MAX_INTERACTION_LIST_LEN {
+            clone_attachment_onto(state, seed, host, &mut next_id);
+        }
+        bind(state, "attachment-view-wide");
+    }
+    let wide = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        wide.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a host whose own subtree is over the cap fails closed; it is not skipped"
+    );
+    assert!(wide.attachment_views.is_empty() && wide.opportunities.is_empty());
+}
+
+/// The nesting half of the same claim, read through the DERIVED path: every
+/// view is small, and it is the tree that is too large.
+#[test]
+fn a_deep_attachment_chain_fails_closed_on_the_aggregate() {
+    const CHAIN: usize = 200;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Chain Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Chain Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-deep");
+    }
+    let deep = priority_view(runner.state());
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "nesting sums the same way: {CHAIN} views of at most {CHAIN} cards each \
+         exceed the aggregate even though none exceeds the per-view cap"
+    );
+    assert!(deep.attachment_views.is_empty());
 }
 
 #[test]

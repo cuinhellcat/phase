@@ -7421,77 +7421,91 @@ pub fn derive_viewer_interaction(
 ) -> ViewerInteraction {
     debug_assert_interaction_consistency(authoritative_state);
     // Membership follows visibility, so it is built before any authorization,
-    // session or bounding gate and carried by every projection below.
+    // session or bounding gate and carried by every projection below. Overflow
+    // is a value here, not a silently emptied map: the finalizer is the only
+    // place allowed to decide what an unbounded projection becomes.
     let attachment_views = attachment_views_for_viewer(filtered_state);
     let authorized_submitters = turn_control::authorized_submitters(authoritative_state);
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
     if kind.terminal {
-        return finalize_viewer_interaction(ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: Vec::new(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            attachment_views: attachment_views.clone(),
-            availability: InteractionAvailability::Terminal {
-                outcome: InteractionOutcomeCode::Terminal,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: Vec::new(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Terminal {
+                    outcome: InteractionOutcomeCode::Terminal,
+                },
             },
-        });
+            attachment_views.clone(),
+        );
     }
     if !can_submit {
-        return finalize_viewer_interaction(ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: false,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            attachment_views: attachment_views.clone(),
-            availability: InteractionAvailability::Waiting,
-        });
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: false,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Waiting,
+            },
+            attachment_views.clone(),
+        );
     }
     if authoritative_state
         .interaction_session_id
         .as_ref()
         .is_none_or(|session| !interaction_session_is_valid(session))
     {
-        return finalize_viewer_interaction(ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            attachment_views: attachment_views.clone(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::AuthorityUnbound,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::AuthorityUnbound,
+                },
             },
-        });
+            attachment_views.clone(),
+        );
     }
     if !interaction_serial_is_valid(&authoritative_state.next_interaction_serial) {
-        return finalize_viewer_interaction(ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            attachment_views: attachment_views.clone(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::InvalidAuthorityState,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::InvalidAuthorityState,
+                },
             },
-        });
+            attachment_views.clone(),
+        );
     }
 
     let slots: Vec<_> = authoritative_state
@@ -7505,21 +7519,24 @@ pub fn derive_viewer_interaction(
         })
         .collect();
     if slots.len() > MAX_INTERACTION_LIST_LEN {
-        return finalize_viewer_interaction(ViewerInteraction {
-            waiting_for_kind: kind,
-            authorized_submitters: authorized_submitters
-                .into_iter()
-                .map(|player| player.0)
-                .collect(),
-            can_submit: true,
-            auto_pass_recommended: false,
-            opportunities: Vec::new(),
-            attachment_fans: BTreeMap::new(),
-            attachment_views: attachment_views.clone(),
-            availability: InteractionAvailability::Unsupported {
-                reason: InteractionReasonCode::PayloadTooLarge,
+        return finalize_viewer_interaction(
+            ViewerInteraction {
+                waiting_for_kind: kind,
+                authorized_submitters: authorized_submitters
+                    .into_iter()
+                    .map(|player| player.0)
+                    .collect(),
+                can_submit: true,
+                auto_pass_recommended: false,
+                opportunities: Vec::new(),
+                attachment_fans: BTreeMap::new(),
+                attachment_views: BTreeMap::new(),
+                availability: InteractionAvailability::Unsupported {
+                    reason: InteractionReasonCode::PayloadTooLarge,
+                },
             },
-        });
+            attachment_views.clone(),
+        );
     }
     let mut opportunities = Vec::with_capacity(slots.len());
     let mut attachment_fans = BTreeMap::new();
@@ -7562,24 +7579,29 @@ pub fn derive_viewer_interaction(
     let availability = first_progress
         .or(first_fallback)
         .unwrap_or(default_availability);
-    let mut attachment_views = attachment_views;
-    bind_attachment_view_submissions(&mut attachment_views, &attachment_fans);
-    finalize_viewer_interaction(ViewerInteraction {
-        waiting_for_kind: kind,
-        authorized_submitters: authorized_submitters
-            .into_iter()
-            .map(|player| player.0)
-            .collect(),
-        can_submit: true,
-        auto_pass_recommended: matches!(
-            authoritative_state.waiting_for,
-            WaitingFor::Priority { .. }
-        ) && authoritative_state.auto_pass.contains_key(&viewer),
-        opportunities,
-        attachment_fans,
+    let attachment_views = attachment_views.map(|mut views| {
+        bind_attachment_view_submissions(&mut views, &attachment_fans);
+        views
+    });
+    finalize_viewer_interaction(
+        ViewerInteraction {
+            waiting_for_kind: kind,
+            authorized_submitters: authorized_submitters
+                .into_iter()
+                .map(|player| player.0)
+                .collect(),
+            can_submit: true,
+            auto_pass_recommended: matches!(
+                authoritative_state.waiting_for,
+                WaitingFor::Priority { .. }
+            ) && authoritative_state.auto_pass.contains_key(&viewer),
+            opportunities,
+            attachment_fans,
+            attachment_views: BTreeMap::new(),
+            availability,
+        },
         attachment_views,
-        availability,
-    })
+    )
 }
 
 /// The single exit of [`derive_viewer_interaction`]: every projection the engine
@@ -7593,14 +7615,25 @@ pub fn derive_viewer_interaction(
 /// Failing the budget fails closed: the unbounded lists are dropped and the
 /// availability states why, rather than shipping a truncated payload that reads
 /// as an authoritative "nothing is attached".
-fn finalize_viewer_interaction(mut view: ViewerInteraction) -> ViewerInteraction {
-    if bound_outbound_view(&view).is_err() {
+///
+/// `attachment_views` arrives as the projection or as the reason it could not be
+/// produced within the bound, and is installed here rather than by the caller.
+/// A membership map that overflowed inside its own derivation is therefore just
+/// as visible to this gate as one that overflows the aggregate: both reach the
+/// same fail-closed answer, and neither can leave as a plausible empty map.
+fn finalize_viewer_interaction(
+    mut view: ViewerInteraction,
+    attachment_views: Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode>,
+) -> ViewerInteraction {
+    let bounded = attachment_views.and_then(|views| {
+        view.attachment_views = views;
+        bound_outbound_view(&view)
+    });
+    if let Err(reason) = bounded {
         view.opportunities.clear();
         view.attachment_fans.clear();
         view.attachment_views.clear();
-        view.availability = InteractionAvailability::Unsupported {
-            reason: InteractionReasonCode::PayloadTooLarge,
-        };
+        view.availability = InteractionAvailability::Unsupported { reason };
     }
     view
 }
@@ -7791,9 +7824,16 @@ fn attachment_fan_submission(
 /// Both directions of every relationship must agree, the same guard
 /// [`attachment_fans_for_object_choices`] applies, so authority-only or stale
 /// back-links cannot reach a consumer.
+///
+/// Overflow is returned, never absorbed. Dropping an oversized host or emptying
+/// an oversized map here would hand the caller a bounded, plausible projection
+/// that states the opposite of the truth — "nothing is attached" — and the
+/// budget gate downstream would have nothing left to object to. The reason code
+/// travels instead, and [`finalize_viewer_interaction`] decides what the viewer
+/// is told.
 fn attachment_views_for_viewer(
     filtered_state: &GameState,
-) -> BTreeMap<u64, InteractionAttachmentView> {
+) -> Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode> {
     let mut views = BTreeMap::new();
     for host_id in filtered_state.objects.keys().copied() {
         // Seeded with the host: an attachment cycle would otherwise walk
@@ -7801,7 +7841,10 @@ fn attachment_views_for_viewer(
         let mut seen = HashSet::from([host_id]);
         let mut cards = Vec::new();
         collect_attachment_subtree(filtered_state, host_id, &mut seen, &mut cards);
-        if cards.is_empty() || cards.len() > MAX_INTERACTION_LIST_LEN {
+        if cards.len() > MAX_INTERACTION_LIST_LEN {
+            return Err(InteractionReasonCode::PayloadTooLarge);
+        }
+        if cards.is_empty() {
             continue;
         }
         views.insert(
@@ -7819,9 +7862,9 @@ fn attachment_views_for_viewer(
         );
     }
     if views.len() > MAX_INTERACTION_LIST_LEN {
-        return BTreeMap::new();
+        return Err(InteractionReasonCode::PayloadTooLarge);
     }
-    views
+    Ok(views)
 }
 
 /// Depth-first pre-order, so a nested attachment follows the card it hangs on
