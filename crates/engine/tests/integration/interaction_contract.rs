@@ -673,6 +673,69 @@ fn attachment_views_survive_the_adapter_round_trip() {
     assert!(legacy.attachment_views.is_empty());
 }
 
+/// Membership is derived before the authorization, session and slot gates, so
+/// an early return carries as much of it as the derived path does. Only the
+/// whole-projection bound charges the map and every card in it: each view below
+/// is inside the per-view cap, and it is their SUM that has to fail closed —
+/// otherwise a viewer who may not submit anything at all still receives an
+/// attachment tree of unbounded size.
+///
+/// The same early return ships its membership normally while it fits — that is
+/// `attachment_views_follow_visibility_while_fans_follow_authorization`.
+#[test]
+fn an_early_return_fails_closed_on_the_aggregate_attachment_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Budget Host", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Budget Attachment", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, host);
+        // Replay the shape the engine just wrote until the host wears the
+        // per-view maximum, so no single view is oversized on its own.
+        let engine_written = state.objects[&seed].clone();
+        let mut next_id = state.objects.keys().map(|id| id.0).max().unwrap_or(0) + 1;
+        while state.objects[&host].attachments.len() < MAX_INTERACTION_LIST_LEN {
+            let id = ObjectId(next_id);
+            next_id += 1;
+            let mut copy = engine_written.clone();
+            copy.id = id;
+            state.objects.insert(id, copy);
+            state.battlefield.push_back(id);
+            state.objects.get_mut(&host).unwrap().attachments.push(id);
+        }
+        bind(state, "attachment-view-budget");
+    }
+    assert!(
+        runner.state().objects[&host]
+            .attachments
+            .iter()
+            .all(|id| runner.state().objects[id].attached_to
+                == runner.state().objects[&seed].attached_to),
+        "fixture guard: every filled row carries the same back-link the engine wrote"
+    );
+
+    let unauthorized = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        unauthorized.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "an early return that cannot be bounded says so instead of shipping the payload"
+    );
+    assert!(
+        unauthorized.attachment_views.is_empty()
+            && unauthorized.attachment_fans.is_empty()
+            && unauthorized.opportunities.is_empty(),
+        "failing the budget drops every unbounded list rather than truncating one"
+    );
+    assert!(
+        !unauthorized.can_submit,
+        "the fail-closed projection keeps the authority answer it was already carrying"
+    );
+}
+
 #[test]
 fn authority_requires_explicit_binding_and_rebinding_invalidates_old_capabilities() {
     let mut state = GameState::new_two_player(42);

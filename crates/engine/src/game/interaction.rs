@@ -7427,7 +7427,7 @@ pub fn derive_viewer_interaction(
     let can_submit = authorized_submitters.contains(&viewer);
     let kind = waiting_for_kind(&authoritative_state.waiting_for);
     if kind.terminal {
-        return ViewerInteraction {
+        return finalize_viewer_interaction(ViewerInteraction {
             waiting_for_kind: kind,
             authorized_submitters: Vec::new(),
             can_submit: false,
@@ -7438,10 +7438,10 @@ pub fn derive_viewer_interaction(
             availability: InteractionAvailability::Terminal {
                 outcome: InteractionOutcomeCode::Terminal,
             },
-        };
+        });
     }
     if !can_submit {
-        return ViewerInteraction {
+        return finalize_viewer_interaction(ViewerInteraction {
             waiting_for_kind: kind,
             authorized_submitters: authorized_submitters
                 .into_iter()
@@ -7453,14 +7453,14 @@ pub fn derive_viewer_interaction(
             attachment_fans: BTreeMap::new(),
             attachment_views: attachment_views.clone(),
             availability: InteractionAvailability::Waiting,
-        };
+        });
     }
     if authoritative_state
         .interaction_session_id
         .as_ref()
         .is_none_or(|session| !interaction_session_is_valid(session))
     {
-        return ViewerInteraction {
+        return finalize_viewer_interaction(ViewerInteraction {
             waiting_for_kind: kind,
             authorized_submitters: authorized_submitters
                 .into_iter()
@@ -7474,10 +7474,10 @@ pub fn derive_viewer_interaction(
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::AuthorityUnbound,
             },
-        };
+        });
     }
     if !interaction_serial_is_valid(&authoritative_state.next_interaction_serial) {
-        return ViewerInteraction {
+        return finalize_viewer_interaction(ViewerInteraction {
             waiting_for_kind: kind,
             authorized_submitters: authorized_submitters
                 .into_iter()
@@ -7491,7 +7491,7 @@ pub fn derive_viewer_interaction(
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::InvalidAuthorityState,
             },
-        };
+        });
     }
 
     let slots: Vec<_> = authoritative_state
@@ -7505,7 +7505,7 @@ pub fn derive_viewer_interaction(
         })
         .collect();
     if slots.len() > MAX_INTERACTION_LIST_LEN {
-        return ViewerInteraction {
+        return finalize_viewer_interaction(ViewerInteraction {
             waiting_for_kind: kind,
             authorized_submitters: authorized_submitters
                 .into_iter()
@@ -7519,7 +7519,7 @@ pub fn derive_viewer_interaction(
             availability: InteractionAvailability::Unsupported {
                 reason: InteractionReasonCode::PayloadTooLarge,
             },
-        };
+        });
     }
     let mut opportunities = Vec::with_capacity(slots.len());
     let mut attachment_fans = BTreeMap::new();
@@ -7564,7 +7564,7 @@ pub fn derive_viewer_interaction(
         .unwrap_or(default_availability);
     let mut attachment_views = attachment_views;
     bind_attachment_view_submissions(&mut attachment_views, &attachment_fans);
-    let mut view = ViewerInteraction {
+    finalize_viewer_interaction(ViewerInteraction {
         waiting_for_kind: kind,
         authorized_submitters: authorized_submitters
             .into_iter()
@@ -7579,7 +7579,21 @@ pub fn derive_viewer_interaction(
         attachment_fans,
         attachment_views,
         availability,
-    };
+    })
+}
+
+/// The single exit of [`derive_viewer_interaction`]: every projection the engine
+/// hands outward — terminal, unauthorized, unbound-authority, invalid-serial,
+/// oversized-slot and the derived one alike — leaves through here, so one
+/// aggregate budget governs the whole payload. Membership is built before the
+/// authorization and session gates, so an early return carries just as much of
+/// it as the derived path does; charging it only on the derived path would leave
+/// the other five able to serialize an unbounded attachment tree.
+///
+/// Failing the budget fails closed: the unbounded lists are dropped and the
+/// availability states why, rather than shipping a truncated payload that reads
+/// as an authoritative "nothing is attached".
+fn finalize_viewer_interaction(mut view: ViewerInteraction) -> ViewerInteraction {
     if bound_outbound_view(&view).is_err() {
         view.opportunities.clear();
         view.attachment_fans.clear();
