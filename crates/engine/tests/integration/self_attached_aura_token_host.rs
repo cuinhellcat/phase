@@ -18,9 +18,13 @@
 //! in CI, where only the curated fixture exists; the two shipped cards are then
 //! replayed end to end behind the fixture guard this suite uses elsewhere.
 
+use engine::game::effects::resolve_ability_chain;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{
+    Effect, PtValue, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -262,5 +266,87 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
         sorted_hosts(&runner),
         sorted_ids(&[first, second]),
         "Asinine Antics enchants each opponent creature separately"
+    );
+}
+
+/// A Role token created "attached to" a context or reference filter, by an
+/// ability that ALSO selected an object target.
+///
+/// The host filter and the ability's target slots answer different questions:
+/// only a filter that describes a target slot (CR 115.1a) may read what the
+/// ability chose. A context filter names its object through its own authority,
+/// so the selected object must not become the host by default — that would let
+/// "attached to the exiled card" silently enchant whatever else the ability
+/// happened to target.
+fn resolve_role_token_attached_to(
+    attach_to: TargetFilter,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Context Host Source", 2, 2).id();
+    let selected = scenario.add_creature(P0, "Selected Bystander", 2, 2).id();
+    let mut runner = scenario.build();
+
+    let ability = ResolvedAbility::new(
+        Effect::Token {
+            name: "Monster Role".to_string(),
+            power: PtValue::Fixed(0),
+            toughness: PtValue::Fixed(0),
+            types: vec![
+                "Enchantment".to_string(),
+                "Aura".to_string(),
+                "Role".to_string(),
+            ],
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: Some(attach_to),
+            enters_attacking: false,
+            supertypes: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+        },
+        vec![TargetRef::Object(selected)],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("the token effect resolves");
+
+    (runner, source, selected)
+}
+
+#[test]
+fn a_context_filter_host_never_falls_back_to_the_selected_target() {
+    // CR 400.7j + CR 608.2k: "the object paid as a cost" names nothing here, so
+    // the token gets no host — it must NOT inherit the chosen target.
+    let (runner, _source, selected) = resolve_role_token_attached_to(TargetFilter::CostPaidObject);
+    assert!(
+        runner.state().objects[&selected].attachments.is_empty(),
+        "a reference filter that resolves to nothing must leave the selected \
+         target unenchanted"
+    );
+    assert!(
+        role_tokens(&runner)
+            .iter()
+            .all(|token| token.attached_to.is_none()),
+        "no Role may be attached at all when its declared authority named no host"
+    );
+
+    // The discriminating half: a context filter that DOES name an object
+    // resolves through its own authority, and that object is the host even
+    // though a different object sits in the ability's target slot.
+    let (runner, source, selected) = resolve_role_token_attached_to(TargetFilter::SelfRef);
+    assert_eq!(
+        only_role_token(&runner).attached_to,
+        Some(AttachTarget::Object(source)),
+        "the filter's own authority names the host, not the selected target"
+    );
+    assert!(
+        runner.state().objects[&selected].attachments.is_empty(),
+        "the selected target stays unenchanted"
     );
 }

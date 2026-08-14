@@ -2986,10 +2986,15 @@ fn resolve_attach_host(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<AttachTarget> {
-    match filter {
+    match classify_attach_host_authority(filter) {
+        // CR 115.1a: the chosen target carried in `ability.targets` — the
+        // single-target "attached to target creature" case. Player-host Auras
+        // (CR 303.4 permits a player host) are not yet implemented, so a Player
+        // slot yields `None` here.
+        AttachHostAuthority::SelectedTarget => first_object_host(ability),
         // Event-context hosts ("attached to the triggering creature") resolve the
         // triggering event's subject via the shared event-context resolver.
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+        AttachHostAuthority::EventContext => {
             crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
                 .map(target_ref_to_attach_target)
         }
@@ -3002,17 +3007,17 @@ fn resolve_attach_host(
         // ability's trigger condition already referred to ("When this creature
         // enters, create a Monster Role token attached to IT"). The event context
         // is the single authority for that object, so the fallback routes through
-        // the same resolver the `TriggeringSource` arm above uses rather than
-        // reading `source_id`: Gylwain, Casting Director creates the Role for
-        // ANOTHER creature that entered, and the event's subject — not the source
-        // — is the one its sentence refers to.
+        // the same resolver the `EventContext` arm above uses rather than reading
+        // `source_id`: Gylwain, Casting Director creates the Role for ANOTHER
+        // creature that entered, and the event's subject — not the source — is
+        // the one its sentence refers to.
         //
         // The fallback is confined to this arm and to an ability that chose
         // NOTHING. A typed targeting filter that legally selected zero targets
         // ("attached to target creature you control" with no legal target) keeps
         // its own no-host outcome: nothing in its text names an untargeted
         // object, so CR 608.2k does not reach it.
-        TargetFilter::ParentTarget => first_object_host(ability).or_else(|| {
+        AttachHostAuthority::Pronoun => first_object_host(ability).or_else(|| {
             ability.targets.is_empty().then(|| {
                 crate::game::targeting::resolve_event_context_target(
                     state,
@@ -3022,12 +3027,123 @@ fn resolve_attach_host(
                 .map(target_ref_to_attach_target)
             })?
         }),
-        // Any targeting filter resolves to the chosen target carried in
-        // `ability.targets` — the single-target "attached to target creature"
-        // case (CR 115.1a). Player-host Auras (CR 303.4 permits a player host)
-        // are not yet implemented — no current card creates a token attached to
-        // a player, so a Player slot yields `None` here.
-        _ => first_object_host(ability),
+        // CR 608.2c: a numbered anaphor resolves against the whole resolving
+        // chain's targets, which is why it routes through the same authority
+        // `attach::resolve_object_filter` uses rather than reading this clause's
+        // nearest target.
+        AttachHostAuthority::ParentSlot(index) => {
+            crate::game::targeting::resolve_parent_slot_from_root(state, ability, index)
+                .map(target_ref_to_attach_target)
+        }
+        AttachHostAuthority::Source => Some(AttachTarget::Object(ability.source_id)),
+        AttachHostAuthority::SpecificObject(id) => Some(AttachTarget::Object(id)),
+        AttachHostAuthority::NoHost => None,
+    }
+}
+
+/// CR 303.4 + CR 608.2c: which authority names the host of a token created
+/// "attached to" something.
+///
+/// Reading the enclosing ability's chosen targets is correct only for a filter
+/// that describes a target slot (CR 115.1a). Every other family names its object
+/// through its own authority, and a filter that names no object must leave the
+/// token hostless rather than inherit whatever the ability happened to select.
+enum AttachHostAuthority {
+    /// A predicate over objects, which the targeting layer used to choose a
+    /// target. The host is that chosen target.
+    SelectedTarget,
+    /// An object the triggering event or the resolution context names.
+    EventContext,
+    /// The bare anaphoric pronoun, which reads the chosen target and otherwise
+    /// falls back to the untargeted object the trigger condition named.
+    Pronoun,
+    /// One numbered slot of the resolving chain's accumulated targets.
+    ParentSlot(usize),
+    /// The ability's own source object.
+    Source,
+    /// An object the ability definition names outright.
+    SpecificObject(ObjectId),
+    /// No host from this path: a player-valued filter, a filter that names no
+    /// object at all, or a reference family whose authority this path does not
+    /// resolve. The token is then left unattached (see the `resolve_attach_host`
+    /// doc comment for what happens to it).
+    NoHost,
+}
+
+/// The classification is exhaustive over [`TargetFilter`] on purpose: a new
+/// variant has to be triaged here rather than inheriting selected-target
+/// semantics from a wildcard.
+fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority {
+    match filter {
+        // Predicates over objects — what a target slot is chosen with.
+        TargetFilter::Any
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::HasChosenName
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::StackAbility { .. } => AttachHostAuthority::SelectedTarget,
+
+        // CR 603.7c + CR 608.2c: event- and resolution-context references.
+        TargetFilter::EventTarget
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttachedTo => AttachHostAuthority::EventContext,
+
+        TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,
+        TargetFilter::ParentTargetSlot { index } => AttachHostAuthority::ParentSlot(*index),
+        TargetFilter::SelfRef => AttachHostAuthority::Source,
+        TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
+
+        // Player-valued filters. CR 303.4 permits a player host, but no card in
+        // the corpus creates a token attached to a player and this path has no
+        // player-host support to route them to.
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => AttachHostAuthority::NoHost,
+
+        // Object references this path does not resolve. Each names its object
+        // through an authority of its own (an exile link, a tracked set, a
+        // recorded choice, a paid cost); none of them is the enclosing ability's
+        // selected target, so an unsupported one yields no host instead.
+        // `OriginalSource` never survives to resolution — it is concretized to
+        // `SpecificObject` beforehand.
+        TargetFilter::None
+        | TargetFilter::GrantingObject
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
     }
 }
 
