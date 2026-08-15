@@ -51,6 +51,12 @@ const SELF_ATTACHED_ETB: &str =
 const TARGETED_ETB: &str = "When this creature enters, create a Monster Role token attached to \
      target creature you control.";
 
+/// Gylwain's shape: the trigger watches ANOTHER creature, so the pronoun's
+/// referent and the ability's source are different objects. This is the row that
+/// separates "the parent-target anaphor" from "the source".
+const OTHER_CREATURE_ETB: &str = "Whenever another creature you control enters, create a Monster \
+     Role token attached to it.";
+
 fn colorless(count: usize) -> Vec<ManaUnit> {
     pool(count, &[])
 }
@@ -713,5 +719,44 @@ fn an_unbound_chosen_player_yields_no_host_rather_than_the_controller() {
         chain.attachments_of(chain.selected),
         0,
         "and certainly not the object the ability selected"
+    );
+}
+
+/// CR 608.2c + CR 608.2k: the bare pronoun resolves through the `ParentTarget`
+/// authority (`targeting::resolved_targets`), which is the anaphor it is
+/// implementing. On a zone change that authority hands back the ENTERING object
+/// whenever it is not the ability's source, and only otherwise falls back to the
+/// source.
+///
+/// The discriminating shape is Gylwain's: the trigger watches another creature,
+/// so referent and source are different objects and a resolver that reads
+/// `source_id` would enchant the wrong permanent.
+#[test]
+fn the_pronoun_names_the_creature_the_trigger_watched_not_the_source() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, colorless(4));
+    let watcher = scenario
+        .add_creature_from_oracle(P0, "Role Patron", 2, 2, OTHER_CREATURE_ETB)
+        .id();
+    let newcomer = scenario
+        .add_creature_to_hand_from_oracle(P0, "Role Recipient", 3, 3, "")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(newcomer).resolve();
+    runner.advance_until_stack_empty();
+
+    let token = only_role_token(&runner);
+    assert_eq!(
+        token.attached_to,
+        Some(AttachTarget::Object(newcomer)),
+        "the pronoun names the creature that entered, not the permanent whose \
+         ability watched it"
+    );
+    assert_eq!(
+        runner.state().objects[&watcher].attachments.len(),
+        0,
+        "the source must not collect the Role its own trigger created for another"
     );
 }

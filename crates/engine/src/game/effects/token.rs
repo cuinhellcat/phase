@@ -3025,25 +3025,37 @@ fn resolve_attach_host(
         //
         // CR 608.2k: such a pronoun names the specific untargeted object the
         // ability's trigger condition already referred to ("When this creature
-        // enters, create a Monster Role token attached to IT"). The event context
-        // is the single authority for that object, so the fallback routes through
-        // the same resolver the `EventContext` arm above uses rather than reading
-        // `source_id`: Gylwain, Casting Director creates the Role for ANOTHER
-        // creature that entered, and the event's subject — not the source — is
-        // the one its sentence refers to.
+        // enters, create a Monster Role token attached to IT").
+        //
+        // `ParentTarget` IS that anaphor, and `targeting::resolved_targets` is
+        // its authority — so the fallback asks it rather than substituting a
+        // neighbouring one. It carries referents this clause has no business
+        // re-deriving: the attack batch, the cast spell, the blocked attacker,
+        // and the Stationed / VehicleCrewed / Saddled subjects (CR 702.184a,
+        // CR 702.122, CR 702.171). On a zone change it hands back the ENTERING
+        // object only when that is not the source — Gylwain, Casting Director
+        // creates the Role for another creature that entered — and otherwise
+        // falls back to the source, which is what "When THIS creature enters …
+        // attached to it" needs. Resolving `TriggeringSource` here happened to
+        // agree on both zone-change shapes and on nothing else.
         //
         // The fallback is confined to this arm and to an ability that chose
         // NOTHING. A typed targeting filter that legally selected zero targets
         // ("attached to target creature you control" with no legal target) keeps
         // its own no-host outcome: nothing in its text names an untargeted
         // object, so CR 608.2k does not reach it.
+        //
+        // One host is taken from what may be a batch: the clause creates one
+        // token and its pronoun names one thing.
         AttachHostAuthority::Pronoun => first_object_host(ability).or_else(|| {
             ability.targets.is_empty().then(|| {
-                crate::game::targeting::resolve_event_context_target(
+                crate::game::targeting::resolved_targets(
+                    ability,
+                    &TargetFilter::ParentTarget,
                     state,
-                    &TargetFilter::TriggeringSource,
-                    ability.source_id,
                 )
+                .into_iter()
+                .next()
                 .map(target_ref_to_attach_target)
             })?
         }),
