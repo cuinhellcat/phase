@@ -682,6 +682,40 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
   });
 
+  it("labels the fan control from the projected card count rather than raw attachments", () => {
+    const gameState = makeState();
+    gameState.objects[1].attachments = [2, 4];
+    gameState.objects[4] = makeObject({
+      id: 4,
+      card_id: 400,
+      attached_to: { type: "Object", data: 1 },
+      attachments: [],
+      name: "Second Equipment",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
+      color: [],
+      base_color: [],
+    });
+    gameState.battlefield = [1, 2, 3, 4];
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      viewerInteraction: membershipOnly([2]),
+    });
+    act(() => {
+      useUiStore.setState({ selectedObjectId: 1 });
+    });
+
+    renderPermanent();
+
+    expect(screen.getByRole("button", {
+      name: "View Test Creature's 1 attached card",
+    })).toBeInTheDocument();
+  });
+
   it("keeps the single-attachment control readable at compact card sizes", () => {
     renderPermanent();
 
