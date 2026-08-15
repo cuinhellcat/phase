@@ -30728,3 +30728,71 @@ mod mana_target_role_tests {
         );
     }
 }
+
+/// CR 115.1a: `denotes_player_target` is read by both
+/// `game::targeting::legal_targets` and the Aura-token host resolver, so its
+/// contract is pinned here rather than only through either consumer.
+#[cfg(test)]
+mod player_target_slot_tests {
+    use super::*;
+
+    /// CR 115.1a: `denotes_player_target` is read by both
+    /// `game::targeting::legal_targets` and the Aura-token host resolver, so its
+    /// contract is pinned here rather than only through either consumer.
+    ///
+    /// The property-free requirement is the load-bearing half: a `Typed` filter
+    /// carrying an object characteristic denotes objects however player-shaped
+    /// the rest of it looks.
+    #[test]
+    fn denotes_player_target_covers_the_player_slots_and_nothing_else() {
+        let empty_typed = |controller: Option<ControllerRef>| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller,
+                properties: Vec::new(),
+            })
+        };
+
+        for filter in [
+            TargetFilter::Player,
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            empty_typed(Some(ControllerRef::Opponent)),
+            empty_typed(Some(ControllerRef::You)),
+            // A resolution-chosen player is a player slot by shape; callers that
+            // must tell it apart ask `chosen_player_index` first.
+            empty_typed(Some(ControllerRef::ChosenPlayer { index: 0 })),
+            empty_typed(None),
+        ] {
+            assert!(
+                filter.denotes_player_target(),
+                "{filter:?} names a player, not an object"
+            );
+        }
+
+        for filter in [
+            TargetFilter::Any,
+            TargetFilter::Typed(TypedFilter::creature()),
+            TargetFilter::Opponent,
+            TargetFilter::Controller,
+            TargetFilter::SelfRef,
+            // "target token you control" — a characteristic no player has.
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Token],
+            }),
+            // CR 115.4 "any other target": players AND objects, so not a
+            // player-only slot.
+            TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller: None,
+                properties: vec![FilterProp::Another],
+            }),
+        ] {
+            assert!(
+                !filter.denotes_player_target(),
+                "{filter:?} does not name a player-only target slot"
+            );
+        }
+    }
+}

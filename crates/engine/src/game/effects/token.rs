@@ -2998,12 +2998,20 @@ fn resolve_attach_host(
         // `attach_to` does for an object host.
         AttachHostAuthority::SelectedPlayerTarget => first_player_host(ability),
         // CR 608.2c + CR 109.4: the resolution-chosen player, read from the
-        // resolution's own chosen-player list through the shared context-ref
-        // player resolver — the same authority every other "the chosen player
-        // <verb>s" sub-effect uses.
-        AttachHostAuthority::ChosenPlayer => Some(AttachTarget::Player(
-            super::resolve_player_for_context_ref(state, ability, filter),
-        )),
+        // resolution's own chosen-player list.
+        //
+        // Read from the slot directly rather than through
+        // `resolve_player_for_context_ref`: that helper falls back to
+        // `ability.controller` when the index is unbound, which is right for a
+        // sub-effect that must still act ("the chosen player draws a card") and
+        // wrong here. An unbound slot means the sentence names nobody, and this
+        // path may not invent a host — inventing one is the whole defect this
+        // resolver exists to prevent. No host, and CR 704.5m takes it from there.
+        AttachHostAuthority::ChosenPlayer(index) => ability
+            .chosen_players
+            .get(index as usize)
+            .copied()
+            .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
         // triggering event's subject via the shared event-context resolver.
         AttachHostAuthority::EventContext => {
@@ -3070,7 +3078,7 @@ enum AttachHostAuthority {
     /// CR 608.2c + CR 109.4: the Nth resolution-chosen player. Fixed while the
     /// ability resolves, never declared as a target — so it names its player
     /// through the chosen-player list, not through `ability.targets`.
-    ChosenPlayer,
+    ChosenPlayer(u8),
     /// An object the triggering event or the resolution context names.
     EventContext,
     /// The bare anaphoric pronoun, which reads the chosen target and otherwise
@@ -3101,7 +3109,11 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         // arm below, which would otherwise read the ability's chosen targets and
         // attach the token to an unrelated object.
         TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
-            AttachHostAuthority::ChosenPlayer
+            AttachHostAuthority::ChosenPlayer(
+                filter
+                    .chosen_player_index()
+                    .expect("guarded by the arm above"),
+            )
         }
         // CR 115.1a: whether a target slot holds a player or an object is the
         // targeting layer's question, and `denotes_player_target` is the single
@@ -3111,6 +3123,19 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         // target, find none, and enter unattached.
         TargetFilter::Typed(_) if filter.denotes_player_target() => {
             AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // CR 601.3 + CR 608.2c: a composite can CONTAIN a context reference —
+        // the parser builds `And { ExiledBySource, Typed }` for "an exiled card
+        // that is a creature" — and `is_context_ref` reports the whole filter as
+        // one. Its object comes from the exile link, not from a target slot, so
+        // it fails closed here rather than reading `ability.targets`. Asked
+        // before the object-predicate arm below, which would otherwise claim the
+        // composite by its outer shape.
+        TargetFilter::And { .. } | TargetFilter::Or { .. } | TargetFilter::Not { .. }
+            if filter.is_context_ref() =>
+        {
+            AttachHostAuthority::NoHost
         }
 
         // Predicates over objects — what a target slot is chosen with.
@@ -8901,5 +8926,33 @@ mod attach_host_authority_tests {
                  chosen targets as its attachment host"
             );
         }
+    }
+
+    /// CR 601.3: the case where the two ways of deciding disagree. A composite
+    /// that CONTAINS the exile anaphor is a context reference as a whole —
+    /// `is_context_ref` says so through `references_exiled_by_source`, which
+    /// recurses — while its OUTER shape is `And`, which is otherwise an object
+    /// predicate. The parser builds exactly this for "an exiled card that is a
+    /// creature", so classifying by shape would read the enclosing ability's
+    /// chosen targets for an object the exile link already names.
+    #[test]
+    fn a_composite_carrying_the_exile_anaphor_is_not_a_selected_target() {
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert!(
+            filter.is_context_ref(),
+            "fixture guard: the composite must be a context reference"
+        );
+        assert!(
+            matches!(
+                classify_attach_host_authority(&filter),
+                AttachHostAuthority::NoHost
+            ),
+            "a composite naming an exile-linked object has no host authority here"
+        );
     }
 }

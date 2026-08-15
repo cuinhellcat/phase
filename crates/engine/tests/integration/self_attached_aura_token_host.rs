@@ -645,11 +645,24 @@ fn selenias_curse_enchants_the_targeted_opponent() {
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
 
-    // Killed as a game event so the dies trigger observes the death, rather than
-    // by editing the zone behind the engine's back.
+    // Killed the way the game kills: lethal damage, then the CR 704.5g
+    // state-based action moves her to the graveyard and the dies trigger
+    // observes THAT death. Moving the zone by hand would skip both the
+    // replacement pipeline and the state-based pass.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&selenia)
+        .expect("Selenia is on the battlefield")
+        .damage_marked = 99;
     let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), selenia, Zone::Graveyard, &mut events);
-    engine::game::process_triggers(runner.state_mut(), &events);
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+    assert_eq!(
+        runner.state().objects[&selenia].zone,
+        Zone::Graveyard,
+        "the state-based action must be what kills her"
+    );
+    engine::game::triggers::process_triggers(runner.state_mut(), &events);
     assert_eq!(
         runner.state().stack.len(),
         1,
@@ -675,5 +688,30 @@ fn selenias_curse_enchants_the_targeted_opponent() {
         curse.attached_to,
         Some(AttachTarget::Player(P1)),
         "CR 303.4: the Curse enchants the opponent its trigger targeted"
+    );
+}
+
+/// CR 608.2c: with no player bound to the chosen-player slot, the sentence names
+/// nobody, so the token gets no host.
+///
+/// The shared context-ref player resolver falls back to `ability.controller` for
+/// an unbound slot, which is right for a sub-effect that must still act ("the
+/// chosen player draws a card") and wrong for a host: the controller was never
+/// named, and inventing a host is the defect this resolver exists to prevent.
+/// The same fixture as the row above, minus the choosing step.
+#[test]
+fn an_unbound_chosen_player_yields_no_host_rather_than_the_controller() {
+    let mut chain = RoleChain::build_curse(chosen_player_filter());
+    let token = chain.run();
+
+    assert_eq!(
+        chain.host_of(token),
+        None,
+        "an unbound chosen-player slot names nobody, so there is no host"
+    );
+    assert_eq!(
+        chain.attachments_of(chain.selected),
+        0,
+        "and certainly not the object the ability selected"
     );
 }
