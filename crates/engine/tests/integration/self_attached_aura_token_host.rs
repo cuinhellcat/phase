@@ -17,19 +17,27 @@
 //! The rows are built from Oracle text rather than the card export so they run
 //! in CI, where only the curated fixture exists; the two shipped cards are then
 //! replayed end to end behind the fixture guard this suite uses elsewhere.
+//!
+//! The suite has since grown into the whole question the host resolver answers:
+//! WHICH authority names a token's host. Beside the pronoun above it now covers
+//! the context references that must never read the ability's chosen targets, and
+//! the filters whose target slot holds a PLAYER rather than an object — the
+//! class Selenia, the Cursed Heart prints (CR 115.1a + CR 303.4).
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectScope, PtValue, QuantityExpr, TapStateChange,
-    TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, EffectScope,
+    PlayerChoiceDistinctness, PtValue, QuantityExpr, TapStateChange, TargetFilter,
+    TargetSelectionMode, TypedFilter,
 };
 use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::PlayerId;
 
 use crate::support::shared_card_db as load_db;
 
@@ -294,6 +302,57 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
     }
 }
 
+/// Selenia's Curse, with the same shape the shipped card exports: an Aura
+/// enchantment token whose host filter names a PLAYER. Used where the row has to
+/// distinguish a player host from an object host, so the token is a Curse rather
+/// than a Role (CR 303.4: a Curse is the Aura subclass that enchants players).
+fn curse_token_effect(attach_to: TargetFilter) -> Effect {
+    Effect::Token {
+        name: "Selenia's Curse".to_string(),
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types: vec![
+            "Enchantment".to_string(),
+            "Aura".to_string(),
+            "Curse".to_string(),
+        ],
+        colors: Vec::new(),
+        keywords: Vec::new(),
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: Some(attach_to),
+        enters_attacking: false,
+        supertypes: Vec::new(),
+        static_abilities: Vec::new(),
+        enter_with_counters: Vec::new(),
+    }
+}
+
+/// "target opponent" as the parser exports it (Selenia, the Cursed Heart): a
+/// `Typed` filter with no type filters and no properties, whose only content is
+/// the controller scope. `legal_targets` enumerates PLAYERS for this shape —
+/// that is what makes it a player target slot rather than an object predicate.
+fn target_opponent_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: Some(ControllerRef::Opponent),
+        properties: Vec::new(),
+    })
+}
+
+/// "the chosen player" — the same property-free `Typed` shape, but scoped to a
+/// player fixed during resolution instead of one declared as a target
+/// (CR 608.2c + CR 109.4). `is_context_ref` reports it through
+/// `chosen_player_index`.
+fn chosen_player_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: Vec::new(),
+        controller: Some(ControllerRef::ChosenPlayer { index: 0 }),
+        properties: Vec::new(),
+    })
+}
+
 /// A permanent whose activated ability taps a chosen creature and then creates
 /// a Role token "attached to" `attach_to` — one ability holding both a selected
 /// object target and a host filter, which is the shape where the two can be
@@ -308,6 +367,48 @@ struct RoleChain {
 
 impl RoleChain {
     fn build(attach_to: TargetFilter) -> Self {
+        Self::build_with(AbilityDefinition::new(
+            AbilityKind::Activated,
+            role_token_effect(attach_to),
+        ))
+    }
+
+    /// The same fixture creating a Curse instead of a Role, for the rows whose
+    /// host filter names a player.
+    fn build_curse(attach_to: TargetFilter) -> Self {
+        Self::build_with(AbilityDefinition::new(
+            AbilityKind::Activated,
+            curse_token_effect(attach_to),
+        ))
+    }
+
+    /// The Curse fixture with a "choose an opponent" step between the tap clause
+    /// and the token clause, so the resolution has bound a chosen player by the
+    /// time the host filter is read (CR 608.2c). The choice is made by the game
+    /// (CR 608.2d override) to keep the row free of a round-trip, and
+    /// `ChoiceType::Opponent` leaves exactly one legal answer in a two-player
+    /// game, so the chosen player is deterministic without pinning the RNG.
+    fn build_curse_after_choosing_an_opponent(attach_to: TargetFilter) -> Self {
+        Self::build_with(AbilityDefinition {
+            sub_ability: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Activated,
+                curse_token_effect(attach_to),
+            ))),
+            ..AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent {
+                        restriction: None,
+                        distinctness: PlayerChoiceDistinctness::default(),
+                    },
+                    persist: false,
+                    selection: TargetSelectionMode::Random,
+                },
+            )
+        })
+    }
+
+    fn build_with(token_ability: AbilityDefinition) -> Self {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let selected = scenario.add_creature(P0, "Selected Bystander", 2, 2).id();
@@ -315,10 +416,7 @@ impl RoleChain {
         let source = scenario
             .add_creature(P0, "Chain Source", 2, 2)
             .with_ability_definition(AbilityDefinition {
-                sub_ability: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    role_token_effect(attach_to),
-                ))),
+                sub_ability: Some(Box::new(token_ability)),
                 ..AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::SetTapState {
@@ -347,13 +445,27 @@ impl RoleChain {
     /// "never created", and the negative rows below would pass on a resolution
     /// that never reached the token clause at all.
     fn run(&mut self) -> ObjectId {
+        self.run_targeting(None)
+    }
+
+    /// The same run with a player target declared alongside the object one.
+    /// Both slots are live at once, which is the condition that makes the row
+    /// discriminating: a host resolver that scans `ability.targets` for the
+    /// first object would pick the tap clause's creature instead of the player
+    /// the host filter names.
+    fn run_with_player_target(&mut self, player: PlayerId) -> ObjectId {
+        self.run_targeting(Some(player))
+    }
+
+    fn run_targeting(&mut self, player: Option<PlayerId>) -> ObjectId {
         let source = self.source;
         let selected = self.selected;
-        let outcome = self
-            .runner
-            .activate(source, 0)
-            .target_object(selected)
-            .resolve();
+        let activation = self.runner.activate(source, 0).target_object(selected);
+        let activation = match player {
+            Some(player) => activation.target_player(player),
+            None => activation,
+        };
+        let outcome = activation.resolve();
         let created: Vec<ObjectId> = outcome
             .events()
             .iter()
@@ -450,5 +562,118 @@ fn a_paired_source_filter_never_inherits_the_selected_target() {
         chain.host_of(token),
         None,
         "with no single host authority for the pair, the Role gets no host at all"
+    );
+}
+
+/// CR 115.1a + CR 303.4: "… attached to target opponent" exports as the
+/// property-free `Typed` shape, which `legal_targets` enumerates as PLAYERS, not
+/// objects — `TargetFilter::denotes_player_target` is the authority both it and
+/// the host resolver read. The host is therefore the chosen player, and the
+/// unrelated object slot in the same ability must not be mistaken for it.
+///
+/// Selenia, the Cursed Heart is the shipped card in this class, and the only one
+/// in the pool whose `attach_to` is player-valued: measured over the 35 795-card
+/// export, the 47 `attach_to` filters are 34 `Typed` and 13 `ParentTarget`, and
+/// exactly one of the 34 is this shape.
+#[test]
+fn a_player_host_filter_enchants_the_targeted_player_not_the_object_target() {
+    let mut chain = RoleChain::build_curse(target_opponent_filter());
+    let token = chain.run_with_player_target(P1);
+
+    assert_eq!(
+        chain.host_of(token),
+        Some(AttachTarget::Player(P1)),
+        "a player-valued host filter must reach the chosen player"
+    );
+    assert_eq!(
+        chain.attachments_of(chain.selected),
+        0,
+        "the tap clause's creature is another clause's target and must never \
+         become the Curse's host"
+    );
+}
+
+/// CR 608.2c + CR 109.4: the resolution-chosen player is the same property-free
+/// `Typed` shape, but it is a context reference — `is_context_ref` says so
+/// through `chosen_player_index` — so its player comes from the resolution's
+/// chosen-player list, never from a declared target slot.
+///
+/// The discriminating half is the object target: the ability taps a creature in
+/// the same resolution, so a host resolver that read `ability.targets` would
+/// attach the Curse to that creature.
+#[test]
+fn a_chosen_player_host_filter_never_inherits_the_object_target() {
+    let mut chain = RoleChain::build_curse_after_choosing_an_opponent(chosen_player_filter());
+    let token = chain.run();
+
+    assert_eq!(
+        chain.host_of(token),
+        Some(AttachTarget::Player(P1)),
+        "the chosen player is the host; P1 is the only opponent that could be chosen"
+    );
+    assert_eq!(
+        chain.attachments_of(chain.selected),
+        0,
+        "a resolution-chosen player reference must not enchant the object the \
+         ability selected"
+    );
+}
+
+/// The shipped card in the player-host class, replayed end to end: Selenia, the
+/// Cursed Heart — "When Selenia dies, create a legendary black Aura Curse
+/// enchantment token named Selenia's Curse attached to target opponent."
+///
+/// Her Curse is the only `attach_to` filter in the export whose slot holds a
+/// player. Before this fix the host resolver scanned the ability's targets for
+/// an OBJECT, found the player slot and skipped it, and the Curse entered
+/// enchanting nothing — CR 704.5m moved it to the graveyard and CR 111.7 ended
+/// it there, inside the same resolution. The card read as doing nothing at all.
+#[test]
+fn selenias_curse_enchants_the_targeted_opponent() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let card = "Selenia, the Cursed Heart";
+    if db.get_face_by_name(card).is_none() {
+        eprintln!("skipping: {card} is not in integration_cards.json.gz");
+        return;
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let selenia = scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // Killed as a game event so the dies trigger observes the death, rather than
+    // by editing the zone behind the engine's back.
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), selenia, Zone::Graveyard, &mut events);
+    engine::game::process_triggers(runner.state_mut(), &events);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Selenia's dies trigger must be on the stack"
+    );
+    runner.advance_until_stack_empty();
+
+    // Found by type rather than by name: the export's token carries the source's
+    // name ("Selenia") instead of the printed "Selenia's Curse", which is a
+    // separate card-data question and not what this row is about.
+    let curse = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.is_token && object.card_types.subtypes.iter().any(|s| s == "Curse"))
+        .expect("the Curse token must still exist; an unattached Aura is swept");
+    assert_eq!(
+        curse.zone,
+        Zone::Battlefield,
+        "the Curse survives the CR 704.5m unattached-Aura check"
+    );
+    assert_eq!(
+        curse.attached_to,
+        Some(AttachTarget::Player(P1)),
+        "CR 303.4: the Curse enchants the opponent its trigger targeted"
     );
 }

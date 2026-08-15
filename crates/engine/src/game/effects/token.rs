@@ -2987,11 +2987,23 @@ fn resolve_attach_host(
     filter: &TargetFilter,
 ) -> Option<AttachTarget> {
     match classify_attach_host_authority(filter) {
-        // CR 115.1a: the chosen target carried in `ability.targets` — the
-        // single-target "attached to target creature" case. Player-host Auras
-        // (CR 303.4 permits a player host) are not yet implemented, so a Player
-        // slot yields `None` here.
+        // CR 115.1a: the chosen OBJECT target carried in `ability.targets` — the
+        // single-target "attached to target creature" case. A player-valued
+        // slot never reaches this arm; `denotes_player_target` routes it to
+        // `SelectedPlayerTarget` below.
         AttachHostAuthority::SelectedTarget => first_object_host(ability),
+        // CR 115.1a + CR 303.4: the chosen PLAYER target is the host. Curse
+        // Auras (Selenia's Curse) are the shipped shape; `attach_to_player`
+        // downstream carries the CR 303.4i legality gate, exactly as
+        // `attach_to` does for an object host.
+        AttachHostAuthority::SelectedPlayerTarget => first_player_host(ability),
+        // CR 608.2c + CR 109.4: the resolution-chosen player, read from the
+        // resolution's own chosen-player list through the shared context-ref
+        // player resolver — the same authority every other "the chosen player
+        // <verb>s" sub-effect uses.
+        AttachHostAuthority::ChosenPlayer => Some(AttachTarget::Player(
+            super::resolve_player_for_context_ref(state, ability, filter),
+        )),
         // Event-context hosts ("attached to the triggering creature") resolve the
         // triggering event's subject via the shared event-context resolver.
         AttachHostAuthority::EventContext => {
@@ -3052,6 +3064,13 @@ enum AttachHostAuthority {
     /// A predicate over objects, which the targeting layer used to choose a
     /// target. The host is that chosen target.
     SelectedTarget,
+    /// CR 115.1a + CR 303.4: a target slot that holds a PLAYER, not an object
+    /// ("… attached to target opponent"). The host is that chosen player.
+    SelectedPlayerTarget,
+    /// CR 608.2c + CR 109.4: the Nth resolution-chosen player. Fixed while the
+    /// ability resolves, never declared as a target — so it names its player
+    /// through the chosen-player list, not through `ability.targets`.
+    ChosenPlayer,
     /// An object the triggering event or the resolution context names.
     EventContext,
     /// The bare anaphoric pronoun, which reads the chosen target and otherwise
@@ -3074,7 +3093,26 @@ enum AttachHostAuthority {
 /// variant has to be triaged here rather than inheriting selected-target
 /// semantics from a wildcard.
 fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority {
-    match filter {
+    let authority = match filter {
+        // CR 608.2c + CR 109.4: a reference to the resolution-chosen player is a
+        // `Typed` filter BY SHAPE, but it is a context reference — the engine
+        // says so through `chosen_player_index`, which is what
+        // `is_context_ref` itself consults. Asked ahead of the generic `Typed`
+        // arm below, which would otherwise read the ability's chosen targets and
+        // attach the token to an unrelated object.
+        TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
+            AttachHostAuthority::ChosenPlayer
+        }
+        // CR 115.1a: whether a target slot holds a player or an object is the
+        // targeting layer's question, and `denotes_player_target` is the single
+        // authority both it and this classification read. "… attached to target
+        // opponent" (Selenia, the Cursed Heart) parses to the property-free
+        // `Typed` shape, so without this arm its Curse would look for an object
+        // target, find none, and enter unattached.
+        TargetFilter::Typed(_) if filter.denotes_player_target() => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
         // Predicates over objects — what a target slot is chosen with.
         TargetFilter::Any
         | TargetFilter::Typed(_)
@@ -3100,15 +3138,22 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         TargetFilter::SelfRef => AttachHostAuthority::Source,
         TargetFilter::SpecificObject { id } => AttachHostAuthority::SpecificObject(*id),
 
-        // Player-valued filters. CR 303.4 permits a player host, but no card in
-        // the corpus creates a token attached to a player and this path has no
-        // player-host support to route them to.
-        TargetFilter::Player
-        | TargetFilter::Controller
+        // CR 115.1a: the remaining player-valued TARGET SLOTS, which
+        // `denotes_player_target` also claims. Kept as their own arm rather than
+        // folded into a guard so the variant list stays readable, and asserted
+        // to agree with that authority in `attach_host_authority_tests`.
+        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => {
+            AttachHostAuthority::SelectedPlayerTarget
+        }
+
+        // Player-valued filters that are NOT target slots. CR 303.4 permits a
+        // player host, but each of these names its player through a context
+        // authority this path does not resolve, so they fail closed rather than
+        // guess one.
+        TargetFilter::Controller
         | TargetFilter::SourceController
         | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::Opponent
-        | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
@@ -3148,7 +3193,22 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
-    }
+    };
+
+    // CR 115.1a: the two authorities above are the engine's, not this function's,
+    // so the classification is checked against them rather than against a
+    // hand-kept list of filters — every filter the engine classifies anywhere is
+    // covered, including shapes nobody thought to write down. `is_context_ref`
+    // says a filter surfaces no target slot; `denotes_player_target` says the
+    // slot holds a player. Either one rules out reading the ability's chosen
+    // OBJECT targets.
+    debug_assert!(
+        !(matches!(authority, AttachHostAuthority::SelectedTarget)
+            && (filter.is_context_ref() || filter.denotes_player_target())),
+        "{filter:?} is not an object target slot, so it must not inherit the ability's \
+         chosen object targets as its attachment host"
+    );
+    authority
 }
 
 /// The first object target the ability chose, which is the host every targeting
@@ -3158,6 +3218,18 @@ fn first_object_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
     ability.targets.iter().find_map(|target| match target {
         TargetRef::Object(id) => Some(AttachTarget::Object(*id)),
         TargetRef::Player(_) => None,
+    })
+}
+
+/// The first player target the ability chose — the mirror of
+/// [`first_object_host`] for a host filter whose slot holds a player
+/// (CR 115.1a). Object slots are skipped rather than converted: an ability can
+/// carry both ("tap target creature, then create a Curse attached to target
+/// opponent"), and the object slot is the other clause's, not this one's.
+fn first_player_host(ability: &ResolvedAbility) -> Option<AttachTarget> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Player(id) => Some(AttachTarget::Player(*id)),
+        TargetRef::Object(_) => None,
     })
 }
 

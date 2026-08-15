@@ -15813,6 +15813,38 @@ impl TargetFilter {
         )
     }
 
+    /// CR 115.1a + CR 109.5: Returns true when this filter's TARGET SLOT holds a
+    /// player rather than an object — "target player", "target opponent", a
+    /// snapshotted specific player.
+    ///
+    /// This is the same rule `game::targeting::legal_targets` enumerates
+    /// players-only with, kept here as the single authority so any consumer that
+    /// must know whether a slot is player-valued asks it instead of re-deriving
+    /// the shape. The Aura-token host resolver is the second consumer: a token
+    /// created "attached to target opponent" (Selenia, the Cursed Heart) has to
+    /// reach the chosen PLAYER, and reading the ability's object targets for it
+    /// would attach the token to an unrelated permanent.
+    ///
+    /// The property-free requirement is load-bearing in both directions:
+    /// `Typed { properties: [Token] }` ("target token you control") names an
+    /// object characteristic that has no meaning for a player, and
+    /// `properties: [Another]` is the CR 115.4 "any other target" shape — both
+    /// denote objects and must fall through to object enumeration.
+    ///
+    /// Distinct from [`Self::is_context_ref`], which answers whether the filter
+    /// has a target slot at all: a resolution-chosen player is a context ref and
+    /// is NOT a player target, so [`Self::chosen_player_index`] must be consulted
+    /// first by callers that handle both.
+    pub fn denotes_player_target(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::Player | TargetFilter::SpecificPlayer { .. }
+        ) || matches!(
+            self,
+            TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty()
+        )
+    }
+
     /// CR 608.2c + CR 109.4: If this filter is a player-only reference to the
     /// Nth resolution-chosen player (a type-filter-free `Typed` whose only
     /// distinguishing property is `controller: ChosenPlayer { index }`), return
