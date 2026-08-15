@@ -9949,4 +9949,82 @@ mod tests {
             );
         }
     }
+
+    /// The derivation itself, not the projection it feeds.
+    ///
+    /// `attachment_views_for_viewer` is the authority that decides whether the
+    /// membership can be published at all, and the public rows in
+    /// `interaction_contract` cannot see the difference this change makes: the
+    /// aggregate bound in `bound_outbound_view` already refused this payload, so
+    /// the ANSWER was fail-closed before and after. What changes is that the
+    /// refusal now happens while the projection is small.
+    ///
+    /// A chain of exactly `MAX_INTERACTION_LIST_LEN` links is the worst case and
+    /// the only one that discriminates: it is the LONGEST chain in which no
+    /// single host's subtree exceeds the per-view cap, so the per-host check
+    /// never fires and a derivation that measures afterwards runs to completion.
+    /// One link longer and the outermost view trips that cap on its own.
+    ///
+    /// REVERT-PROBE, RUN: drop the running charge in `collect_attachment_subtree`
+    /// and restore the post-walk `cards.len()` check ⇒ this returns `Ok` with
+    /// 49 995 000 card entries across 9 999 views (23.2 s, 7.4 GB resident on the
+    /// machine this was measured on) instead of `Err`.
+    #[test]
+    fn the_membership_derivation_refuses_a_worst_case_chain_before_building_it() {
+        use crate::game::game_object::GameObject;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(0);
+        let mut previous: Option<ObjectId> = None;
+        for index in 0..=MAX_INTERACTION_LIST_LEN {
+            let id = ObjectId(index as u64 + 1);
+            let mut object = GameObject::new(
+                id,
+                CardId(index as u64 + 1),
+                owner,
+                format!("Chain Link {index}"),
+                Zone::Battlefield,
+            );
+            if let Some(host_id) = previous {
+                object.attached_to = Some(AttachTarget::Object(host_id));
+                state
+                    .objects
+                    .get_mut(&host_id)
+                    .expect("the host was inserted on the previous iteration")
+                    .attachments
+                    .push(id);
+            }
+            state.objects.insert(id, object);
+            state.battlefield.push_back(id);
+            previous = Some(id);
+        }
+
+        // Reach guard: the fixture really is one chain of the intended length,
+        // and every view in it would sit inside the per-view cap on its own —
+        // without this, an over-long fixture would fail for the wrong reason.
+        assert_eq!(state.objects.len(), MAX_INTERACTION_LIST_LEN + 1);
+        assert!(
+            state
+                .objects
+                .values()
+                .all(|object| object.attachments.len() <= 1),
+            "a chain, not a fan: no host may carry two attachments"
+        );
+
+        // Compared by discriminant, and reported by SIZE rather than by value:
+        // the `Ok` this row exists to reject holds 49 995 000 entries, and a
+        // failure that prints them is a failure nobody can read.
+        let derived = attachment_views_for_viewer(&state);
+        assert!(
+            matches!(derived, Err(InteractionReasonCode::PayloadTooLarge)),
+            "the derivation must refuse the payload itself rather than hand it to \
+             the finalizer to reject — got {} views totalling {} cards",
+            derived.as_ref().map_or(0, BTreeMap::len),
+            derived.as_ref().map_or(0, |views| views
+                .values()
+                .map(|view| view.cards.len())
+                .sum::<usize>()),
+        );
+    }
 }
