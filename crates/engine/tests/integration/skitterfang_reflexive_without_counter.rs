@@ -16,7 +16,6 @@
 //!   trigger event or events occurred earlier during the resolution".
 //! - CR 608.2d: a player can't choose an impossible option, so the "you may"
 //!   is never offered and the action is never taken.
-//! - CR 122.1: removing a counter that isn't there does nothing.
 
 use engine::game::keywords::has_keyword;
 use engine::game::layers::evaluate_layers;
