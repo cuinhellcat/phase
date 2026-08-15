@@ -801,9 +801,21 @@ fn an_oversized_attachment_tree_fails_closed_instead_of_publishing_an_empty_map(
 
 /// The nesting half of the same claim, read through the DERIVED path: every
 /// view is small, and it is the tree that is too large.
+///
+/// A chain is the shape where the derivation's own cost is quadratic — every
+/// ancestor carries the whole tail beneath it — so the row is also the one that
+/// says the budget is charged while membership is derived rather than after it.
+/// At this depth the finished payload would hold 499 500 cards; the derivation
+/// stops one card past the aggregate instead.
+///
+/// The depth is capped by what the derived path costs elsewhere, not by what the
+/// walk costs: enumerating every legal action over the chain is quadratic too,
+/// and measured on this fixture it runs 1 s at 1 000 links, 14 s at 3 000 and
+/// 109 s at 10 000. `a_cap_depth_attachment_chain_is_refused_before_it_is_built`
+/// carries the depth claim past that ceiling through the cheap seat.
 #[test]
 fn a_deep_attachment_chain_fails_closed_on_the_aggregate() {
-    const CHAIN: usize = 200;
+    const CHAIN: usize = 1_000;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let root = scenario.add_creature(P0, "Chain Root", 2, 2).id();
@@ -829,6 +841,57 @@ fn a_deep_attachment_chain_fails_closed_on_the_aggregate() {
          exceed the aggregate even though none exceeds the per-view cap"
     );
     assert!(deep.attachment_views.is_empty());
+}
+
+/// The depth half, at the worst depth there is: a chain exactly
+/// `MAX_INTERACTION_LIST_LEN` links long is the LONGEST one in which no single
+/// view exceeds the per-view cap, so it is precisely the shape a per-host check
+/// cannot catch. One link shorter and the aggregate is smaller; one longer and
+/// the outermost view trips the per-view cap on its own and the derivation stops
+/// at the first host. This is the depth the engine permits, too — CR 732.2's
+/// runaway-cascade guard (`MAX_OBJECT_GROWTH`, `game::engine`) lets one dispatch
+/// grow the board by 16 000 objects.
+///
+/// The finished payload here holds 49 995 000 cards, the prefix sums of every
+/// nested view. Measured on this fixture, deriving membership in full and
+/// measuring afterwards costs 23.2 s and peaks at 7.4 GB resident; charging the
+/// aggregate as the walk goes costs 0.16 s and 4.7 GB, which is the fixture
+/// itself. The engine ships to WASM, where that difference is linear-memory
+/// exhaustion rather than a slow frame.
+///
+/// The answer is the same either way — the finalizer always refused this payload
+/// — so the row asserts the answer and the cost above is what the change is for.
+/// Read through the unauthorized early return, which reaches the same membership
+/// derivation without the action enumeration the derived path owes over ten
+/// thousand permanents (109 s, measured); the row above carries the same
+/// fail-closed answer through the derived path at an affordable depth.
+#[test]
+fn a_cap_depth_attachment_chain_is_refused_before_it_is_built() {
+    const CHAIN: usize = MAX_INTERACTION_LIST_LEN;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let root = scenario.add_creature(P0, "Cap Depth Root", 2, 2).id();
+    let seed = scenario.add_creature(P0, "Cap Depth Link", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        attach_and_assert_linked(state, seed, root);
+        let mut next_id = next_object_id(state);
+        let mut tip = seed;
+        for _ in 1..CHAIN {
+            tip = clone_attachment_onto(state, seed, tip, &mut next_id);
+        }
+        bind(state, "attachment-view-cap-depth");
+    }
+    let deep = viewer_interaction(runner.state(), P1);
+    assert_eq!(
+        deep.availability,
+        InteractionAvailability::Unsupported {
+            reason: InteractionReasonCode::PayloadTooLarge,
+        },
+        "a chain {CHAIN} links deep is refused, not walked to the bottom"
+    );
+    assert!(deep.attachment_views.is_empty() && deep.opportunities.is_empty());
 }
 
 #[test]

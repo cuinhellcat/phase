@@ -7835,18 +7835,24 @@ fn attachment_views_for_viewer(
     filtered_state: &GameState,
 ) -> Result<BTreeMap<u64, InteractionAttachmentView>, InteractionReasonCode> {
     let mut views = BTreeMap::new();
+    // Cards materialized so far, across every host. Charged BEFORE each subtree
+    // is built rather than measured after, so an over-budget projection is
+    // refused while it is still small.
+    //
+    // Every card the derivation emits is charged again by
+    // `bound_outbound_view`, alongside the map, the fans and the opportunities —
+    // so this running total can only ever be a LOWER bound on what the finalizer
+    // charges. That direction is what makes the early refusal safe: it can never
+    // reject a projection the finalizer would have accepted, and the finalizer
+    // stays the single authority on the answer the viewer is given.
+    let mut charged = 0usize;
     for host_id in filtered_state.objects.keys().copied() {
-        // Seeded with the host: an attachment cycle would otherwise walk
-        // forever, and no host may appear as a card beneath itself.
-        let mut seen = HashSet::from([host_id]);
         let mut cards = Vec::new();
-        collect_attachment_subtree(filtered_state, host_id, &mut seen, &mut cards);
-        if cards.len() > MAX_INTERACTION_LIST_LEN {
-            return Err(InteractionReasonCode::PayloadTooLarge);
-        }
+        collect_attachment_subtree(filtered_state, host_id, charged, &mut cards)?;
         if cards.is_empty() {
             continue;
         }
+        charged += cards.len();
         views.insert(
             host_id.0,
             InteractionAttachmentView {
@@ -7861,6 +7867,9 @@ fn attachment_views_for_viewer(
             },
         );
     }
+    // Implied by the card charge — no view is inserted empty, so the map can
+    // never be longer than the cards already counted — but stated where the map
+    // is built so its own list bound does not have to be inferred.
     if views.len() > MAX_INTERACTION_LIST_LEN {
         return Err(InteractionReasonCode::PayloadTooLarge);
     }
@@ -7869,28 +7878,57 @@ fn attachment_views_for_viewer(
 
 /// Depth-first pre-order, so a nested attachment follows the card it hangs on
 /// and consumers can lay the subtree out without re-deriving its shape.
+///
+/// Iterative, with the frontier on the heap. The walk descends one level per
+/// nested attachment, and an attachment chain is only bounded by how many
+/// objects the game can grow, so recursion would put a game-controlled quantity
+/// on the call stack.
+///
+/// `already_charged` is what earlier hosts have spent, and the walk stops the
+/// moment this subtree carries the running total past the aggregate. An
+/// over-budget projection therefore costs one card more than the budget rather
+/// than its full size: the point of deriving membership is to publish it, and a
+/// projection that can no longer be published is not worth materializing.
+///
+/// The running total is compared by addition rather than by handing the walk a
+/// remaining allowance, so the bound cannot be expressed as a subtraction that
+/// underflows if the caller's accounting ever slips.
 fn collect_attachment_subtree(
     filtered_state: &GameState,
     host_id: ObjectId,
-    seen: &mut HashSet<ObjectId>,
+    already_charged: usize,
     out: &mut Vec<ObjectId>,
-) {
-    let Some(host) = filtered_state.objects.get(&host_id) else {
-        return;
-    };
-    for child_id in &host.attachments {
-        let Some(child) = filtered_state.objects.get(child_id) else {
+) -> Result<(), InteractionReasonCode> {
+    // Seeded with the host: an attachment cycle would otherwise walk forever,
+    // and no host may appear as a card beneath itself.
+    let mut seen = HashSet::from([host_id]);
+    let mut frontier = vec![host_id];
+    while let Some(current) = frontier.pop() {
+        if current != host_id {
+            out.push(current);
+            if already_charged + out.len() > MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+        }
+        let Some(object) = filtered_state.objects.get(&current) else {
             continue;
         };
-        if !matches!(child.attached_to, Some(AttachTarget::Object(id)) if id == host_id) {
-            continue;
+        // Pushed in reverse so the frontier pops them in the order the host
+        // lists them, which is what keeps the output in pre-order.
+        for child_id in object.attachments.iter().rev() {
+            let Some(child) = filtered_state.objects.get(child_id) else {
+                continue;
+            };
+            if !matches!(child.attached_to, Some(AttachTarget::Object(id)) if id == current) {
+                continue;
+            }
+            if !seen.insert(*child_id) {
+                continue;
+            }
+            frontier.push(*child_id);
         }
-        if !seen.insert(*child_id) {
-            continue;
-        }
-        out.push(*child_id);
-        collect_attachment_subtree(filtered_state, *child_id, seen, out);
     }
+    Ok(())
 }
 
 /// Bind the published picks onto the membership the engine already owns.
