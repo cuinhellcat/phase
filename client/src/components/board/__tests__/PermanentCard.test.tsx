@@ -712,7 +712,7 @@ describe("PermanentCard", () => {
     renderPermanent();
 
     expect(screen.getByRole("button", {
-      name: "View Test Creature's 1 attached card",
+      name: "View Test Creature's attached card",
     })).toBeInTheDocument();
   });
 
