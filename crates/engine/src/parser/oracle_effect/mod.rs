@@ -796,6 +796,174 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     condition
 }
 
+/// True for exactly the filter shape the keyword anaphor's context-free lowering
+/// emits: a bare, controller-agnostic, type-agnostic typed filter carrying one
+/// kind-level keyword predicate. Both polarities are in scope on purpose —
+/// `conditions::keyword_presence_kind` lowers "it has <kw>" and "it doesn't have
+/// <kw>" to `HasKeywordKind` / `WithoutKeywordKind` respectively, and both need
+/// the same clause-context re-anchoring. Still narrow: it is the guard that
+/// keeps `rewrite_keyword_anaphor_for_cost_paid_parent` and
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` off every other
+/// `TargetMatchesFilter` (the "it's a [type]" arm, the anaphoric-status arm, and
+/// any object-level `WithKeyword` gate parsed elsewhere).
+fn filter_is_bare_keyword_kind_predicate(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        }) if type_filters.is_empty()
+            && matches!(
+                properties.as_slice(),
+                [FilterProp::HasKeywordKind { .. } | FilterProp::WithoutKeywordKind { .. }]
+            )
+    )
+}
+
+/// CR 608.2k + CR 608.2c + CR 702.62a: re-anchor a keyword-presence anaphor
+/// ("if it doesn't have suspend") to the COST-PAID object when the
+/// immediately-preceding non-continuation clause binds its own subject through
+/// the ability's cost (Jhoira of the Ghitu: "{2}, Exile a nonland card from your
+/// hand: Put four time counters on the exiled card. If it doesn't have suspend,
+/// it gains suspend.").
+///
+/// CR 608.2k names three sources for an untargeted back-reference — the effect's
+/// own earlier instruction, the ability's COST, and the trigger condition — and
+/// the engine reads each from a DIFFERENT runtime slot:
+///
+///   * effect instruction / declared target → `ResolvedAbility.targets`
+///     (`AbilityCondition::TargetMatchesFilter`)
+///   * ability cost                         → `ResolvedAbility.cost_paid_object`
+///     (`AbilityCondition::CostPaidObjectMatchesFilter`)
+///   * trigger condition                    → `GameState.current_trigger_event`
+///     (`TargetMatchesFilter`'s `TriggeringSource` fallback)
+///
+/// `TargetFilter::CostPaidObject` is resolved at effect-apply time out of the
+/// documented `cost_paid_object → effect_context_object` ladder
+/// (`game::targeting`, CR 608.2k) and is NEVER written into `targets`, so a
+/// cost-paid parent leaves `targets` EMPTY. For an ACTIVATED ability there is
+/// also no `current_trigger_event` (the stack lifts one only for a triggered
+/// ability), so the context-free `TargetMatchesFilter` reading would fail closed
+/// and the grant would never fire.
+///
+/// Only the clause context can disambiguate, exactly as
+/// `rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent` above states for
+/// its own pair. Fire ONLY when the previous non-continuation clause's effect
+/// filter references the cost-paid object. Three of the four other parent shapes
+/// keep the context-free target-scoped reading, which binds correctly for each:
+/// injected target (Kang Prime), declared stack target (Suspend, Delay), and
+/// trigger source (Momentum Rumbler). The fourth — the resolution-time pick
+/// (The Eleventh Doctor, Amy's Home) — binds to NOTHING, and is strict-failed by
+/// `keyword_anaphor_referent_is_unpublished_resolution_pick` below rather than
+/// left to the misleading `TriggeringSource` fallback.
+///
+/// Both readings are LIVE for the keyword-kind props, and deliberately so.
+/// CR 608.2k keeps a cost-introduced reference pointing at its object "even if
+/// the object has changed characteristics" — it does NOT freeze the object's
+/// characteristics at payment time. CR 608.2h then supplies the timing: a
+/// reference to an object still in the public zone it was expected to be in
+/// reads that object's CURRENT information. `CostPaidObjectMatchesFilter` is
+/// evaluated through `filter::matches_target_filter_on_cost_paid_reference`,
+/// which preserves the payment snapshot's look-back facts while reading the
+/// keyword set off the live object, so an off-zone Layer-6 grant applied after
+/// payment (CR 613.1f) is visible to the gate.
+fn rewrite_keyword_anaphor_for_cost_paid_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = &condition
+    else {
+        return condition;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return condition;
+    }
+    let prev_binds_cost_paid_object = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .and_then(|clause| clause.parsed.effect.target_filter())
+        .is_some_and(TargetFilter::references_cost_paid_object);
+    if prev_binds_cost_paid_object {
+        return Some(AbilityCondition::CostPaidObjectMatchesFilter {
+            filter: filter.clone(),
+        });
+    }
+    condition
+}
+
+/// CR 608.2k + CR 608.2d + CR 115.10a: True when the keyword-presence anaphor
+/// ("if it doesn't have suspend") has NO runtime slot to bind to, because the
+/// preceding clause introduces its subject through a RESOLUTION-TIME PICK
+/// (The Eleventh Doctor: "you may exile a card from your hand …"; Amy's Home).
+///
+/// CR 608.2d makes that pick an untargeted choice made while the ability
+/// resolves, so — unlike a declared target (CR 115.10a) — it is never written
+/// into `ResolvedAbility.targets`, which is what
+/// `AbilityCondition::TargetMatchesFilter` reads. The condition therefore finds
+/// no object target and silently falls through to its `TriggeringSource`
+/// fallback: for a combat-damage trigger that is the ability's own source, i.e.
+/// exactly the always-wrong-guard reading the kind-level lowering exists to
+/// remove. The grant's RECIPIENT still binds (`TargetFilter::ParentTarget` is
+/// resolved at effect-apply time), so the misread is invisible at runtime — a
+/// card that already has the keyword is re-granted and its printed parameters
+/// are clobbered, while coverage reports the card fully supported.
+///
+/// Rather than ship a knowingly-misbinding gate, strict-fail the clause to
+/// `Effect::Unimplemented` so `cargo coverage` reports the gap (the same
+/// discipline `try_parse_exiled_this_way_keyword_grant` applies to the plural
+/// "cards exiled this way that don't have <kw>" form). Repairing it means
+/// publishing the resolution-time pick into the sub-chain's `targets`; this
+/// predicate is where that fix removes the strict failure.
+///
+/// Deliberately narrow, in three independent ways:
+///   * the condition must be the bare keyword-kind anaphor shape
+///     (`filter_is_bare_keyword_kind_predicate`);
+///   * the parent must actually be resolution-timed
+///     (`lower::target_choice_timing_for_clause`);
+///   * the parent's own target filter must be a real player pick, not a
+///     context reference. Delay's "exile it with three time counters" is
+///     `TargetChoiceTiming::Resolution` too (off-battlefield origin, no printed
+///     "target"), but its filter is `TargetFilter::ParentTarget`, which the
+///     resolver binds deterministically from the countered spell — nothing is
+///     picked, and the anaphor binds through the propagated target. `Suspend`
+///     (declared stack target) and Kang Prime / Jhoira of the Ghitu (context
+///     refs) are excluded by the same test.
+fn keyword_anaphor_referent_is_unpublished_resolution_pick(
+    condition: Option<&AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> bool {
+    let Some(AbilityCondition::TargetMatchesFilter {
+        filter,
+        use_lki: false,
+        subject_slot: None,
+    }) = condition
+    else {
+        return false;
+    };
+    if !filter_is_bare_keyword_kind_predicate(filter) {
+        return false;
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            lower::target_choice_timing_for_clause(clause)
+                == crate::types::ability::TargetChoiceTiming::Resolution
+                && clause
+                    .parsed
+                    .effect
+                    .target_filter()
+                    .is_some_and(|target| !target.is_context_ref())
+        })
+}
+
 fn merge_clause_conditions(
     outer: AbilityCondition,
     inner: Option<AbilityCondition>,
@@ -1350,6 +1518,56 @@ fn parse_dealt_damage_this_way_dies_trigger(
 /// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
     nom_primitives::scan_contains(text, phrase)
+}
+
+/// CR 115.7 + CR 113.3b / CR 113.3c: locate the stack-object target grammar
+/// anywhere in a retarget phrase.
+///
+/// Delegates WHOLESALE to `oracle_nom::target::parse_stack_object_target` — the
+/// same grammar the counter path uses — via the shared word-boundary scanning
+/// primitive, because the retarget clause puts the phrase after "target " and
+/// possibly after other words, so it is not anchored at position 0.
+///
+/// Delegating the WHOLE grammar (not just the ability-kind axis) is deliberate:
+/// the grammar already composes ability legs with type-restricted spell legs in
+/// any order. Rebuilding a bare `StackAbility` from a kind probe — which is what
+/// this branch used to do — cannot represent a phrase that mixes a spell leg
+/// with an ability-kind leg ("target spell or triggered ability"), and would
+/// silently drop the spell leg.
+///
+/// Returns `None` when the phrase contains no ability leg at all — that is
+/// `parse_stack_object_target`'s documented contract — so a purely-spell phrase
+/// still falls through to the "spell" branch in `try_parse_change_targets`.
+///
+/// NOTE (blast radius — read before adding the next retarget pattern): this is
+/// materially WIDER than the two `scan_contains_phrase` probes it replaced.
+/// Those tested exactly two fixed spellings ("activated or triggered ability",
+/// "activated ability"). This applies the ENTIRE stack-object grammar at every
+/// word boundary: both single-kind spellings, all five combined spellings,
+/// "spell or ability" / "spell and/or ability" / "ability or spell", and the
+/// order-free comma/"or" disjunction of type-restricted spell legs with ability
+/// legs. Any phrase that grammar recognizes ANYWHERE in the retarget clause now
+/// wins this branch ahead of the `"spell"` + `parse_target` fallback below it in
+/// `try_parse_change_targets`. In particular the "ability or spell" spelling,
+/// which the preceding `"spell or ability"` branch does not cover, now lands
+/// here. What still falls through is exactly what the grammar declines: a
+/// purely-spell phrase with no ability leg (its documented contract, above).
+///
+/// NOTE (precision residual): `scan_at_word_boundaries` applies the combinator
+/// at word STARTS only and performs no trailing-boundary check, so the grammar
+/// may match a strict prefix of the remaining text and the remainder is silently
+/// discarded — e.g. "activated ability's controller" matches the bare
+/// "activated ability" leg. That discard is deliberate (it is what lets the
+/// clause carry trailing qualifiers such as "with a single target"), and it is
+/// the same shape of imprecision the replaced `scan_contains_phrase` probes had.
+/// A PLURAL is NOT affected and needs no guard: `tag("triggered ability")`
+/// diverges from "triggered abilities" at the final letter ('y' vs 'i') and
+/// simply fails, as does `tag("activated ability")`.
+fn scan_stack_object_target(text: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(
+        text,
+        super::oracle_nom::target::parse_stack_object_target,
+    )
 }
 
 fn has_unless_clause(text: &str) -> bool {
@@ -24724,15 +24942,35 @@ fn attach_mana_retention_to_prior_mana(defs: &mut [AbilityDefinition], expiry: M
     false
 }
 
-/// Swap every `Keyword` inside a `TargetFilter`'s `WithKeyword` properties to
+/// Swap every `Keyword` inside a `TargetFilter`'s keyword-presence properties to
 /// `new_keyword`. Recurses through `Or`/`And` filter trees so a compound
 /// affected filter is handled uniformly.
 fn rewrite_filter_keyword(filter: &mut TargetFilter, new_keyword: &Keyword) {
     match filter {
         TargetFilter::Typed(typed) => {
             for prop in &mut typed.properties {
-                if let FilterProp::WithKeyword { value } = prop {
-                    *value = new_keyword.clone();
+                match prop {
+                    FilterProp::WithKeyword { value } => {
+                        *value = new_keyword.clone();
+                    }
+                    // CR 702.1c: the kind-level siblings carry a `KeywordKind`, so
+                    // a replicated "the same is true for <kw list>" gate swaps to
+                    // the new keyword's kind. Added for the subject-scoped keyword
+                    // anaphor, whose two polarities lower to `WithoutKeywordKind`
+                    // and `HasKeywordKind` (`conditions::keyword_presence_kind`).
+                    //
+                    // `FilterProp::WithoutKeyword` is deliberately NOT handled
+                    // here: no card routes it through this walker today, and
+                    // adding it would change behavior for pre-existing conditions
+                    // reachable via the `ZoneChangeObjectMatchesFilter` arm in
+                    // `rewrite_ability_condition_keyword` — outside this change's
+                    // scope. `rewrite_filter_keyword_leaves_object_level_without_keyword_alone`
+                    // pins the omission so a future widening is a conscious act.
+                    FilterProp::HasKeywordKind { value }
+                    | FilterProp::WithoutKeywordKind { value } => {
+                        *value = new_keyword.kind();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -25030,6 +25268,9 @@ fn attach_perpetual_keyword_grants(
 ///     your graveyard has <keyword>" (Kathril, Aspect Warper).
 ///   - `TargetHasKeywordInstead` / `SourceLacksKeyword` — "if that creature has
 ///     <keyword> and ~ doesn't" (Super-Adaptoid).
+///   - `TargetMatchesFilter` / `CostPaidObjectMatchesFilter` — the subject-scoped
+///     keyword anaphor, "if it doesn't have <keyword>" (Kang Prime, Jhoira of the
+///     Ghitu), whose keyword lives in a typed filter prop.
 ///   - `And`/`Or`/`Not` — recurse into each compound conjunct so the
 ///     Super-Adaptoid conjunction has BOTH the target-has and the source-lacks
 ///     keyword swapped together.
@@ -25048,6 +25289,18 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
         // typed filter (`FilterProp::WithKeyword`), swapped via the shared
         // `rewrite_filter_keyword` walker.
         AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. } => {
+            rewrite_filter_keyword(filter, new_keyword);
+        }
+        // CR 702.1c + CR 608.2c: the subject-scoped keyword anaphor gates ("if it
+        // doesn't have <kw>") carry their keyword inside a typed filter — the same
+        // shape the Mutable Pupa `ZoneChangeObjectMatchesFilter` arm above handles.
+        // Both subject seams the anaphor can lower to are covered, so a replicated
+        // "the same is true for <kw list>" continuation swaps the gate regardless
+        // of which seam clause context selected. Without these arms the class would
+        // fall into `_ => {}` — a silent regression from the `SourceLacksKeyword`
+        // handling above, which this change moves the class out of.
+        AbilityCondition::TargetMatchesFilter { filter, .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             rewrite_filter_keyword(filter, new_keyword);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
@@ -31805,6 +32058,31 @@ pub(crate) fn parse_effect_chain_ir(
             condition,
             builder.clauses(),
         );
+        // CR 608.2k: "if it doesn't have <kw>" after a cost-paid parent reads the
+        // cost-paid object, not the (empty) target slot — see the helper for the
+        // three-slot rationale (Jhoira of the Ghitu). Input shapes are disjoint
+        // from the two rewrites above, so the order within this family is only a
+        // reading convention.
+        let condition = rewrite_keyword_anaphor_for_cost_paid_parent(condition, builder.clauses());
+        // CR 608.2k + CR 608.2d: the same anaphor after a RESOLUTION-TIME PICK
+        // parent has no slot to bind to at all — the pick never reaches
+        // `targets`, so the gate would silently read the trigger source. Runs
+        // after the cost-paid rewrite so a re-anchored (cost-paid) condition is
+        // already out of this shape. Strict-fail to `Unimplemented` instead of
+        // shipping a misbinding gate, so coverage reports the gap (The Eleventh
+        // Doctor, Amy's Home) — see the predicate for the full rationale.
+        if keyword_anaphor_referent_is_unpublished_resolution_pick(
+            condition.as_ref(),
+            builder.clauses(),
+        ) {
+            unimplemented_clause(
+                &mut builder,
+                "keyword_anaphor_resolution_time_pick",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
@@ -35932,14 +36210,19 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
                 },
             ],
         }
-    } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
-        || scan_contains_phrase(spell_phrase_clean, "activated ability")
-    {
-        TargetFilter::StackAbility {
-            controller: None,
-            tag: None,
-            kind: None,
-        }
+    } else if let Some(stack_target) = scan_stack_object_target(spell_phrase_clean) {
+        // CR 115.7a + CR 113.3b / CR 113.3c + CR 115.1: a changed target must be
+        // another LEGAL target, so the kind spelling defines which stack
+        // abilities may be retargeted. Reroute ("Change the target of target
+        // activated ability with a single target.") must NOT accept a TRIGGERED
+        // ability. This branch previously kept a private two-spelling probe and
+        // hardcoded `kind: None` — the same defect the copy path had — and could
+        // not represent a mixed spell/ability phrase at all.
+        //
+        // Legs produced here are already stack-scoped (`StackAbility`,
+        // `StackSpell`, or a `Typed` leg carrying `InZone { Stack }`), so no
+        // `constrain_filter_to_stack` pass is needed or wanted.
+        stack_target
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -36606,4 +36889,139 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
         saw_additional_phase,
         "the AdditionalPhase clause must be present in the chain"
     );
+}
+
+/// CR 115.7a + CR 113.3b / CR 113.3c: the retarget grammar shares the counter
+/// path's stack-object grammar, so the ability-kind spelling narrows which
+/// stack abilities may be retargeted (Reroute) and mixed spell/ability phrases
+/// keep both legs.
+#[cfg(test)]
+mod change_targets_stack_object_tests {
+    use super::{try_parse_change_targets, TargetFilter};
+    use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
+    use crate::types::zones::Zone;
+
+    fn change_targets_filter(lower: &str) -> TargetFilter {
+        match try_parse_change_targets(lower)
+            .unwrap_or_else(|| panic!("retarget clause must parse: {lower}"))
+        {
+            Effect::ChangeTargets { target, .. } => target,
+            other => panic!("expected ChangeTargets, got {other:?}"),
+        }
+    }
+
+    fn stack_ability_leg(filter: &TargetFilter) -> Option<Option<StackAbilityKind>> {
+        match filter {
+            TargetFilter::StackAbility { kind, .. } => Some(*kind),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().find_map(stack_ability_leg)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reroute: "Change the target of target activated ability with a single
+    /// target." CR 115.7a — a changed target can be changed only to another
+    /// LEGAL target, so an "activated ability" phrase must NOT accept a
+    /// TRIGGERED ability. Before the fix this branch hardcoded a kindless
+    /// StackAbility.
+    #[test]
+    fn reroute_narrows_to_activated_and_keeps_single_target_leg() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability with a single target",
+        );
+        let TargetFilter::And { filters } = &filter else {
+            panic!("expected And[StackAbility, Typed HasSingleTarget], got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "both legs must survive: {filter:?}");
+        assert_eq!(
+            filters[0],
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: Some(StackAbilityKind::Activated),
+            },
+            "the ability leg must narrow to Activated (FLIPS to a kindless leg on revert)"
+        );
+        // Reach-guard: the arity axis is still applied, so the kind assertion is
+        // not passing merely because the whole branch changed shape.
+        let TargetFilter::Typed(tf) = &filters[1] else {
+            panic!(
+                "second leg must be the HasSingleTarget Typed leg, got {:?}",
+                filters[1]
+            );
+        };
+        assert_eq!(tf.properties, vec![FilterProp::HasSingleTarget]);
+    }
+
+    /// The ten printed "spell or ability" retarget cards (Bolt Bend, Spellskite,
+    /// Willbender, …) must be unchanged: the literal both-kinds arm still wins
+    /// ahead of the delegated branch, so the ability leg stays kindless.
+    #[test]
+    fn spell_or_ability_retarget_shape_is_unchanged() {
+        let filter = change_targets_filter(
+            "change the target of target spell or ability with a single target",
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected the canonical Or[spell, ability] shape, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(None),
+            "a both-kinds phrase must keep a kindless ability leg"
+        );
+    }
+
+    /// The defect the wholesale delegation closes: a phrase mixing a spell leg
+    /// with an ability-kind leg. Rebuilding a bare StackAbility from a kind
+    /// probe (the pre-fix shape, and the shape a kind-axis-only delegation would
+    /// also produce) silently DROPS the spell leg.
+    #[test]
+    fn mixed_spell_and_ability_kind_legs_both_survive() {
+        let filter =
+            change_targets_filter("change the target of target spell or triggered ability");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("a mixed spell/ability phrase must produce two legs, got {filter:?}");
+        };
+        assert_eq!(
+            filters.len(),
+            2,
+            "the spell leg must not be dropped: {filter:?}"
+        );
+        assert_eq!(
+            stack_ability_leg(&filter),
+            Some(Some(StackAbilityKind::Triggered)),
+            "the ability leg must narrow to Triggered"
+        );
+        // CR 112.1: a spell is a card on the stack — the spell leg stays pinned
+        // to the stack zone.
+        assert!(
+            filters.iter().any(|leg| matches!(
+                leg,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters == vec![TypeFilter::Card]
+                        && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+            )),
+            "the stack-pinned spell leg must survive: {filter:?}"
+        );
+    }
+
+    /// A combined ability-kind spelling inside a retarget phrase names both
+    /// kinds, so it must NOT be narrowed to the first spelling in the list.
+    #[test]
+    fn combined_ability_kind_spelling_stays_unnarrowed() {
+        let filter = change_targets_filter(
+            "change the target of target activated ability or triggered ability",
+        );
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: None,
+                tag: None,
+                kind: None,
+            },
+            "a combined spelling must widen to both kinds"
+        );
+    }
 }
