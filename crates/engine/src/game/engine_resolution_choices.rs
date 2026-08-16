@@ -6675,6 +6675,11 @@ pub(super) fn handle_resolution_choice(
             // of clobbering it with `Priority`; otherwise resolution is complete,
             // so return to priority and let the resulting zone change's triggers /
             // SBAs process.
+            // CR 702.99a: the offer's own frame owns this prompt (issue #7470),
+            // so consume it BEFORE the card moves — the encode's zone change can
+            // park frames of its own, and a stale owner underneath them would
+            // fail `validate` at the next prompt.
+            let _ = state.take_active_cipher_encode_frame();
             match crate::game::cipher::handle_encode_choice(state, card_id, creature, events) {
                 crate::game::zone_pipeline::ZoneMoveResult::Done => {
                     ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {

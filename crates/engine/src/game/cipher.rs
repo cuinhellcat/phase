@@ -140,12 +140,101 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
     if creatures.is_empty() {
         return false;
     }
+    let pending = crate::types::resolution::PendingCipherEncode {
+        stage: crate::types::resolution::CipherEncodeStage::Parked,
+        card_id,
+        controller,
+        creatures,
+    };
+
+    // CR 702.99a: the encode is the spell's LAST instruction. When the spell's
+    // own effects are still paused on a player answer, this offer must not
+    // overwrite that live prompt (issue #7470) — it is parked BELOW the frame
+    // that owns the prompt and armed by `resume_resolution_frames` once that
+    // owner is consumed. Either way the caller's contract is the same: the
+    // resolution owes an answer, so the card is held off the stack.
+    park_encode_offer(state, pending);
+    true
+}
+
+/// Park the encode offer, arming it immediately only when nothing else owns the
+/// current prompt.
+fn park_encode_offer(
+    state: &mut GameState,
+    pending: crate::types::resolution::PendingCipherEncode,
+) {
+    // The question is not what SHAPE the top frame has — it is whether the
+    // resolution is currently asking the player anything at all. Keying this to
+    // `FrameGate::DirectChoice` missed the discard pause (Mental Vapors), whose
+    // frame owns a prompt without being a direct-choice owner. `waiting_for`
+    // is the engine's single answer to "is a question open", so ask it.
+    let resolution_paused = !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    if !resolution_paused {
+        let (player, card_id, creatures) = (
+            pending.controller,
+            pending.card_id,
+            pending.creatures.clone(),
+        );
+        state.push_cipher_encode_frame(crate::types::resolution::PendingCipherEncode {
+            stage: crate::types::resolution::CipherEncodeStage::Armed,
+            ..pending
+        });
+        state.waiting_for = WaitingFor::CipherEncodeChoice {
+            player,
+            card_id,
+            creatures,
+        };
+        return;
+    }
+    // A live prompt does not always have a frame behind it (a discard choice
+    // does not), so there may be no active child to sit under. With an empty
+    // stack the parked offer is simply the only frame: it owns no prompt while
+    // parked, so it cannot disturb the one that is open.
+    if state.resolution_stack.last().is_none() {
+        state.push_cipher_encode_frame(pending);
+        return;
+    }
+    if state
+        .insert_cipher_encode_parent_of_active(pending)
+        .is_err()
+    {
+        // Unreachable from a valid stack: the guard above proves an active
+        // child exists, and inserting BELOW the top leaves the top — and so the
+        // live prompt — untouched. Recovering by arming the offer here would
+        // stack a second prompt owner on an already-invalid stack, which is the
+        // very corruption this frame exists to prevent, so the offer is dropped
+        // instead. The card then routes normally on the caller's next pass.
+    }
+}
+
+/// CR 702.99a: Arm a parked encode offer once it reaches the stack top, i.e.
+/// after the spell's own effects have finished. Called from the exhaustive
+/// frame-resume dispatch, which is what guarantees a parked offer is never
+/// forgotten.
+pub(crate) fn arm_parked_encode_offer(state: &mut GameState) {
+    let Some(pending) = state.resolution_stack.active_cipher_encode() else {
+        return;
+    };
+    // CR 702.99a: re-read legal hosts — the spell's own effects ran since the
+    // offer was parked and may have changed the board.
+    let creatures = legal_encode_creatures(state, pending.controller);
+    let (player, card_id) = (pending.controller, pending.card_id);
+    if creatures.is_empty() {
+        // No legal host left: consume the frame and route the card the way a
+        // declined offer does (CR 608.2n).
+        let _ = state.take_active_cipher_encode_frame();
+        handle_encode_choice(state, card_id, None, &mut Vec::new());
+        return;
+    }
+    if let Some(frame) = state.resolution_stack.active_cipher_encode_mut() {
+        frame.stage = crate::types::resolution::CipherEncodeStage::Armed;
+        frame.creatures = creatures.clone();
+    }
     state.waiting_for = WaitingFor::CipherEncodeChoice {
-        player: controller,
+        player,
         card_id,
         creatures,
     };
-    true
 }
 
 /// CR 702.99a–b: Resolve the encode choice. `creature = Some(id)` encodes the

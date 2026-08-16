@@ -150,6 +150,50 @@ pub struct PendingMutateMerge {
     pub controller: PlayerId,
 }
 
+/// CR 702.99a: Context stored when a Cipher spell has finished its own effects
+/// and owes its controller the "you may exile this card encoded on a creature
+/// you control" offer.
+///
+/// The frame exists so the offer OWNS its prompt like every other direct
+/// choice. Before it existed, `begin_encode_choice` set `WaitingFor` with no
+/// frame behind it; when the spell's own resolution was still paused on a
+/// player answer (Hidden Strings: "You may tap or untap ..."), that overwrote
+/// the live prompt, stranded its frame, and left the stack permanently invalid
+/// — the next prompt of any kind then failed `validate` (issue #7470).
+///
+/// Ordering is the other half: the encode is the spell's LAST instruction, so
+/// when a direct-choice owner is already active this frame is inserted as its
+/// PARENT and arms only once that owner is consumed.
+/// Whether a parked Cipher offer is already asking its question.
+///
+/// CR 702.99a + the single-prompt-owner invariant: only ONE frame may own the
+/// live prompt, so an offer parked beneath the spell's own still-open choice
+/// must not claim ownership yet. It becomes [`Self::Armed`] when
+/// `resume_resolution_frames` reaches it, i.e. once the frames above it are
+/// gone. Mirrors `RepeatedOptionalPaymentFrame`, whose gate is likewise a
+/// direct choice only while it actually holds a pending offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CipherEncodeStage {
+    /// Waiting for the spell's own effects to finish. Owns no prompt.
+    Parked,
+    /// Asking its controller which creature hosts the card.
+    Armed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCipherEncode {
+    /// Whether the offer currently owns the prompt.
+    pub stage: CipherEncodeStage,
+    /// The resolved Cipher card, held off the stack until the offer settles.
+    pub card_id: ObjectId,
+    /// The spell's controller — the player who chooses the host (CR 702.99a).
+    pub controller: PlayerId,
+    /// Legal hosts captured when the offer was parked. Re-validated against the
+    /// live board by `handle_encode_choice`, which already re-checks the chosen
+    /// creature, so a host that left the battlefield meanwhile simply declines.
+    pub creatures: Vec<ObjectId>,
+}
+
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
 /// `PendingChangeZoneIteration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,6 +258,7 @@ pub enum ResolutionFrame {
     LifeTotalAssignment(PendingLifeTotalAssignment),
     SpellResolution(PendingSpellResolution),
     MutateMerge(PendingMutateMerge),
+    CipherEncode(PendingCipherEncode),
     PostReplacement(PostReplacementDrainStack),
 }
 
@@ -246,6 +291,7 @@ pub enum FrameKind {
     LifeTotalAssignment,
     SpellResolution,
     MutateMerge,
+    CipherEncode,
     PostReplacement,
 }
 
@@ -277,6 +323,7 @@ impl ResolutionFrame {
             Self::LifeTotalAssignment(_) => FrameKind::LifeTotalAssignment,
             Self::SpellResolution(_) => FrameKind::SpellResolution,
             Self::MutateMerge(_) => FrameKind::MutateMerge,
+            Self::CipherEncode(_) => FrameKind::CipherEncode,
             Self::PostReplacement(_) => FrameKind::PostReplacement,
         }
     }
@@ -313,6 +360,7 @@ impl ResolutionFrame {
             | Self::ConniveReentry(_)
             | Self::LifeTotalAssignment(_)
             | Self::SpellResolution(_)
+            | Self::CipherEncode(_)
             | Self::PostReplacement(_) => true,
         }
     }
@@ -330,7 +378,15 @@ impl ResolutionFrame {
             Self::CoinFlip(_) => FrameGate::DirectChoice(DirectChoiceGate::CoinFlipKeep),
             Self::Proliferate(_) => FrameGate::DirectChoice(DirectChoiceGate::Proliferate),
             Self::MutateMerge(_) => FrameGate::DirectChoice(DirectChoiceGate::MutateMerge),
-            Self::AbilityContinuation(_)
+            Self::CipherEncode(PendingCipherEncode {
+                stage: CipherEncodeStage::Armed,
+                ..
+            }) => FrameGate::DirectChoice(DirectChoiceGate::CipherEncode),
+            Self::CipherEncode(PendingCipherEncode {
+                stage: CipherEncodeStage::Parked,
+                ..
+            })
+            | Self::AbilityContinuation(_)
             | Self::RepeatFor(_)
             | Self::RepeatUntil(_)
             | Self::RepeatedOptionalPayment(RepeatedOptionalPaymentFrame {
@@ -373,6 +429,7 @@ pub enum DirectChoiceGate {
     CoinFlipKeep,
     Proliferate,
     MutateMerge,
+    CipherEncode,
 }
 
 impl DirectChoiceGate {
@@ -386,6 +443,7 @@ impl DirectChoiceGate {
                 | (Self::CoinFlipKeep, WaitingFor::CoinFlipKeepChoice { .. })
                 | (Self::Proliferate, WaitingFor::ProliferateChoice { .. })
                 | (Self::MutateMerge, WaitingFor::MutateMergeChoice { .. })
+                | (Self::CipherEncode, WaitingFor::CipherEncodeChoice { .. })
         )
     }
 }
@@ -1843,6 +1901,50 @@ impl ResolutionStack {
     /// Parks one mutate-merge top/bottom choice resolution.
     pub fn push_mutate_merge(&mut self, frame: PendingMutateMerge) {
         self.push_inner(ResolutionFrame::MutateMerge(frame));
+    }
+
+    /// CR 702.99a: Consumes exactly the active Cipher encode offer once its
+    /// controller has named a host (or declined).
+    pub fn take_active_cipher_encode(
+        &mut self,
+    ) -> Result<Option<PendingCipherEncode>, ResolutionStackError> {
+        match self.last() {
+            None => Ok(None),
+            Some(ResolutionFrame::CipherEncode(_)) => {
+                let ResolutionFrame::CipherEncode(frame) =
+                    self.pop_expected(FrameKind::CipherEncode)?
+                else {
+                    unreachable!("checked cipher-encode frame kind must match")
+                };
+                Ok(Some(frame))
+            }
+            Some(frame) => Err(ResolutionStackError::UnexpectedTop {
+                expected: FrameKind::CipherEncode,
+                actual: frame.kind(),
+            }),
+        }
+    }
+
+    /// Reads the active Cipher encode offer without consuming it.
+    pub fn active_cipher_encode(&self) -> Option<&PendingCipherEncode> {
+        match self.last() {
+            Some(ResolutionFrame::CipherEncode(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable access to the active Cipher encode offer, for the parked → armed
+    /// transition. Mirrors `active_mutate_merge_mut`.
+    pub fn active_cipher_encode_mut(&mut self) -> Option<&mut PendingCipherEncode> {
+        match self.frames.last_mut() {
+            Some(ResolutionFrame::CipherEncode(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Parks one Cipher encode offer.
+    pub fn push_cipher_encode(&mut self, frame: PendingCipherEncode) {
+        self.push_inner(ResolutionFrame::CipherEncode(frame));
     }
 
     /// Re-parks the active mutate-merge owner without exposing an empty-stack
@@ -3821,6 +3923,9 @@ fn project_frames_into_legacy_state(
             }
             ResolutionFrame::MutateMerge(pending) => {
                 projected.push_mutate_merge_frame(pending.clone())
+            }
+            ResolutionFrame::CipherEncode(pending) => {
+                projected.push_cipher_encode_frame(pending.clone())
             }
             ResolutionFrame::MultiDraw(frame) => {
                 projected.resolution_stack.push_multi_draw(frame.clone())

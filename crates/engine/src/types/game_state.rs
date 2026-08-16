@@ -19207,6 +19207,35 @@ impl GameState {
         self.resolution_stack.push_mutate_merge(pending);
     }
 
+    /// CR 702.99a: Park a Cipher encode offer as the active prompt owner.
+    pub fn push_cipher_encode_frame(&mut self, pending: super::resolution::PendingCipherEncode) {
+        self.resolution_stack.push_cipher_encode(pending);
+    }
+
+    /// CR 702.99a: Park a Cipher encode offer BELOW the direct-choice owner
+    /// that is still holding the spell's own prompt, so the encode arms only
+    /// after that owner is consumed. Mirrors
+    /// [`Self::insert_counter_additions_parent_of_active`].
+    pub fn insert_cipher_encode_parent_of_active(
+        &mut self,
+        pending: super::resolution::PendingCipherEncode,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+            frame: super::resolution::ResolutionFrame::CipherEncode(pending),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
+    }
+
+    /// CR 702.99a: Consume the active Cipher encode offer once answered.
+    pub fn take_active_cipher_encode_frame(
+        &mut self,
+    ) -> Result<Option<super::resolution::PendingCipherEncode>, ResolutionStackError> {
+        self.resolution_stack.take_active_cipher_encode()
+    }
+
     /// Re-parks the active mutate-merge owner without exposing an empty-stack
     /// interval.
     pub fn replace_active_mutate_merge_frame(

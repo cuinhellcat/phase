@@ -910,6 +910,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             drain_pending_continuation(state, events)
         }
         ResolutionFrame::Discard(_) => {}
+        // CR 702.99a: a Cipher encode offer parked under the spell's own prompt
+        // arms here — i.e. only once that prompt's owner is consumed, which is
+        // what puts the encode after the spell's other effects (issue #7470).
+        ResolutionFrame::CipherEncode(_) => {
+            crate::game::cipher::arm_parked_encode_offer(state);
+        }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),
         ResolutionFrame::RepeatedOptionalPayment(_) => {

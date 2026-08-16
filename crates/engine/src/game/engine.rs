@@ -18673,9 +18673,19 @@ mod stage2_injector_tests {
                 // trust looks like — and it is why the two prose entries are BOTH kept
                 // rather than one overwriting the other: they are separate witnesses, not
                 // duplicates.
-                "game/effects/mod.rs:6923".to_string(),
-                "game/effects/mod.rs:7000".to_string(),
-                "game/effects/mod.rs:10238".to_string(),
+                //
+                // Issue #7470 (Cipher encode offer parked as a resolution frame):
+                // `:6923/:7000/:10238 ⇒ :6929/:7006/:10244`. The +6 is exactly the
+                // `ResolutionFrame::CipherEncode` arm added to
+                // `resume_resolution_frames` above these three sites (3 comment +
+                // 3 code lines); all three producers are byte-identical at the new
+                // coordinates and the other two entries did not move. The parked
+                // offer arms through the frame-resume dispatch, not through a
+                // prompt-minting site, so the SET is unchanged — a sixth producer
+                // would have shown up here as a new entry, not a shifted one.
+                "game/effects/mod.rs:6929".to_string(),
+                "game/effects/mod.rs:7006".to_string(),
+                "game/effects/mod.rs:10244".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
