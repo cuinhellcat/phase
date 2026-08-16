@@ -1724,7 +1724,7 @@ fn unmask_card_name_keyword_action(text: String, originals: &[String]) -> String
 
 /// Which flavour of literal-name span a `"… named <X>"` prefix opens.
 ///
-/// CR 111.1 vs. CR 201.2: a **token**'s name is followed by the inline clauses
+/// A **token**'s name is followed by the inline clauses
 /// that define the token in place ("… with \"…\"", "… that's attacking",
 /// "… attached to …"), so its span ends at those clauses. A **card filter**'s
 /// name is not defined in place, and real card names contain exactly those
@@ -1756,8 +1756,8 @@ fn parse_card_named_literal_prefix(input: &str) -> OracleResult<'_, (usize, Name
             ("meld them into ".len(), NamedLiteralKind::CardFilter),
             tag("meld them into "),
         ),
-        // CR 111.1: the token-creation template always writes the noun "token"
-        // immediately before "named", whatever type words precede it ("create a
+        // The token-creation template writes the noun "token" immediately before
+        // "named", whatever type words precede it ("create a
         // legendary black Aura Curse enchantment token named Selenia's Curse").
         // Anchoring on that noun covers the whole class in one rule instead of
         // enumerating every type-word combination that can lead up to it.
@@ -1958,8 +1958,8 @@ fn parse_card_named_clause_boundary(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("."), tag(":")))).parse(input)
 }
 
-/// CR 111.1: the clauses that define a freshly created token stand right behind
-/// its name and are not part of it. Terminating the token's literal span here
+/// The clauses that define a freshly created token stand right behind its name
+/// and are not part of it. Terminating the token's literal span here
 /// keeps the mask off the surrounding text, so a quoted granted body still gets
 /// its own self-reference normalization.
 ///
@@ -2031,9 +2031,10 @@ fn card_named_literal_span_len(lower: &str, kind: NamedLiteralKind) -> usize {
 /// cards like Emerald Collector's "Mox Emerald" into "Mox ~" or Kookus's
 /// "Keeper of Kookus" into "Keeper of ~".
 ///
-/// CR 111.1: token names are masked the same way — the name a card gives the
-/// token it creates is that token's literal name, never a reference back to the
-/// creating card, even when it embeds the creator's own name (Selenia, the
+/// CR 111.4: a spell or ability that creates a token sets its name. Token names
+/// are therefore masked the same way — the name a card gives the token is a
+/// literal name, never a reference back to the creating card, even when it
+/// embeds the creator's own name (Selenia, the
 /// Cursed Heart → "Selenia's Curse"; Volo, Itinerant Scholar → "Volo's
 /// Journal"). Their spans end at [`parse_token_named_literal_boundary`].
 fn mask_card_named_literal_spans(text: &str) -> (String, Vec<String>) {
@@ -2816,8 +2817,20 @@ mod tests {
     }
 
     #[test]
+    fn token_named_literal_prefix_classifies_plural_as_token() {
+        assert_eq!(
+            next_card_named_literal_prefix("create two tokens named kobolds of kher keep"),
+            Some((
+                "create two ".len(),
+                "tokens named ".len(),
+                NamedLiteralKind::Token
+            ))
+        );
+    }
+
+    #[test]
     fn normalize_token_named_literal_keeps_creator_name_inside_token_name() {
-        // CR 111.1: Selenia, the Cursed Heart names the token it creates
+        // CR 111.4: Selenia, the Cursed Heart names the token it creates
         // "Selenia's Curse". That is the token's own literal name, not a
         // self-reference — without the mask the comma-short-name strategy folds
         // it to "~'s Curse", the trailing `~` → card-name expansion turns that
@@ -2834,7 +2847,7 @@ mod tests {
 
     #[test]
     fn normalize_token_named_literal_keeps_full_card_name_inside_token_name() {
-        // CR 111.1: Kher Keep's token is literally named "Kobolds of Kher
+        // CR 111.4: Kher Keep's token is literally named "Kobolds of Kher
         // Keep" — the creator's *full* name inside the token's name. The
         // full-name strategy (a different branch than the comma-short one
         // above) must leave it alone.
@@ -2849,7 +2862,7 @@ mod tests {
 
     #[test]
     fn normalize_token_named_literal_span_ends_at_the_defining_with_clause() {
-        // CR 111.1: the span covers the name only. Ajani's "with \"…\"" clause
+        // The span covers the name only. Ajani's "with \"…\"" clause
         // stays outside it — proven by "this token" inside that clause still
         // folding to `~` (it would stay literal if the span had swallowed the
         // clause), while "Ajani's Pridemate" itself stays literal and line 3's
