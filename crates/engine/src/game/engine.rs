@@ -2,7 +2,7 @@ use rand::Rng;
 use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
-use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
+use crate::types::ability::{DurationEvent, EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
@@ -15024,30 +15024,264 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     }
 }
 
-/// CR 607.2a + CR 406.6: Check if any exile-return sources have left the battlefield.
-/// If so, move the exiled cards back — linked abilities track which cards were exiled by the source.
+/// CR 607.2a + CR 406.6 + CR 610.3: Check for event-bounded exile returns.
+/// Move linked exiled cards back through the replacement-aware zone pipeline.
+pub(crate) fn duration_event_matches(
+    state: &GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<ObjectIncarnationRef>,
+    controller: PlayerId,
+    duration_event: DurationEvent,
+    event: &GameEvent,
+) -> bool {
+    match (duration_event, event) {
+        (
+            DurationEvent::SourceLeftBattlefield,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            },
+        ) => {
+            *object_id == source_id
+                && source_incarnation.is_none_or(|expected| {
+                    record
+                        .trigger_source_context
+                        .as_ref()
+                        .is_none_or(|observed| observed.identity.reference == expected)
+                })
+        }
+        (DurationEvent::OpponentBecameMonarch, GameEvent::MonarchChanged { player_id }) => {
+            super::players::is_opponent(state, controller, *player_id)
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    let mut stack_latches = Vec::new();
+    let mut resolving_latches = Vec::new();
+    let mut deferred_latches = Vec::new();
+    let mut ordered_latches = Vec::new();
 
-    for event in events.iter() {
-        if let GameEvent::ZoneChanged {
-            object_id,
-            from: Some(Zone::Battlefield),
-            ..
-        } = event
-        {
-            // Find exile links where this object was the source and the exile
-            // effect specified an automatic return when that source leaves.
-            for link in &state.exile_links {
-                if link.source_id == *object_id
-                    && matches!(
-                        &link.kind,
-                        crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+    for (event_index, event) in events.iter().enumerate() {
+        for entry in &state.stack {
+            let StackEntryKind::TriggeredAbility {
+                ability,
+                trigger_event,
+                ..
+            } = &entry.kind
+            else {
+                continue;
+            };
+            let event_follows_trigger = trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if ability.contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        entry.source_id,
+                        ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        entry.controller,
+                        duration_event,
+                        event,
                     )
                 {
-                    to_return.push(link.clone());
+                    stack_latches.push((entry.id, duration_event));
                 }
             }
+        }
+
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }) {
+                if let Some(ability) = entry.ability() {
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if ability.contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                entry.source_id,
+                                ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                entry.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            resolving_latches.push(duration_event);
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, context) in state.deferred_triggers.iter().enumerate() {
+            let event_follows_trigger = context
+                .pending
+                .trigger_event
+                .as_ref()
+                .and_then(|trigger| events.iter().position(|candidate| candidate == trigger))
+                .is_none_or(|trigger_index| event_index > trigger_index);
+            if !event_follows_trigger {
+                continue;
+            }
+            for duration_event in [
+                DurationEvent::SourceLeftBattlefield,
+                DurationEvent::OpponentBecameMonarch,
+            ] {
+                if context
+                    .pending
+                    .ability
+                    .contains_duration_event(duration_event)
+                    && duration_event_matches(
+                        state,
+                        context.pending.source_id,
+                        context
+                            .pending
+                            .ability
+                            .trigger_source
+                            .as_ref()
+                            .map(|source| source.identity.reference),
+                        context.pending.controller,
+                        duration_event,
+                        event,
+                    )
+                {
+                    deferred_latches.push((index, duration_event));
+                }
+            }
+        }
+
+        if let Some(order) = state.pending_trigger_order.as_ref() {
+            for (group_index, group) in order.groups.iter().enumerate() {
+                for (trigger_index, context) in group.triggers.iter().enumerate() {
+                    let event_follows_trigger = context
+                        .pending
+                        .trigger_event
+                        .as_ref()
+                        .and_then(|trigger| {
+                            events.iter().position(|candidate| candidate == trigger)
+                        })
+                        .is_none_or(|origin_index| event_index > origin_index);
+                    if !event_follows_trigger {
+                        continue;
+                    }
+                    for duration_event in [
+                        DurationEvent::SourceLeftBattlefield,
+                        DurationEvent::OpponentBecameMonarch,
+                    ] {
+                        if context
+                            .pending
+                            .ability
+                            .contains_duration_event(duration_event)
+                            && duration_event_matches(
+                                state,
+                                context.pending.source_id,
+                                context
+                                    .pending
+                                    .ability
+                                    .trigger_source
+                                    .as_ref()
+                                    .map(|source| source.identity.reference),
+                                context.pending.controller,
+                                duration_event,
+                                event,
+                            )
+                        {
+                            ordered_latches.push((group_index, trigger_index, duration_event));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (entry_id, duration_event) in stack_latches {
+        if let Some(ability) = state
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == entry_id)
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for duration_event in resolving_latches {
+        if let Some(ability) = state
+            .resolving_stack_entry
+            .as_mut()
+            .and_then(StackEntry::ability_mut)
+        {
+            ability.record_duration_event_recursive(duration_event);
+        }
+    }
+    for (index, duration_event) in deferred_latches {
+        if let Some(context) = state.deferred_triggers.get_mut(index) {
+            context.record_duration_event(duration_event);
+        }
+    }
+    for (group_index, trigger_index, duration_event) in ordered_latches {
+        if let Some(context) = state
+            .pending_trigger_order
+            .as_mut()
+            .and_then(|order| order.groups.get_mut(group_index))
+            .and_then(|group| group.triggers.get_mut(trigger_index))
+        {
+            context.record_duration_event(duration_event);
+        }
+    }
+
+    for event in events.iter() {
+        match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } => {
+                // Find exile links where this object was the source and the exile
+                // effect specified an automatic return when that source leaves.
+                for link in &state.exile_links {
+                    if link.source_id == *object_id
+                        && matches!(
+                            &link.kind,
+                            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                        )
+                    {
+                        to_return.push(link.clone());
+                    }
+                }
+            }
+            GameEvent::MonarchChanged { player_id } => {
+                for link in &state.exile_links {
+                    if let crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                        controller,
+                        ..
+                    } = &link.kind
+                    {
+                        if super::players::is_opponent(state, *controller, *player_id) {
+                            to_return.push(link.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -15080,11 +15314,14 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         if !still_in_exile {
             continue;
         }
-        let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } = &link.kind
-        else {
-            continue;
+        let return_zone = match &link.kind {
+            crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone }
+            | crate::types::game_state::ExileLinkKind::UntilOpponentBecomesMonarch {
+                return_zone,
+                ..
+            } => *return_zone,
+            _ => continue,
         };
-        let return_zone = *return_zone;
         let gi = match groups.iter().position(|(zone, _)| *zone == return_zone) {
             Some(i) => i,
             None => {
@@ -19031,39 +19268,45 @@ mod stage2_injector_tests {
                 // Identity re-established, not assumed: `9869a19f28c791ee`,
                 // `2bc316e3aa0297f8`, `8df98486627bfe15` at the new coordinates — the same
                 // three digests this log has carried since the first merge.
-                // `PreviousEffectCount` classification adds one line above all three producers,
-                // so they move uniformly to `:7003/:7080/:10318`; no prompt site changes.
+                // `PreviousEffectCount` classification adds one line above all three
+                // producers, so main's move uniformly to `:7003/:7080/:10318`; no prompt
+                // site changes.
                 //
-                // MERGE OF `origin/main` INTO THE #7470 BRANCH (Cipher encode offer
-                // parked as a resolution frame): `:7003/:7080/:10318 ⇒
-                // `:7009/:7086/:10324`, a UNIFORM `+6`. LOCAL, not upstream. The whole
-                // cause is this change's only `effects/mod.rs` edit — the
-                // `ResolutionFrame::CipherEncode` arm added to the exhaustive
-                // `resume_resolution_frames` dispatch (3 comment + 3 code lines),
-                // which sits above all three producers; `git diff --numstat` against
-                // the merge base reads `6 0` for that file, with no hunk below them.
+                // #6857 (this branch, re-measured after the rebase onto `4c987f92a`):
+                // main's `:7003/:7080/:10318` => `:7225/:7302/:10582`. LOCATED BY DIGEST,
+                // not by arithmetic: each upstream pin's 10-line producer block was hashed
+                // at `upstream/main` and that digest searched for in this tree --
+                // `817ae852`/`43c05331`/`37d51f60`, each found at exactly ONE coordinate.
+                // Those three digests measure IDENTICALLY at `a8244e734` and at
+                // `4c987f92a`, so #7503 moved the producers without modifying them, and
+                // this branch displaced none of them.
                 //
-                // Predicted before it was read, which is what makes this additivity
-                // rather than a fixup: main's `:7003/:7080/:10318` plus `+6` equals the
-                // observation on all three. The `+1` those main coordinates already
-                // carry is upstream's, adjudicated one paragraph above; this entry adds
-                // only its own `+6` on top and re-measures rather than composing the two
-                // arithmetics.
+                // The deltas are AGAIN NOT uniform: `+222`/`+222`/`+264`. The additivity
+                // argument used above does not apply to this branch, because its
+                // insertions are not all above the first producer -- the mode-boundary
+                // reset lands in `resolve_ability_chain`, between the second and third.
+                // Uniformity is therefore the WRONG evidence here; digest identity is the
+                // right one, and it is what establishes the set was preserved. This
+                // branch writes `state.waiting_for` nowhere: the publish arms return
+                // `Vec<ObjectId>` and prompt for nothing, so it adds no producer here.
                 //
-                // Identity re-established, not assumed: sha256 of each producer line at
-                // its new coordinate against `origin/main:effects/mod.rs` at its old one
-                // gives `9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15` — the
-                // same three digests this log has carried since the first merge, so this
-                // is pure line movement. The `WaitingFor::OptionalEffectChoice` occurrence
-                // count in that file reads **25** on both sides, and
-                // `scoped_library_search.rs:452` and `engine.rs:12912` did NOT move: that
-                // is the set-preservation control. The new frame arms its prompt through
-                // the frame-resume dispatch, not through a minting site, so a sixth
-                // producer would have appeared here as a NEW entry rather than a shifted
-                // one.
-                "game/effects/mod.rs:7009".to_string(),
-                "game/effects/mod.rs:7086".to_string(),
-                "game/effects/mod.rs:10324".to_string(),
+                // #7484 maintainer review round 4 (same branch, no rebase):
+                // `:7225/:7302/:10582` => `:7261/:7338/:10618`, UNIFORM `+36`, and this
+                // time uniformity IS available as corroboration because every insertion
+                // sits above all three: the `GenericEffect` publish arm's
+                // `is_sole_chain_producer` gate at `:6037` and its comment block. Still
+                // located by digest rather than by arithmetic — each producer's 9-line
+                // block was hashed at this branch's committed tip and re-found at exactly
+                // one coordinate in the working tree (`cffb4348`/`0c3bdd6d`/`393bb75a`,
+                // all MATCH). The round's other edits are the two new `#[cfg(test)]`
+                // tests, which are below all three and mint no prompt, so the `in_test`
+                // total is unchanged.
+                // #7496's parked Cipher frame extends the exhaustive resume dispatch above
+                // all three producers. It adds six lines without assigning an optional-effect
+                // prompt, so the measured production producers move uniformly by `+6`.
+                "game/effects/mod.rs:7267".to_string(),
+                "game/effects/mod.rs:7344".to_string(),
+                "game/effects/mod.rs:10624".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
