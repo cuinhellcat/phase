@@ -610,10 +610,21 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementDamageSource => "prevented event's damage source".into(),
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::PostReplacementDamageTargetOwner => "prevented damage target's owner".into(),
-        TargetFilter::ControllerAndControlledPermanents { permanent_type } => {
+        // CR 109.1: the "other" article is part of the human-readable scope — a
+        // change between "you and permanents you control" and "you and OTHER
+        // permanents you control" must be visible in the coverage/parse diff.
+        TargetFilter::ControllerAndControlledPermanents {
+            permanent_type,
+            source_scope,
+        } => {
+            let other = if source_scope.is_exclude() {
+                "other "
+            } else {
+                ""
+            };
             match permanent_type {
-                Some(ct) => format!("you and {ct:?}s you control"),
-                None => "you and permanents you control".into(),
+                Some(ct) => format!("you and {other}{ct:?}s you control"),
+                None => format!("you and {other}permanents you control"),
             }
         }
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
@@ -1575,6 +1586,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
         QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectCount => "count from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
             format!("filtered tracked set ({})", fmt_target(filter))
@@ -3366,6 +3378,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target_filter,
             redirect_object_filter,
             recipient_object_filter,
+            redirect_lifetime,
             ..
         } => {
             if let Some(m) = modification {
@@ -3373,6 +3386,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            // CR 614.5 vs CR 611.2a: parser-alterable, and the difference between
+            // "protects one damage event" and "protects the rest of the turn" —
+            // omitting it would make that flip invisible to the parse diff.
+            if !redirect_lifetime.is_one_opportunity() {
+                d.push((
+                    "redirect_lifetime".into(),
+                    format!("{redirect_lifetime:?}"),
+                ));
             }
             if let Some(a) = redirect_amount {
                 d.push(("redirect_amount".into(), format!("{a:?}")));
@@ -8214,6 +8236,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::VoteCount { .. } => ("VoteCount", Handled),
         QuantityRef::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
+        QuantityRef::PreviousEffectCount => ("PreviousEffectCount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::TrackedSetAggregate { .. } => ("TrackedSetAggregate", Handled),

@@ -6,14 +6,16 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::actions::{
-    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, TriggerOrderTemplateOp,
+    DebugAction, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp, ResolveAllConsentDecision,
+    TriggerOrderTemplateOp,
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume,
-    PendingCounterPostAction, PendingEffectResolved, RetargetScope, StackEntry, StackEntryKind,
+    PendingCounterPostAction, PendingEffectResolved, ResolveAllConsentParticipant,
+    ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, StackEntry, StackEntryKind,
     WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
@@ -74,7 +76,8 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use super::zones;
 
 pub use super::engine_resolve_batch::{
-    resolve_all_fast_forward, ResolveAllCallbackDecision, ResolveAllFastForwardResult,
+    resolve_all_fast_forward, resolve_all_ready_is_authorized, resolve_all_ready_prefix,
+    ResolveAllCallbackDecision, ResolveAllFastForwardResult,
 };
 
 #[derive(Debug, Clone, Error)]
@@ -6391,6 +6394,16 @@ fn check_actor_authorization(
     {
         return Ok(());
     }
+    if let GameAction::RevokeResolveAllConsent {
+        epoch,
+        representative,
+    } = action
+    {
+        return (turn_control::resolve_all_granted_submitter(state, *epoch, *representative)
+            == Some(actor))
+        .then_some(())
+        .ok_or(EngineError::WrongPlayer);
+    }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
     // OpeningHandBottomCards), authorize against the full pending set so any
     // pending player may submit in any order. Falls back to single-player
@@ -7572,6 +7585,161 @@ fn finalize_copy_retarget(
     Ok(())
 }
 
+fn begin_resolve_all_consent(
+    state: &mut GameState,
+    priority_player: PlayerId,
+    max_resolutions: u32,
+) -> Result<WaitingFor, EngineError> {
+    if state.priority_player
+        != turn_control::authorized_submitter_for_player(state, priority_player)
+    {
+        return Err(EngineError::NotYourPriority);
+    }
+    let current_representative =
+        super::topology::priority_pass_representative(state, priority_player);
+    let mut representatives = super::topology::priority_pass_participants(state);
+    let Some(current_index) = representatives
+        .iter()
+        .position(|representative| *representative == current_representative)
+    else {
+        return Err(EngineError::ActionNotAllowed(
+            "Resolve All requires a live priority representative".to_string(),
+        ));
+    };
+    representatives.rotate_left(current_index);
+
+    let epoch = state.next_resolve_all_consent_epoch;
+    let next_epoch = epoch.checked_add(1).ok_or_else(|| {
+        EngineError::ActionNotAllowed("Resolve All consent epoch space exhausted".to_string())
+    })?;
+    state.next_resolve_all_consent_epoch = next_epoch;
+    // CR 117.4: a stack object resolves only after every player passes in
+    // succession. Preserve the exact current pass cycle if consent is declined
+    // or revoked before its authorized one-entry materialization begins.
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch,
+        max_resolutions,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: priority_player,
+            priority_player: state.priority_player,
+            priority_pass_count: state.priority_pass_count,
+            priority_passes: state.priority_passes.clone(),
+        },
+        participants: representatives
+            .into_iter()
+            .map(|representative| ResolveAllConsentParticipant {
+                representative,
+                authorized_submitter: turn_control::authorized_submitter_for_player(
+                    state,
+                    representative,
+                ),
+                granted: representative == current_representative,
+            })
+            .collect(),
+    });
+
+    resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::ActionNotAllowed(
+            "Resolve All requires at least one representative".to_string(),
+        )
+    })
+}
+
+fn resolve_all_consent_waiting_for(state: &GameState) -> Option<WaitingFor> {
+    let run = state.resolve_all_consent_run.as_ref()?;
+    Some(
+        run.next_pending_representative()
+            .map(|representative| WaitingFor::ResolveAllConsent {
+                epoch: run.epoch,
+                representative,
+            })
+            .unwrap_or(WaitingFor::ResolveAllReady { epoch: run.epoch }),
+    )
+}
+
+// CR 117.3d + CR 117.4: A declined shortcut resumes the exact ordinary
+// priority-pass sequence it interrupted; no spell or ability has resolved.
+fn restore_resolve_all_priority_snapshot(state: &mut GameState) -> Result<WaitingFor, EngineError> {
+    let run = state.resolve_all_consent_run.take().ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    let snapshot = run.priority_snapshot;
+    state.priority_player = snapshot.priority_player;
+    state.priority_pass_count = snapshot.priority_pass_count;
+    state.priority_passes = snapshot.priority_passes;
+    Ok(WaitingFor::Priority {
+        player: snapshot.waiting_player,
+    })
+}
+
+fn respond_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+    response_epoch: u64,
+    decision: ResolveAllConsentDecision,
+) -> Result<WaitingFor, EngineError> {
+    if epoch != response_epoch {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent epoch is stale".to_string(),
+        ));
+    }
+    {
+        let run = state.resolve_all_consent_run.as_mut().ok_or_else(|| {
+            EngineError::InvalidAction("Resolve All consent is not active".to_string())
+        })?;
+        if run.epoch != epoch || run.next_pending_representative() != Some(representative) {
+            return Err(EngineError::InvalidAction(
+                "Resolve All consent response is no longer pending".to_string(),
+            ));
+        }
+        if matches!(decision, ResolveAllConsentDecision::Grant) {
+            let participant = run
+                .participants
+                .iter_mut()
+                .find(|participant| participant.representative == representative)
+                .expect("pending Resolve All representative must be a participant");
+            participant.granted = true;
+        }
+    }
+    if matches!(decision, ResolveAllConsentDecision::Decline) {
+        return restore_resolve_all_priority_snapshot(state);
+    }
+    let waiting_for = resolve_all_consent_waiting_for(state).ok_or_else(|| {
+        EngineError::InvalidAction("Resolve All consent is not active".to_string())
+    })?;
+    // ResolveAllReady has no current actor, so the ordinary waiting-state sync
+    // deliberately leaves `priority_player` alone. Restore the saved priority
+    // cursor now; the Ready consumer validates this exact snapshot before it
+    // begins its first materialized CR 117.4 pass cycle.
+    if matches!(waiting_for, WaitingFor::ResolveAllReady { .. }) {
+        state.priority_player = state
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("an active consent run produced ResolveAllReady")
+            .priority_snapshot
+            .priority_player;
+    }
+    Ok(waiting_for)
+}
+
+fn revoke_resolve_all_consent(
+    state: &mut GameState,
+    epoch: u64,
+    representative: PlayerId,
+) -> Result<WaitingFor, EngineError> {
+    let active = state
+        .resolve_all_consent_run
+        .as_ref()
+        .is_some_and(|run| run.epoch == epoch && run.is_granted(representative));
+    if !active {
+        return Err(EngineError::InvalidAction(
+            "Resolve All consent revocation is stale".to_string(),
+        ));
+    }
+    restore_resolve_all_priority_snapshot(state)
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -7933,7 +8101,11 @@ fn apply_action(
     let stack_len_before_action = state.stack.len();
     if !matches!(
         action,
-        GameAction::PassPriority | GameAction::OrderTriggers { .. }
+        GameAction::PassPriority
+            | GameAction::OrderTriggers { .. }
+            | GameAction::BeginResolveAll { .. }
+            | GameAction::RespondResolveAllConsent { .. }
+            | GameAction::RevokeResolveAllConsent { .. }
     ) && !answering_forced_window
     {
         state.loop_detect_ring.clear();
@@ -7954,7 +8126,10 @@ fn apply_action(
     match &action {
         GameAction::SetAutoPass { .. }
         | GameAction::PassPriority
-        | GameAction::ReorderHand { .. } => {}
+        | GameAction::ReorderHand { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => {}
         _ => {
             state.auto_pass.remove(&actor);
         }
@@ -7996,6 +8171,32 @@ fn apply_action(
                 log_entries: vec![],
             });
         }
+        (WaitingFor::Priority { player }, GameAction::BeginResolveAll { max_resolutions }) => {
+            begin_resolve_all_consent(state, *player, max_resolutions)?
+        }
+        (
+            WaitingFor::ResolveAllConsent {
+                epoch,
+                representative,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: response_epoch,
+                decision,
+            },
+        ) => respond_resolve_all_consent(
+            state,
+            *epoch,
+            *representative,
+            response_epoch,
+            decision,
+        )?,
+        (
+            WaitingFor::ResolveAllConsent { .. } | WaitingFor::ResolveAllReady { .. },
+            GameAction::RevokeResolveAllConsent {
+                epoch,
+                representative,
+            },
+        ) => revoke_resolve_all_consent(state, epoch, representative)?,
         (WaitingFor::Priority { player }, GameAction::PlayLand { object_id, card_id }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
@@ -15025,6 +15226,7 @@ mod priority_reducer_census_tests {
             "ActivateManaSource",
             "ActivateNinjutsu",
             "ActivateStation",
+            "BeginResolveAll",
             "CastPreparedCopy",
             "CastSpell",
             "CastSpellAsSneak",
@@ -15058,7 +15260,12 @@ mod priority_reducer_census_tests {
             .collect::<BTreeSet<_>>();
         let expected_preflight_families = expected
             .iter()
-            .filter(|family| *family != "PassPriority" && *family != "SetAutoPass")
+            .filter(|family| {
+                !matches!(
+                    family.as_str(),
+                    "BeginResolveAll" | "PassPriority" | "SetAutoPass"
+                )
+            })
             .map(|family| (*family).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(preflight_families, expected_preflight_families);
@@ -18824,10 +19031,12 @@ mod stage2_injector_tests {
                 // Identity re-established, not assumed: `9869a19f28c791ee`,
                 // `2bc316e3aa0297f8`, `8df98486627bfe15` at the new coordinates — the same
                 // three digests this log has carried since the first merge.
+                // `PreviousEffectCount` classification adds one line above all three producers,
+                // so they move uniformly to `:7003/:7080/:10318`; no prompt site changes.
                 //
                 // MERGE OF `origin/main` INTO THE #7470 BRANCH (Cipher encode offer
-                // parked as a resolution frame): `:7002/:7079/:10317 ⇒
-                // `:7008/:7085/:10323`, a UNIFORM `+6`. LOCAL, not upstream. The whole
+                // parked as a resolution frame): `:7003/:7080/:10318 ⇒
+                // `:7009/:7086/:10324`, a UNIFORM `+6`. LOCAL, not upstream. The whole
                 // cause is this change's only `effects/mod.rs` edit — the
                 // `ResolutionFrame::CipherEncode` arm added to the exhaustive
                 // `resume_resolution_frames` dispatch (3 comment + 3 code lines),
@@ -18835,21 +19044,26 @@ mod stage2_injector_tests {
                 // the merge base reads `6 0` for that file, with no hunk below them.
                 //
                 // Predicted before it was read, which is what makes this additivity
-                // rather than a fixup: main's `:7002/:7079/:10317` plus `+6` equals the
-                // observation on all three.
+                // rather than a fixup: main's `:7003/:7080/:10318` plus `+6` equals the
+                // observation on all three. The `+1` those main coordinates already
+                // carry is upstream's, adjudicated one paragraph above; this entry adds
+                // only its own `+6` on top and re-measures rather than composing the two
+                // arithmetics.
                 //
                 // Identity re-established, not assumed: sha256 of each producer line at
                 // its new coordinate against `origin/main:effects/mod.rs` at its old one
                 // gives `9869a19f28c791ee`, `2bc316e3aa0297f8`, `8df98486627bfe15` — the
                 // same three digests this log has carried since the first merge, so this
-                // is pure line movement. `scoped_library_search.rs:452` and
-                // `engine.rs:12912` did NOT move, and that is the set-preservation
-                // control: the new frame arms its prompt through the frame-resume
-                // dispatch, not through a minting site, so a sixth producer would have
-                // appeared here as a NEW entry rather than a shifted one.
-                "game/effects/mod.rs:7008".to_string(),
-                "game/effects/mod.rs:7085".to_string(),
-                "game/effects/mod.rs:10323".to_string(),
+                // is pure line movement. The `WaitingFor::OptionalEffectChoice` occurrence
+                // count in that file reads **25** on both sides, and
+                // `scoped_library_search.rs:452` and `engine.rs:12912` did NOT move: that
+                // is the set-preservation control. The new frame arms its prompt through
+                // the frame-resume dispatch, not through a minting site, so a sixth
+                // producer would have appeared here as a NEW entry rather than a shifted
+                // one.
+                "game/effects/mod.rs:7009".to_string(),
+                "game/effects/mod.rs:7086".to_string(),
+                "game/effects/mod.rs:10324".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
@@ -19596,7 +19810,10 @@ mod stage2_injector_tests {
                 //   `begin_pending_trigger_target_selection` is STILL 134 — the function opens
                 //   `:12722 ⇒ :12778`, moving by the same `+56` as the pin, so the control
                 //   that caught this row's one historical silent drift is intact.
-                "game/engine.rs:12912".to_string(),
+                //   Resolve All consent adds its frozen-authority protocol above this producer:
+                //   `:12912 ⇒ :13113`. It does not create a CR 603.5 prompt, and the pinned
+                //   line remains the same `OptionalEffectChoice` construction.
+                "game/engine.rs:13113".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

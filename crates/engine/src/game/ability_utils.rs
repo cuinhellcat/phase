@@ -14948,6 +14948,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
+                redirect_lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: None,
                 target_filter: None,
@@ -15006,6 +15007,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
+                redirect_lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
                 source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
                 combat_scope: None,
                 target_filter: None,
@@ -15058,6 +15060,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CreateDamageReplacement {
+                redirect_lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
                 source_filter: Some(TargetFilter::SelfRef),
                 combat_scope: None,
                 target_filter: None,
