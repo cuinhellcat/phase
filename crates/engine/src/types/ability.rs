@@ -9384,14 +9384,16 @@ pub enum ParsedCondition {
     HasCityBlessing,
     /// CR 702.195b: True when the activating player has the enduring story designation.
     HasEnduringStory,
-    /// CR 702.179e: True when the activating player has max speed. A player
-    /// designation read from the player, exactly like `HasCityBlessing` — the
-    /// activating player IS the source's controller (CR 602.2), which is whose
-    /// speed CR 702.178a's "as long as YOUR speed is 4" names for a permanent on
-    /// the battlefield. Evaluation delegates to `game::speed::has_max_speed`, the
-    /// same authority `StaticCondition::HasMaxSpeed` uses in `layers.rs`, so the
-    /// "speed may exceed 4" exception (CR 702.179d) cannot diverge between the
-    /// static and restriction readings.
+    /// CR 702.178a: True when the SOURCE's player has max speed — its
+    /// controller on the battlefield, its owner anywhere else, per the "Max
+    /// Speed" glossary entry (sense 2). Unlike its designation siblings above,
+    /// this leaf does NOT read the activating player: CR 702.178a's "your" is
+    /// addressed to the object, and CR 602.1a lets an `activator_filter` of
+    /// `PlayerFilter::All` make the activator someone else entirely.
+    /// Evaluation delegates to `game::speed::has_max_speed`, the same authority
+    /// `StaticCondition::HasMaxSpeed` uses in `layers.rs`, so the "speed may
+    /// exceed 4" exception (CR 702.179d) cannot diverge between the static and
+    /// restriction readings.
     HasMaxSpeed,
     /// CR 102.1: "The active player is the player whose turn it is." True when
     /// the scoped player is the active player — gates a casting/restriction

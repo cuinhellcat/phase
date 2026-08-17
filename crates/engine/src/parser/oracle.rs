@@ -2939,9 +2939,9 @@ fn keyword_prefix_activation_restriction(
         StaticCondition::SourceIsHarnessed => Some(ActivationRestriction::SourceIsHarnessed),
         // CR 702.178a's glossary line names whose speed: "that permanent's
         // controller (or that card's owner, if it isn't on the battlefield)".
-        // `RequiresCondition` is evaluated against the ACTIVATING player, who is
-        // the source's controller (CR 602.2), so the owner's speed is never read
-        // for a permanent on the battlefield.
+        // `ParsedCondition::HasMaxSpeed` resolves that from the SOURCE rather
+        // than from the activating player, who CR 602.1a allows to be a
+        // different person ("Any player may activate this ability").
         StaticCondition::HasMaxSpeed => Some(ActivationRestriction::RequiresCondition {
             condition: Some(ParsedCondition::HasMaxSpeed),
         }),
