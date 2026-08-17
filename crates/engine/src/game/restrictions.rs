@@ -1640,6 +1640,12 @@ pub(crate) fn evaluate_condition(
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
+        // CR 702.179e: max speed is a player designation restrictions may
+        // identify. Delegates to the single `game::speed` authority — the same
+        // helper `layers.rs` uses for `StaticCondition::HasMaxSpeed` — so the
+        // CR 702.179d "speed may exceed 4" exception reads identically whether a
+        // card gates a static ability or an activation on it.
+        ParsedCondition::HasMaxSpeed => super::speed::has_max_speed(state, player),
         // CR 903.3 / CR 903.3d: owner-scoped ("your commander") vs any-owner ("a
         // commander") control. Delegates to the single `game::commander` authority —
         // the same helpers `layers.rs` uses for `StaticCondition::ControlsCommander` —
