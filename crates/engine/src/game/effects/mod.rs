@@ -992,7 +992,7 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         // arms here — i.e. only once that prompt's owner is consumed, which is
         // what puts the encode after the spell's other effects (issue #7470).
         ResolutionFrame::CipherEncode(_) => {
-            crate::game::cipher::arm_parked_encode_offer(state);
+            crate::game::cipher::arm_parked_encode_offer(state, events);
         }
         ResolutionFrame::RepeatFor(_) => drain_active_repeat_for(state, events),
         ResolutionFrame::RepeatUntil(_) => drain_active_repeat_until(state),

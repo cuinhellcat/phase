@@ -448,6 +448,14 @@ fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_st
         .resolution_stack
         .push_inner(paused_post_replacement_frame());
     state.resolution_stack.push_inner(active_multi_draw_frame());
+    let prompt_owner = optional_effect_frame(&state);
+    state.resolution_stack.push_inner(prompt_owner.clone());
+    state.waiting_for = WaitingFor::OpponentMayChoice {
+        player: PlayerId(1),
+        source_id: ObjectId(7),
+        description: None,
+        remaining: Vec::new(),
+    };
 
     // The parked frame must own no prompt — parking a direct-choice owner
     // beneath another frame buries it, which `validate` rejects on its own
@@ -470,7 +478,8 @@ fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_st
             [
                 ResolutionFrame::CipherEncode(_),
                 ResolutionFrame::PostReplacement(_),
-                ResolutionFrame::MultiDraw(_)
+                ResolutionFrame::MultiDraw(_),
+                ResolutionFrame::OptionalEffect(_)
             ]
         ),
         "the parked frame sits outside the pair, not between its halves: {:?}",
@@ -507,21 +516,19 @@ fn parking_beneath_a_live_prompt_journals_its_operand_and_replays_to_the_same_st
     replayed
         .resolution_stack
         .push_inner(active_multi_draw_frame());
+    replayed.resolution_stack.push_inner(prompt_owner);
+    replayed.waiting_for = WaitingFor::OpponentMayChoice {
+        player: PlayerId(1),
+        source_id: ObjectId(7),
+        description: None,
+        remaining: Vec::new(),
+    };
     replayed
         .apply_resolved_frame_transition(&command(ResolvedFrameTransition::ParkBeneathLivePrompt {
             frame: parked,
         }))
         .expect("replaying the recorded transition applies");
-    assert_eq!(
-        frames(&replayed)
-            .iter()
-            .map(ResolutionFrame::kind)
-            .collect::<Vec<_>>(),
-        frames(&state)
-            .iter()
-            .map(ResolutionFrame::kind)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(frames(&replayed), frames(&state));
 }
 
 /// A post-replacement frame whose resident drain is PAUSED — the only status

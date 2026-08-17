@@ -139,7 +139,12 @@ pub(crate) fn finish_encode(
 /// Both `true` arms leave the caller with nothing to route, which is what makes
 /// them one answer: the distinction that matters to a caller is whether the card
 /// is still its responsibility.
-pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller: PlayerId) -> bool {
+pub fn begin_encode_choice(
+    state: &mut GameState,
+    card_id: ObjectId,
+    controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     if !spell_can_encode(state, card_id) {
         return false;
     }
@@ -160,7 +165,7 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
     // that owns the prompt and armed by `resume_resolution_frames` once that
     // owner is consumed. Either way the caller's contract is the same: the
     // resolution owes an answer, so the card is held off the stack.
-    park_encode_offer(state, pending);
+    park_encode_offer(state, pending, events);
     true
 }
 
@@ -173,6 +178,7 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
 fn park_encode_offer(
     state: &mut GameState,
     pending: crate::types::resolution::PendingCipherEncode,
+    events: &mut Vec<GameEvent>,
 ) {
     // The question is not what SHAPE the top frame has — it is whether the
     // resolution is currently asking the player anything at all. Keying this to
@@ -211,7 +217,7 @@ fn park_encode_offer(
             // stack was already invalid, and the card still has to leave
             // resolution by a legal route, so the offer completes as a decline
             // (CR 608.2n) rather than being dropped.
-            handle_encode_choice(state, card_id, None, &mut Vec::new());
+            handle_encode_choice(state, card_id, None, events);
         }
         return;
     }
@@ -232,7 +238,7 @@ fn park_encode_offer(
         // graveyard) instead of dropping it and stranding the card off the
         // stack. The live prompt is untouched either way — a decline moves a
         // card, it does not ask a question.
-        handle_encode_choice(state, card_id, None, &mut Vec::new());
+        handle_encode_choice(state, card_id, None, events);
     }
 }
 
@@ -240,7 +246,7 @@ fn park_encode_offer(
 /// after the spell's own effects have finished. Called from the exhaustive
 /// frame-resume dispatch, which is what guarantees a parked offer is never
 /// forgotten.
-pub(crate) fn arm_parked_encode_offer(state: &mut GameState) {
+pub(crate) fn arm_parked_encode_offer(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(pending) = state.resolution_stack.active_cipher_encode() else {
         return;
     };
@@ -252,7 +258,7 @@ pub(crate) fn arm_parked_encode_offer(state: &mut GameState) {
         // No legal host left: consume the frame and route the card the way a
         // declined offer does (CR 608.2n).
         let _ = state.take_active_cipher_encode_frame();
-        handle_encode_choice(state, card_id, None, &mut Vec::new());
+        handle_encode_choice(state, card_id, None, events);
         return;
     }
     if let Some(frame) = state.resolution_stack.active_cipher_encode_mut() {

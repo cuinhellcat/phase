@@ -30,9 +30,10 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ExileLinkKind, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const HIDDEN_STRINGS_ORACLE: &str = "You may tap or untap target permanent, then \
      you may tap or untap another target permanent.";
@@ -437,29 +438,23 @@ fn the_encode_offer_survives_a_paused_post_replacement_draw_pair() {
             }
             WaitingFor::OpponentMayChoice { .. } => {
                 seen.push("OpponentMayChoice".to_string());
-                if runner
+                runner
                     .act(GameAction::DecideOptionalEffect { accept: false })
-                    .is_err()
-                {
-                    break;
-                }
+                    .expect("the draw replacement offer must be answerable");
             }
             WaitingFor::CipherEncodeChoice { .. } => {
                 seen.push("CipherEncodeChoice".to_string());
-                if runner
+                runner
                     .act(GameAction::CipherEncode {
                         creature: Some(host),
                     })
-                    .is_err()
-                {
-                    break;
-                }
+                    .expect("accepting the encode offer must be a legal answer");
                 break;
             }
-            other => {
-                seen.push(format!("UNBEKANNT: {}", other.variant_name()));
-                break;
-            }
+            other => panic!(
+                "unexpected prompt {:?}; prompts={seen:?}",
+                other.variant_name()
+            ),
         }
     }
 
@@ -482,5 +477,16 @@ fn the_encode_offer_survives_a_paused_post_replacement_draw_pair() {
             .iter()
             .map(|frame| frame.kind())
             .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Exile,
+        "accepting the offer must exile the cipher card"
+    );
+    assert!(
+        runner.state().exile_links.iter().any(|link| {
+            link.exiled_id == spell && link.source_id == host && link.kind == ExileLinkKind::Cipher
+        }),
+        "accepting the offer must encode Last Thoughts on the selected host"
     );
 }
