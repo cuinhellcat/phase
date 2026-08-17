@@ -299,3 +299,188 @@ fn a_discard_pause_also_keeps_the_encode_offer_last() {
         "the discard must be asked before the encode offer — {with:?}"
     );
 }
+
+/// Declining must consume the offer's frame exactly as accepting does.
+///
+/// `CipherEncode { creature: None }` ends the offer without encoding anything
+/// (CR 608.2n: the card goes to its owner's graveyard). It reaches the same
+/// handler as an acceptance, so it must leave the same empty stack behind — an
+/// unconsumed owner is precisely the #7470 corruption, and a decline that
+/// skipped the consumption would rebuild it from the other side. The offer is
+/// declined here AFTER the spell's own prompts, i.e. from the parked-then-armed
+/// path rather than the immediately-armed one.
+#[test]
+fn declining_the_encode_offer_consumes_its_frame_too() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for pid in [P0, P1] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D"]);
+    }
+    let first = scenario.add_creature(P0, "First Permanent", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Permanent", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hidden Strings", true, HIDDEN_STRINGS_ORACLE)
+        .with_keyword(Keyword::Cipher)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[first, second]).commit();
+
+    let mut declined = false;
+    for _ in 0..40 {
+        match &runner.state().waiting_for {
+            // The spell still has to be let through before it resolves; once
+            // the offer has been declined, priority is the resting state this
+            // test is measuring.
+            WaitingFor::Priority { .. } => {
+                if declined || runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("the spell's own optional must be answerable");
+            }
+            WaitingFor::ChooseOneOfBranch { .. } => {
+                runner
+                    .act(GameAction::ChooseBranch { index: 0 })
+                    .expect("the tap/untap branch must be answerable");
+            }
+            WaitingFor::CipherEncodeChoice { .. } => {
+                runner
+                    .act(GameAction::CipherEncode { creature: None })
+                    .expect("declining the encode offer must be a legal answer");
+                declined = true;
+            }
+            other => panic!("unexpected prompt {:?}", other.variant_name()),
+        }
+    }
+
+    assert!(declined, "the encode offer must have been reached at all");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a declined offer must hand back priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "a declined offer must consume its own frame — found {:?}",
+        runner
+            .state()
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect::<Vec<_>>()
+    );
+    // CR 608.2n: the declined card is in its owner's graveyard, not stranded
+    // off the stack — the outcome the dropped-offer path could not produce.
+    assert!(
+        runner.state().players[0]
+            .graveyard
+            .iter()
+            .filter_map(|id| runner.state().objects.get(id))
+            .any(|object| object.name == "Hidden Strings"),
+        "the declined cipher card belongs in its owner's graveyard"
+    );
+}
+
+/// The stack shape the #7496 review named: a paused post-replacement/draw pair.
+///
+/// Zur's Weirding replaces Last Thoughts' own draw, so the spell's resolution
+/// rests on that replacement's "may pay 2 life" offer with the
+/// `PostReplacement` → `MultiDraw` pair parked beneath it. `validate` requires
+/// that pair to stay immediately adjacent (CR 614.11a + CR 121.6b), so parking
+/// the encode offer "below the top" would land INSIDE it and be rejected.
+///
+/// This is the production pipeline, not a hand-built stack: a real cipher spell
+/// (Last Thoughts, "Draw a card.") whose real draw is really replaced. What it
+/// pins is that the offer survives such a shape at all — the earlier revision
+/// dropped it there, leaving the card with neither an encode prompt nor its
+/// ordinary graveyard route.
+#[test]
+fn the_encode_offer_survives_a_paused_post_replacement_draw_pair() {
+    const ZURS_WEIRDING_ORACLE: &str = "If a player would draw a card, they reveal it instead. \
+         Then any other player may pay 2 life. If a player does, put that card into its owner's \
+         graveyard. Otherwise, that player draws a card.";
+
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for pid in [P0, P1] {
+        scenario.with_library_top(pid, &["Lib A", "Lib B", "Lib C", "Lib D"]);
+    }
+    // P1 controls the replacement, so P1 is the "any other player" who is asked
+    // to pay while P0's own draw is what pauses.
+    scenario
+        .add_creature_from_oracle(P1, "Zur's Weirding", 0, 1, ZURS_WEIRDING_ORACLE)
+        .as_enchantment();
+    let host = scenario.add_creature(P0, "Host Creature", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Last Thoughts", false, "Draw a card.")
+        .with_keyword(Keyword::Cipher)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            // Let the spell through to resolution; after the offer is answered
+            // priority is the resting state.
+            WaitingFor::Priority { .. } => {
+                if seen.iter().any(|prompt| prompt == "CipherEncodeChoice")
+                    || runner.act(GameAction::PassPriority).is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::OpponentMayChoice { .. } => {
+                seen.push("OpponentMayChoice".to_string());
+                if runner
+                    .act(GameAction::DecideOptionalEffect { accept: false })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::CipherEncodeChoice { .. } => {
+                seen.push("CipherEncodeChoice".to_string());
+                if runner
+                    .act(GameAction::CipherEncode {
+                        creature: Some(host),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                break;
+            }
+            other => {
+                seen.push(format!("UNBEKANNT: {}", other.variant_name()));
+                break;
+            }
+        }
+    }
+
+    assert!(
+        seen.contains(&"OpponentMayChoice".to_string()),
+        "the draw replacement must actually pause this resolution — otherwise this \
+         test does not stand on the stack shape it claims; prompts={seen:?}"
+    );
+    assert!(
+        seen.contains(&"CipherEncodeChoice".to_string()),
+        "the encode offer must survive the paused draw pair and still be asked; \
+         prompts={seen:?}"
+    );
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "the answered offer must leave no frame behind — found {:?}",
+        runner
+            .state()
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect::<Vec<_>>()
+    );
+}

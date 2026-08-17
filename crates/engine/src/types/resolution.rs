@@ -495,6 +495,34 @@ pub enum ResolutionStackError {
     InvalidPayload { frame: FrameKind, message: String },
 }
 
+/// Where a frame that owns no prompt goes while another frame owns the live one.
+///
+/// Parking is not "insert below the top". Which position keeps the stack valid
+/// depends on what is currently on it, and one shape answers differently:
+/// `validate` requires a paused post-replacement/draw pair to stay immediately
+/// adjacent (CR 614.11a + CR 121.6b — every action a replacement requires is
+/// completed before the draw sequence resumes), and admits exactly one frame
+/// above such a pair, the direct-choice owner holding the live prompt. Inserting
+/// below the top lands INSIDE the pair in both of those shapes.
+///
+/// Naming the position makes the placement a decision the stack takes from its
+/// own shape. A caller that instead guesses "below the top" and inspects an
+/// `Err` afterwards has no way to recover: by then it has already retained its
+/// card off the normal resolution route (issue #7496 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedFramePlacement {
+    /// Nothing is on the stack, so the parked frame is the only frame. This is
+    /// reachable while a question is open: a live prompt need not have a frame
+    /// behind it — a discard choice does not.
+    OnlyFrame,
+    /// Immediately below the active child — the ordinary case.
+    BelowActiveChild,
+    /// Immediately below a complete paused post-replacement/draw pair, i.e.
+    /// outside it, whether that pair is the active operation itself or sits
+    /// under the direct-choice owner of the choice it paused for.
+    OutsidePausedDrawPair,
+}
+
 /// An ordered, LIFO stack of suspended resolution work.
 ///
 /// Its backing storage is intentionally private, and the privacy is enforced by
@@ -2924,6 +2952,77 @@ impl ResolutionStack {
             .ok_or(ResolutionStackError::NoActiveChild)?;
         self.frames.insert_below(active, frame);
         Ok(())
+    }
+
+    /// The post-replacement parent of a complete paused draw pair `active`
+    /// either belongs to or rests on, if there is one.
+    ///
+    /// Adjacent access only: the pair is reached by stepping down from the
+    /// located `active` slot, never by searching for a frame kind.
+    fn paused_draw_pair_parent(&self, active: FrameSlot) -> Option<FrameSlot> {
+        // The pair IS the active operation: the draw child is on top and its
+        // post-replacement parent immediately beneath it.
+        if self.has_active_post_replacement_draw_pair() {
+            return self.frames.below(active);
+        }
+        // Otherwise the pair may be paused for a player's choice, in which case
+        // the frame owning that choice sits above it — the one frame `validate`
+        // admits there. Anything else on top means there is no pair to protect.
+        if !matches!(
+            self.frames.get(active).map(|frame| frame.gate()),
+            Some(FrameGate::DirectChoice(_))
+        ) {
+            return None;
+        }
+        let child = self.frames.below(active)?;
+        let parent = self.frames.below(child)?;
+        match (self.frames.get(parent), self.frames.get(child)) {
+            (
+                Some(ResolutionFrame::PostReplacement(drains)),
+                Some(ResolutionFrame::MultiDraw(_)),
+            ) if matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused | DrainStatus::Dispatching)
+            ) =>
+            {
+                Some(parent)
+            }
+            _ => None,
+        }
+    }
+
+    /// The placement and the slot to insert below, if any.
+    ///
+    /// There is deliberately no public "where would this go?" companion: no
+    /// caller needs to know the position without taking it, and a reader that
+    /// could ask separately would invite deciding on the answer elsewhere —
+    /// which is the split this whole authority exists to close.
+    fn park_target(&self) -> (ParkedFramePlacement, Option<FrameSlot>) {
+        let Some(active) = self.frames.top() else {
+            return (ParkedFramePlacement::OnlyFrame, None);
+        };
+        match self.paused_draw_pair_parent(active) {
+            Some(parent) => (ParkedFramePlacement::OutsidePausedDrawPair, Some(parent)),
+            None => (ParkedFramePlacement::BelowActiveChild, Some(active)),
+        }
+    }
+
+    /// Park a frame that owns no prompt beneath the frame that owns the live
+    /// one, and report where it went.
+    ///
+    /// Infallible by construction, which is the point: the stack chooses the
+    /// position from its own shape rather than accepting one from a caller, so
+    /// there is no structural guess left for the caller to recover from. It is
+    /// still the caller's job to bring a frame whose gate is not
+    /// [`FrameGate::DirectChoice`] — parking a second prompt owner under a live
+    /// prompt is rejected by `validate`, and rightly so.
+    pub fn park_beneath_live_prompt(&mut self, frame: ResolutionFrame) -> ParkedFramePlacement {
+        let (placement, slot) = self.park_target();
+        match slot {
+            None => self.push_inner(frame),
+            Some(slot) => self.frames.insert_below(slot, frame),
+        }
+        placement
     }
 
     /// Install an outer frame immediately below the child stack a producer
@@ -5367,6 +5466,153 @@ mod tests {
         assert_eq!(
             stack.last().map(ResolutionFrame::kind),
             Some(FrameKind::PostReplacement)
+        );
+    }
+
+    fn parked_cipher_encode_frame() -> ResolutionFrame {
+        ResolutionFrame::CipherEncode(PendingCipherEncode {
+            stage: CipherEncodeStage::Parked,
+            card_id: ObjectId(41),
+            controller: PlayerId(0),
+            creatures: vec![ObjectId(42)],
+        })
+    }
+
+    fn opponent_may_owner_frame() -> ResolutionFrame {
+        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            ability: Box::new(resolved_draw(7)),
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+        })
+    }
+
+    fn opponent_may_prompt() -> WaitingFor {
+        WaitingFor::OpponentMayChoice {
+            player: PlayerId(1),
+            source_id: ObjectId(7),
+            description: None,
+            remaining: Vec::new(),
+        }
+    }
+
+    /// Parking answers from the stack's shape, and every shape has an answer.
+    ///
+    /// The three placements are exhaustive over what can be beneath a live
+    /// prompt: no frame at all (a discard prompt owns none), an ordinary active
+    /// child, or a paused post-replacement/draw pair whose adjacency
+    /// `validate` protects (CR 614.11a + CR 121.6b).
+    #[test]
+    fn parking_beneath_a_live_prompt_places_a_frame_by_stack_shape() {
+        let mut empty = ResolutionStack::default();
+        assert_eq!(
+            empty.park_beneath_live_prompt(parked_cipher_encode_frame()),
+            ParkedFramePlacement::OnlyFrame
+        );
+        assert_eq!(
+            empty.iter().map(ResolutionFrame::kind).collect::<Vec<_>>(),
+            vec![FrameKind::CipherEncode]
+        );
+
+        let mut ordinary = ResolutionStack::default();
+        ordinary.push_inner(opponent_may_owner_frame());
+        assert_eq!(
+            ordinary.park_beneath_live_prompt(parked_cipher_encode_frame()),
+            ParkedFramePlacement::BelowActiveChild
+        );
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![FrameKind::CipherEncode, FrameKind::OptionalEffect],
+            "the ordinary case still parks immediately below the active child"
+        );
+        ordinary
+            .validate(&opponent_may_prompt())
+            .expect("a parked frame owns no prompt, so the live one keeps its owner");
+    }
+
+    /// The shape the #7496 review named: the pair must not be split.
+    ///
+    /// Both admitted forms are covered — the pair as the active operation, and
+    /// the pair beneath the single direct-choice owner `validate` allows above
+    /// it. The second is the one a "below the top" insert gets wrong, and the
+    /// last assertion measures exactly that rather than asserting it.
+    #[test]
+    fn parking_stays_outside_a_paused_post_replacement_draw_pair() {
+        let mut pair_active = ResolutionStack::default();
+        pair_active
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("the fixture is the shipped adjacent pair");
+        assert_eq!(
+            pair_active.park_beneath_live_prompt(parked_cipher_encode_frame()),
+            ParkedFramePlacement::OutsidePausedDrawPair
+        );
+        assert_eq!(
+            pair_active
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::CipherEncode,
+                FrameKind::PostReplacement,
+                FrameKind::MultiDraw
+            ],
+            "the parked frame goes beneath the pair, never between its halves"
+        );
+
+        let mut pair_under_owner = ResolutionStack::default();
+        pair_under_owner
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("the fixture is the shipped adjacent pair");
+        pair_under_owner.push_inner(opponent_may_owner_frame());
+        assert_eq!(
+            pair_under_owner.park_beneath_live_prompt(parked_cipher_encode_frame()),
+            ParkedFramePlacement::OutsidePausedDrawPair
+        );
+        assert_eq!(
+            pair_under_owner
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::CipherEncode,
+                FrameKind::PostReplacement,
+                FrameKind::MultiDraw,
+                FrameKind::OptionalEffect
+            ]
+        );
+        pair_under_owner
+            .validate(&opponent_may_prompt())
+            .expect("parking outside the pair leaves both the pair and the prompt intact");
+
+        // What the placement is FOR: the same frame inserted below the top
+        // instead lands between the pair's halves, and the stack rejects it.
+        let mut naive = ResolutionStack::default();
+        naive
+            .install_adjacent_post_replacement_draw(
+                paused_post_replacement_frame(),
+                active_multi_draw_frame(),
+            )
+            .expect("the fixture is the shipped adjacent pair");
+        naive.push_inner(opponent_may_owner_frame());
+        naive
+            .insert_parent_of_active(parked_cipher_encode_frame())
+            .expect("the structural insert itself succeeds — it is validation that refuses");
+        assert!(
+            matches!(
+                naive.validate(&opponent_may_prompt()),
+                Err(ResolutionStackError::InvalidAdjacentPair(_))
+            ),
+            "inserting below the top splits the pair, which is why placement is the \
+             stack's decision and not the caller's"
         );
     }
 

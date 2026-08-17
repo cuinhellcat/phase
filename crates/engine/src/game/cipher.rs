@@ -127,11 +127,18 @@ pub(crate) fn finish_encode(
 }
 
 /// CR 702.99a: Begin the on-resolution encode offer for a Cipher spell. Returns
-/// `true` when resolution paused for the choice (the caller must stop finalizing
-/// the spell and return, leaving the card held off the stack like a mutating
-/// spell), or `false` when there is no encode to offer — the spell isn't an
-/// encodable cipher card, or the controller has no creature to host it — so the
-/// caller routes the card normally (to its owner's graveyard).
+/// `true` when this hook has taken the card off the caller's hands — normally
+/// because resolution paused for the choice (the caller stops finalizing the
+/// spell and returns, leaving the card held off the stack like a mutating
+/// spell), and in the one degenerate case below because the offer already
+/// completed as a decline and routed the card itself. Returns `false` when there
+/// is no encode to offer at all — the spell isn't an encodable cipher card, or
+/// the controller has no creature to host it — so the caller routes the card
+/// normally (to its owner's graveyard).
+///
+/// Both `true` arms leave the caller with nothing to route, which is what makes
+/// them one answer: the distinction that matters to a caller is whether the card
+/// is still its responsibility.
 pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller: PlayerId) -> bool {
     if !spell_can_encode(state, card_id) {
         return false;
@@ -159,6 +166,10 @@ pub fn begin_encode_choice(state: &mut GameState, card_id: ObjectId, controller:
 
 /// Park the encode offer, arming it immediately only when nothing else owns the
 /// current prompt.
+///
+/// The offer always leaves this function accounted for: armed as the live
+/// prompt, parked as a frame that will arm later, or — if the stack refuses a
+/// prompt-less frame at all — completed as a decline. It is never dropped.
 fn park_encode_offer(
     state: &mut GameState,
     pending: crate::types::resolution::PendingCipherEncode,
@@ -175,35 +186,53 @@ fn park_encode_offer(
             pending.card_id,
             pending.creatures.clone(),
         );
-        state.push_cipher_encode_frame(crate::types::resolution::PendingCipherEncode {
-            stage: crate::types::resolution::CipherEncodeStage::Armed,
-            ..pending
-        });
-        state.waiting_for = WaitingFor::CipherEncodeChoice {
-            player,
-            card_id,
-            creatures,
-        };
+        // The frame and the prompt it may consume are installed as one step:
+        // a direct-choice owner that is visible with an unrelated `WaitingFor`
+        // is the very state #7470 left behind, and this authority makes the two
+        // unable to disagree.
+        let armed = crate::types::resolution::ResolutionFrame::CipherEncode(
+            crate::types::resolution::PendingCipherEncode {
+                stage: crate::types::resolution::CipherEncodeStage::Armed,
+                ..pending
+            },
+        );
+        if state
+            .install_direct_choice_frame(
+                armed,
+                WaitingFor::CipherEncodeChoice {
+                    player,
+                    card_id,
+                    creatures,
+                },
+            )
+            .is_err()
+        {
+            // Same reasoning as the parked branch below: a refusal means the
+            // stack was already invalid, and the card still has to leave
+            // resolution by a legal route, so the offer completes as a decline
+            // (CR 608.2n) rather than being dropped.
+            handle_encode_choice(state, card_id, None, &mut Vec::new());
+        }
         return;
     }
-    // A live prompt does not always have a frame behind it (a discard choice
-    // does not), so there may be no active child to sit under. With an empty
-    // stack the parked offer is simply the only frame: it owns no prompt while
-    // parked, so it cannot disturb the one that is open.
-    if state.resolution_stack.last().is_none() {
-        state.push_cipher_encode_frame(pending);
-        return;
-    }
+    // Where a prompt-less frame may sit is a property of the stack's shape, not
+    // a guess this caller gets to make: an empty stack (a discard prompt owns no
+    // frame), the ordinary position below the active child, or outside a paused
+    // post-replacement/draw pair whose adjacency `validate` protects. The stack
+    // answers that itself, so no legal shape can refuse the offer.
+    let card_id = pending.card_id;
     if state
-        .insert_cipher_encode_parent_of_active(pending)
+        .park_cipher_encode_beneath_live_prompt(pending)
         .is_err()
     {
-        // Unreachable from a valid stack: the guard above proves an active
-        // child exists, and inserting BELOW the top leaves the top — and so the
-        // live prompt — untouched. Recovering by arming the offer here would
-        // stack a second prompt owner on an already-invalid stack, which is the
-        // very corruption this frame exists to prevent, so the offer is dropped
-        // instead. The card then routes normally on the caller's next pass.
+        // The stack rejected a frame that owns no prompt, which means it was
+        // already invalid before this offer existed. The card must still leave
+        // resolution by one of its two legal routes, so complete the offer the
+        // way a declined one completes (CR 608.2n: the card goes to its owner's
+        // graveyard) instead of dropping it and stranding the card off the
+        // stack. The live prompt is untouched either way — a decline moves a
+        // card, it does not ask a question.
+        handle_encode_choice(state, card_id, None, &mut Vec::new());
     }
 }
 

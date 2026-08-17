@@ -19441,15 +19441,24 @@ impl GameState {
         self.resolution_stack.push_cipher_encode(pending);
     }
 
-    /// CR 702.99a: Park a Cipher encode offer BELOW the direct-choice owner
-    /// that is still holding the spell's own prompt, so the encode arms only
-    /// after that owner is consumed. Mirrors
-    /// [`Self::insert_counter_additions_parent_of_active`].
-    pub fn insert_cipher_encode_parent_of_active(
+    /// CR 702.99a: Park a Cipher encode offer beneath the frame that owns the
+    /// spell's own prompt, so the encode arms only after that owner is
+    /// consumed.
+    ///
+    /// The position is the stack's decision, not this caller's: a parked offer
+    /// owns no prompt while `Parked`, and where such a frame may sit is a
+    /// property of the stack's current shape — see
+    /// [`ParkedFramePlacement`](super::resolution::ParkedFramePlacement). This
+    /// deliberately does NOT go through `InsertParentOfActive`: inserting below
+    /// the top is a structural guess that lands inside a paused
+    /// post-replacement/draw pair, and by the time the resulting `Err` came
+    /// back the caller had already retained its card off the normal resolution
+    /// route.
+    pub fn park_cipher_encode_beneath_live_prompt(
         &mut self,
         pending: super::resolution::PendingCipherEncode,
     ) -> Result<(), ResolutionStackError> {
-        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::ParkBeneathLivePrompt {
             frame: super::resolution::ResolutionFrame::CipherEncode(pending),
         })
         .map(|_| ())
@@ -20310,6 +20319,9 @@ impl GameState {
             ResolvedFrameTransition::Push { frame } => resolution_stack.push_inner(frame.clone()),
             ResolvedFrameTransition::InsertParentOfActive { frame } => {
                 resolution_stack.insert_parent_of_active(frame.clone())?;
+            }
+            ResolvedFrameTransition::ParkBeneathLivePrompt { frame } => {
+                let _ = resolution_stack.park_beneath_live_prompt(frame.clone());
             }
             ResolvedFrameTransition::PopExpected { kind } => {
                 let _ = resolution_stack.pop_expected(*kind)?;
