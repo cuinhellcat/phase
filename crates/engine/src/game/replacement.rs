@@ -14430,7 +14430,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(999),
             controller: owner_controller,
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         }
     }
 
@@ -17708,7 +17708,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
@@ -17735,7 +17735,7 @@ mod tests {
             sacrifice_at: None,
             source_id: chatterfang,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -17807,7 +17807,7 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             }
         }
 
@@ -17941,7 +17941,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let proposed = ProposedEvent::CreateToken {
@@ -18269,7 +18269,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         }
     }
 
@@ -18496,7 +18496,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(1),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let proposed = ProposedEvent::CreateToken {
@@ -19024,7 +19024,7 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             }
         }
 
@@ -19142,7 +19142,7 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             }
         }
 
@@ -19322,7 +19322,7 @@ mod tests {
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
-                attach_to: None,
+                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             }),
             copy: None,
             enter_tapped: EtbTapState::Unspecified,

@@ -357,12 +357,67 @@ pub struct TokenSpec {
     /// creating the token (distinct from `owner`, the player to whom the
     /// token belongs).
     pub controller: PlayerId,
-    /// CR 303.4 + CR 303.7: When the token is an Aura/Role created "attached to" a
-    /// host, the resolved host (object or player). `None` for ordinary tokens.
-    /// Resolved once at propose time so the replacement-safe apply path attaches
-    /// each created token without re-reading ability.targets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_to: Option<AttachTarget>,
+    /// CR 303.4 + CR 303.4i: The token instruction's "attached to …" clause and
+    /// its binding outcome, resolved once at propose time so the
+    /// replacement-safe apply path attaches each created token without
+    /// re-reading `ability.targets`.
+    #[serde(default)]
+    pub attach_to: TokenHostRequest,
+}
+
+/// CR 303.4i: what the token instruction asked for as a host, and whether
+/// anything bound it.
+///
+/// The distinction is load-bearing, which is why it is a type rather than an
+/// `Option<AttachTarget>`: CR 303.4i denies the entry of an Aura token whose
+/// named host is *undefined*, while an ordinary token that never named a host
+/// is created normally. Both were `None` before, so the seam that had to tell
+/// them apart could not. [`TokenHostRequest::Unbound`] is the state that
+/// `None` could not express.
+///
+/// Carried through the CR 614 replacement pipeline rather than consumed before
+/// it: a replacement effect may change the entering token's characteristics,
+/// so whether CR 303.4i applies is a question about the ACTUAL entrant and can
+/// only be answered per token, after replacements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TokenHostRequest {
+    /// The instruction named no host. An ordinary token.
+    #[default]
+    NotRequested,
+    /// The instruction named a host and it resolved to this object or player.
+    /// Whether that host can legally be enchanted is a separate question,
+    /// owned by `effects::attach`.
+    Bound(AttachTarget),
+    /// CR 303.4i: the instruction named a host and nothing bound it — the host
+    /// is undefined.
+    Unbound,
+}
+
+impl TokenHostRequest {
+    /// The resolved host, if one bound. `None` for both of the other states —
+    /// use the variant itself when the difference matters.
+    pub fn bound(self) -> Option<AttachTarget> {
+        match self {
+            Self::Bound(target) => Some(target),
+            Self::NotRequested | Self::Unbound => None,
+        }
+    }
+
+    /// Did the instruction name a host at all?
+    pub fn is_requested(self) -> bool {
+        !matches!(self, Self::NotRequested)
+    }
+
+    /// Build the request from a named-host flag and its binding outcome. The
+    /// single place the three states are derived, so no caller re-encodes the
+    /// mapping.
+    pub fn from_binding(named: bool, bound: Option<AttachTarget>) -> Self {
+        match (named, bound) {
+            (_, Some(target)) => Self::Bound(target),
+            (true, None) => Self::Unbound,
+            (false, None) => Self::NotRequested,
+        }
+    }
 }
 
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same

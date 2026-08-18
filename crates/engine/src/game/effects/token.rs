@@ -27,7 +27,7 @@ use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
+use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenHostRequest, TokenSpec};
 use crate::types::resolved_commands::{
     ResolvedCopyBodyModifications, ResolvedTokenBody, ResolvedTokenCreationCommand,
     ResolvedTokenCreationReplayInvariantError,
@@ -539,9 +539,16 @@ pub fn resolve(
     // CR 303.4 + CR 303.4i: Resolve the specified Aura/Role host once, at propose
     // time. ParentTarget reads the first Object target (the for-each loop's
     // per-iteration rebind binds it); Typed/event-context filters resolve via the
-    // shared target/event-context path. `None` for ordinary (unattached) tokens.
-    let attach_target: Option<AttachTarget> =
-        attach_to.and_then(|f| resolve_attach_host(state, ability, f));
+    // shared target/event-context path.
+    //
+    // The result keeps "the instruction named no host" apart from "it named one
+    // and nothing bound it": CR 303.4i denies the entry of an Aura token in the
+    // second case and says nothing about the first, and the seam that applies
+    // that verdict runs after the CR 614 replacement pipeline, far from here.
+    let host_request = TokenHostRequest::from_binding(
+        attach_to.is_some(),
+        attach_to.and_then(|f| resolve_attach_host(state, ability, f)),
+    );
 
     // CR 111.1 + CR 111.4: Resolve the token's characteristics into a
     // self-describing `TokenSpec`. Script-name parsing takes precedence;
@@ -570,9 +577,6 @@ pub fn resolve(
         })
         .collect();
 
-    // CR 303.4i: read the host-binding outcome before the spec consumes it.
-    let host_named_but_unbound = attach_to.is_some() && attach_target.is_none();
-
     let spec = build_token_spec(
         &script_name,
         parsed.as_ref(),
@@ -582,39 +586,10 @@ pub fn resolve(
         enters_attacking,
         token_statics,
         resolved_etb_counters,
-        attach_target,
+        host_request,
         ability,
         state,
     );
-
-    // CR 303.4i: "If an effect attempts to put an Aura onto the battlefield
-    // attached to … an object or player that is undefined, the Aura remains in
-    // its current zone. … If the Aura is a token, it isn't created."
-    //
-    // The instruction NAMED a host (`attach_to` is set) and nothing bound it, so
-    // the host is undefined and the token is not created — no propose, no
-    // replacement pipeline, no enters-the-battlefield triggers. Until now the
-    // token was created hostless and the CR 704.5m state-based action swept it
-    // into a graveyard, which is observably different: the token existed for a
-    // beat, fired ETB triggers, and left a graveyard entry (#7302).
-    //
-    // Gated on the RESOLVED spec's subtypes rather than the effect's `types`, so
-    // a named token script ("Cursed Role") is covered the same as a typed
-    // `Effect::Token`. A token with no `attach_to` at all is an ordinary token
-    // and is untouched; so is an Aura token whose host bound successfully.
-    //
-    // Not covered here: a host that is DEFINED but cannot legally be enchanted
-    // (CR 303.4i's other half). Host legality is owned by `attach::attach_to` /
-    // `attach::attach_to_player`, and routing that verdict back to this
-    // pre-propose gate is a separate change.
-    if host_named_but_unbound && spec_is_aura(&spec) {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
 
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
@@ -673,16 +648,6 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 205.3h: Is this token an Aura? Aura is an enchantment SUBTYPE, so the
-/// question is answered off the resolved characteristics — the one place a
-/// script-named token ("Cursed Role") and a typed `Effect::Token` agree.
-fn spec_is_aura(spec: &crate::types::proposed_event::TokenSpec) -> bool {
-    spec.characteristics
-        .subtypes
-        .iter()
-        .any(|subtype| subtype.eq_ignore_ascii_case("aura"))
-}
-
 /// CR 111.1 + CR 111.4 + CR 111.10: Build the resolved `TokenSpec` for a
 /// token creation event, combining parsed script attributes with typed
 /// `Effect::Token` fallback fields and ability context (source/controller/
@@ -697,7 +662,7 @@ fn build_token_spec(
     enters_attacking: bool,
     static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
-    attach_to: Option<AttachTarget>,
+    attach_to: TokenHostRequest,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> TokenSpec {
@@ -799,6 +764,60 @@ fn intrinsic_equip_abilities_from_token_statics(
 /// creation, etc.) through the same code path.
 ///
 /// `event` must be a `ProposedEvent::CreateToken`; other variants are no-ops.
+/// CR 303.4i: does the rule deny this entrant's battlefield entry?
+///
+/// > If an effect attempts to put an Aura onto the battlefield attached to
+/// > either an object or player it can't legally enchant or an object or player
+/// > that is undefined, … If the Aura is a token, it isn't created.
+///
+/// Asked per token and on the ACTUAL entrant, after the CR 614 replacement
+/// pipeline has settled its characteristics: a replacement effect may create
+/// something other than the Aura the instruction described, and CR 303.4i is a
+/// question about what is entering rather than about what was announced.
+///
+/// Both halves are answered by the authority that already owns them —
+/// [`attach::authority_is_aura`] for Aura-ness (CR 205.1a: a copy exception can
+/// add or remove the subtype, so it reads characteristics, not the effect's
+/// `types`), and [`attach::can_attach_to_object`] / [`attach::can_attach_to_player`]
+/// for "can't legally enchant". That second pair is the SAME verdict
+/// `attach::attach_to` consumes a few lines later, so the gate and the
+/// attachment can never disagree about one host.
+///
+/// [`attach::authority_is_aura`]: super::attach::authority_is_aura
+/// [`attach::can_attach_to_object`]: super::attach::can_attach_to_object
+/// [`attach::can_attach_to_player`]: super::attach::can_attach_to_player
+fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHostRequest) -> bool {
+    // CR 303.4h: "If an effect attempts to put a permanent that isn't an Aura,
+    // Equipment, or Fortification onto the battlefield attached to an object or
+    // player, it enters the battlefield unattached." It is created either way,
+    // so CR 303.4i is not its rule.
+    if !super::attach::authority_is_aura(state, entrant, super::attach::AttachmentAuthority::Stored)
+    {
+        return false;
+    }
+    match host {
+        // CR 303.4f — an Aura entering with no effect-specified host has its
+        // controller choose one — is a different rule with a different
+        // disposition (a choice, not a denial). Its consult belongs to the entry
+        // pipeline (`zone_pipeline::entering_aura_hosts`), which the liminal and
+        // copy token seams reach and this one does not — a stated gap, not an
+        // oversight. Measured over the shipped pool: every Aura-typed token spec
+        // names a host, so no card reaches this arm today.
+        TokenHostRequest::NotRequested => false,
+        // CR 303.4i, "undefined": the instruction named a host and nothing bound
+        // it — the shape #7302 reported.
+        TokenHostRequest::Unbound => true,
+        // CR 303.4i, "can't legally enchant": the host is defined, so the
+        // question is legality, and legality is `attach`'s to answer.
+        TokenHostRequest::Bound(AttachTarget::Object(host_id)) => {
+            !super::attach::can_attach_to_object(state, entrant, host_id)
+        }
+        TokenHostRequest::Bound(AttachTarget::Player(host_player)) => {
+            !super::attach::can_attach_to_player(state, entrant, host_player)
+        }
+    }
+}
+
 pub fn apply_create_token_after_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -888,6 +907,28 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             ObjectIncarnationRef::from_object(obj)
         });
 
+        // CR 303.4i: settle whether this entrant is created at all, BEFORE the
+        // CR 733 birth is journaled (the journal is append-only — a birth
+        // recorded here could not be retracted) and before anything the game can
+        // observe is emitted. Same decide/act split as the copy seam in
+        // `token_copy.rs` and the liminal seam in
+        // `commit_liminal_token_entry_with_post_actions`.
+        //
+        // Everything done so far for this token is silent: `zones::create_object`
+        // inserts and zones the object without an event, and
+        // `materialize_token_spec_body` only fills it in. `uncreate_unentered_
+        // aura_token` undoes exactly that pair, so a denied entry leaves no
+        // `TokenCreated`, no `ZoneChanged`, no birth record, no `created_ids`
+        // row, and nothing in any graveyard. The loop goes on to the next token
+        // of the count; the tail's `last_created_token_ids = created_ids` then
+        // publishes only the tokens that were actually created, so a later
+        // `TargetFilter::LastCreated` cannot read a denied one — or, when the
+        // whole batch is denied, an earlier unrelated batch.
+        if aura_token_entry_denied(state, obj_id, spec.attach_to) {
+            uncreate_unentered_aura_token(state, obj_id, owner);
+            continue;
+        }
+
         // CR 733: journal the settled creation, after the body borrow ends.
         // Counters, the attacking entry, and any later status change journal
         // through their OWN families, so this command covers the birth only.
@@ -949,7 +990,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
                     PendingCounterPostAction::FinalizeTokenEntry {
                         object_id: obj_id,
                         name: spec.characteristics.display_name.clone(),
-                        attach_to: spec.attach_to,
+                        attach_to: spec.attach_to.bound(),
                         sacrifice_at: spec.sacrifice_at.clone(),
                         source_id: spec.source_id,
                         controller: spec.controller,
@@ -996,21 +1037,21 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // `push_committed_token_entry_events` below — recording it here too double-counts.
         crate::game::restrictions::record_token_created(state, obj_id);
 
-        // CR 303.4 + CR 303.7: A Role/Aura token created "attached to" a host
-        // enters attached. If no legal host was bound, the token is created
-        // unattached and the SBA at CR 704.5m (an Aura not attached to an object
-        // or player is put into its owner's graveyard) removes it; for multiple
-        // same-controller Roles on one host, CR 704.5y keeps only the
-        // latest-timestamp Role. (CR 303.4i's strict "the token isn't created"
-        // outcome is approximated by this create-then-SBA path.) Single
-        // authority: effects::attach.
-        if let Some(host) = &spec.attach_to {
+        // CR 303.4: A Role/Aura token created "attached to" a host enters
+        // attached. The ACT half of the CR 303.4i split above: an Aura whose
+        // host is undefined or illegal never reaches this line, so this is an
+        // attachment that the gate has already found legal, not an attempt.
+        // CR 303.4h keeps the other class here — a non-Aura token named a host
+        // too, and if that host is illegal it simply enters unattached. For
+        // multiple same-controller Roles on one host, CR 704.5z keeps only the
+        // latest-timestamp Role. Single authority: effects::attach.
+        if let Some(host) = spec.attach_to.bound() {
             match host {
                 AttachTarget::Object(id) => {
-                    super::attach::attach_to(state, obj_id, *id);
+                    super::attach::attach_to(state, obj_id, id);
                 }
                 AttachTarget::Player(pid) => {
-                    super::attach::attach_to_player(state, obj_id, *pid);
+                    super::attach::attach_to_player(state, obj_id, pid);
                 }
             }
         }
@@ -2378,7 +2419,8 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
     spec.enter_with_counters.is_empty() // no CounterAdded event / AddCounter replacement
         && !spec.enters_attacking // no combat-state mutation (CR 508.4)
         && spec.sacrifice_at.is_none() // no delayed trigger (CR 603.7)
-        && spec.attach_to.is_none() // no host attachment mutation (CR 303.4)
+        // no host attachment mutation and no CR 303.4i entry verdict to reach
+        && !spec.attach_to.is_requested()
 }
 
 /// CR 603.6a + CR 111.1: The set of event keys a single produced token EMITS as
@@ -2885,7 +2927,7 @@ pub(crate) fn copy_probe_spec_for(
         sacrifice_at,
         source_id,
         controller,
-        attach_to: None,
+        attach_to: TokenHostRequest::NotRequested,
     }
 }
 
@@ -2966,9 +3008,12 @@ pub(crate) fn resolve_token_spec(
 
     let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
     let token_owner = resolve_token_owner(state, ability, owner);
-    let attach_target = attach_to
-        .as_ref()
-        .and_then(|f| resolve_attach_host(state, ability, f));
+    let host_request = TokenHostRequest::from_binding(
+        attach_to.is_some(),
+        attach_to
+            .as_ref()
+            .and_then(|f| resolve_attach_host(state, ability, f)),
+    );
 
     let parsed = parse_token_script(name).or_else(|| {
         build_token_attrs_from_effect(
@@ -2993,7 +3038,7 @@ pub(crate) fn resolve_token_spec(
         *enters_attacking,
         static_abilities.clone(),
         resolved_etb_counters,
-        attach_target,
+        host_request,
         ability,
         state,
     );
@@ -6234,7 +6279,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6313,7 +6358,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6382,7 +6427,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6460,7 +6505,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6650,7 +6695,7 @@ mod tests {
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -7211,7 +7256,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -7276,7 +7321,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -7344,7 +7389,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(101),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -7419,7 +7464,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(102),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {
@@ -7473,7 +7518,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let event = ProposedEvent::CreateToken {

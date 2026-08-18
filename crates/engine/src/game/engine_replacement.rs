@@ -4458,7 +4458,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
 
         let battlefield_before = state.battlefield.clone();
@@ -4583,7 +4583,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -4741,7 +4741,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -4916,7 +4916,7 @@ mod tests {
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 
@@ -5070,7 +5070,7 @@ mod tests {
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let applied = state
             .post_replacement_token_choice_applied
@@ -5207,7 +5207,7 @@ mod tests {
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let battlefield_before = state.battlefield.clone();
 

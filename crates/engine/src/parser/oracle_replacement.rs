@@ -9605,7 +9605,7 @@ fn token_description_to_spec(
         controller: crate::types::player::PlayerId(0),
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
-        attach_to: None,
+        attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
     })
 }
 

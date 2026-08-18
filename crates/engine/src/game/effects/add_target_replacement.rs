@@ -954,7 +954,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(50),
             controller: PlayerId(1),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(1),
@@ -1048,7 +1048,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(70),
             controller: PlayerId(1),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(1),
@@ -1132,7 +1132,7 @@ mod tests {
             sacrifice_at: None,
             source_id: ObjectId(60),
             controller: PlayerId(0),
-            attach_to: None,
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
