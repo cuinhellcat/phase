@@ -1,4 +1,4 @@
-//! CR 602.2b + CR 118.3: a `"Tap another untapped … you control"` activation
+//! CR 602.2b + CR 601.2h + CR 118.3: a `"Tap another untapped … you control"` activation
 //! cost excludes the ability's own source (#7522).
 //!
 //! Spire Mechcycle's exhaust cost reads "Tap another untapped Mount or Vehicle
@@ -24,6 +24,7 @@
 //! because `GameScenario` has no helper that stamps a Vehicle subtype.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{AbilityCost, Effect};
 use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -32,7 +33,7 @@ use engine::types::phase::Phase;
 const ANOTHER: &str =
     "Tap another untapped creature you control: This creature gains indestructible until end of turn.";
 
-/// CR 601.2b counter-direction: no "another", so the source IS eligible.
+/// Counter-direction: no "another", so the source remains eligible.
 const PLAIN: &str =
     "Tap an untapped creature you control: This creature gains indestructible until end of turn.";
 
@@ -68,15 +69,29 @@ fn offers_activation(runner: &GameRunner, source: ObjectId) -> bool {
 /// The defect: alone on the battlefield, the source matched its own cost filter
 /// and the ability was offered — it would have paid by tapping itself.
 ///
-/// The negative assertion is not vacuous: `a_plain_tap_cost_still_includes_the_source`
-/// runs the IDENTICAL board with the article form and finds the ability offered,
-/// so an unreachable-ability setup would fail there.
+/// The reach guards below prove that ability 0 was published as a concrete
+/// `TapCreatures` cost. Without them, a parser failure could make both negative
+/// assertions pass without exercising the source-exclusion behavior.
 ///
 /// Reverting the fix flips this test to red: `assert!(!offers_activation(…))`
 /// fails, and the `Err` expectation below becomes `Ok`.
 #[test]
 fn the_source_alone_cannot_pay_its_own_tap_another_cost() {
     let (mut runner, source, _) = board(ANOTHER, 0);
+    let ability = runner.state().objects[&source]
+        .abilities
+        .first()
+        .expect("the source must publish ability 0");
+    assert!(
+        matches!(&ability.cost, Some(AbilityCost::TapCreatures { .. })),
+        "ability 0 must publish a TapCreatures cost, got {:?}",
+        ability.cost
+    );
+    assert!(
+        !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+        "ability 0 must not lower to Effect::Unimplemented, got {:?}",
+        ability.effect
+    );
     assert!(
         !offers_activation(&runner, source),
         "a lone source must not be offered its own \"tap another untapped creature\" ability"
@@ -114,14 +129,13 @@ fn a_second_untapped_creature_pays_the_tap_another_cost() {
     );
 }
 
-/// CR 601.2b: a standalone `TapCreatures` cost with no "another" DOES include
-/// the source. This is the behaviour the fix must not break — and it is the
-/// reach guard for the negative assertion in the first test.
+/// A standalone `TapCreatures` cost with no "another" includes the source.
+/// This is the behaviour the fix must not break.
 #[test]
 fn a_plain_tap_cost_still_includes_the_source() {
     let (runner, source, _) = board(PLAIN, 0);
     assert!(
         offers_activation(&runner, source),
-        "\"tap an untapped creature you control\" is payable by the source itself (CR 601.2b)"
+        "\"tap an untapped creature you control\" is payable by the source itself"
     );
 }

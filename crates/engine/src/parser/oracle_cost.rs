@@ -2357,15 +2357,15 @@ mod tests {
         );
     }
 
-    /// CR 602.2b + CR 118.3: the source-exclusion "another" in a
+    /// CR 602.2b + CR 601.2h + CR 118.3: the source-exclusion "another" in a
     /// `TapCreatures` activation cost must survive into the cost filter, so the
     /// ability's source cannot pay an activation cost that requires another
     /// untapped creature (Spire Mechcycle, #7522).
     ///
     /// Table-driven over the printed shapes the tap-cost grammar distinguishes,
     /// with both counter-directions: an ordinary article and a plain numeric
-    /// count must NOT gain the exclusion (CR 601.2b — a standalone tap cost
-    /// with no "another" does include the source).
+    /// count must NOT gain the exclusion (a standalone tap cost with no
+    /// "another" does include the source).
     ///
     /// The "two other untapped" row was already green before this fix: the
     /// numeric branch never consumes "other", so the phrase reaches
