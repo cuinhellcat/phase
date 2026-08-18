@@ -1768,7 +1768,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(TriggerBody::Reflexive(reflexive)) => {
             let reflexive_owns_die_results =
                 effect_chain_has_terminal_roll_die(&reflexive.effect_chain);
-            let (reflexive_die_results, parent_die_results) = if reflexive_owns_die_results {
+            let (reflexive_die_results, parent_die_results): (
+                &[DieResultBranchIr],
+                &[DieResultBranchIr],
+            ) = if reflexive_owns_die_results {
                 (ir.die_results.as_slice(), &[])
             } else {
                 (&[], ir.die_results.as_slice())
