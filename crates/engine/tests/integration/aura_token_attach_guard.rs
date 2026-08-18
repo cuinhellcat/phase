@@ -279,6 +279,11 @@ fn an_aura_token_with_an_unbound_host_is_not_created() {
         tokens_named(&board, "Role").is_empty(),
         "CR 303.4i: an Aura token with an undefined host is not created, in any zone"
     );
+    assert!(
+        board.runner.state().last_created_token_ids.is_empty(),
+        "CR 303.4i: an entry the rule denies leaves no created-token row behind, got {:?}",
+        board.runner.state().last_created_token_ids
+    );
 }
 
 /// Positive counter-direction at the seam: a bound host still creates the token

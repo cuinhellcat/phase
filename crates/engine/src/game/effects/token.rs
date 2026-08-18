@@ -1604,7 +1604,8 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     )
 }
 
-/// CR 303.4g: undo a token battlefield entry that CR 303.4g says never happened.
+/// CR 303.4g / CR 303.4i: undo a token battlefield entry the Aura-entry rules
+/// say was never created.
 ///
 /// The ONLY unhosted-entry disposition the liminal seam has, because the only
 /// entrant that seam can hold is a [`crate::types::game_state::TokenProjection`]
@@ -1628,13 +1629,13 @@ pub(crate) fn uncreate_unentered_aura_token(
     // (`scripts/zone_authority_census.py::census_file`), so the rationale is
     // stated once here and the annotation itself is the one-liner below.
     //
-    // This is the un-entry of a token that CR 303.4g says was never created, not
-    // a CR 400.7 zone change: there is no from-zone, no destination zone, and
-    // nothing may observe it — the whole point is that no `ZoneChanged`,
+    // This is the un-entry of a token that CR 303.4g or CR 303.4i says was never
+    // created, not a CR 400.7 zone change: there is no from-zone, no destination
+    // zone, and nothing may observe it — the whole point is that no `ZoneChanged`,
     // `TokenCreated`, or CR 733 birth record is produced for an entry the rules
     // deny. Routing it through `zone_pipeline` would manufacture exactly the
     // observable event this arm exists to suppress.
-    // allow-raw-zone: undoes a CR 303.4g-denied token entry; not a CR 400.7 zone change, so no ZoneChanged may be emitted.
+    // allow-raw-zone: undoes a CR 303.4g/CR 303.4i-denied token entry; not a CR 400.7 zone change, so no ZoneChanged may be emitted.
     zones::remove_from_zone(state, object_id, Zone::Battlefield, owner);
     state.objects.remove(&object_id);
 }

@@ -361,7 +361,7 @@ pub struct TokenSpec {
     /// its binding outcome, resolved once at propose time so the
     /// replacement-safe apply path attaches each created token without
     /// re-reading `ability.targets`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
     pub attach_to: TokenHostRequest,
 }
 
@@ -394,6 +394,12 @@ pub enum TokenHostRequest {
 }
 
 impl TokenHostRequest {
+    /// Whether the instruction named no host. Keeping this default omitted
+    /// preserves the existing wire shape for ordinary token creation events.
+    pub fn is_not_requested(&self) -> bool {
+        matches!(self, Self::NotRequested)
+    }
+
     /// The resolved host, if one bound. `None` for both of the other states —
     /// use the variant itself when the difference matters.
     pub fn bound(self) -> Option<AttachTarget> {

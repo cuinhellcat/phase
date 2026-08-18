@@ -464,22 +464,16 @@ fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
 /// spelling over the whole string separately would let a later "attached to"
 /// beat an earlier "and attach it to".
 fn first_token_attachment_connector(lower: &str) -> Option<&'static str> {
-    let mut rest = lower;
-    while !rest.is_empty() {
-        if let Ok((_, connector)) = alt((
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
             value(
                 " and attach it to ",
-                tag::<_, _, OracleError<'_>>(" and attach it to "),
+                tag::<_, _, OracleError<'_>>("and attach it to "),
             ),
-            value(" attached to ", tag(" attached to ")),
+            value(" attached to ", tag("attached to ")),
         ))
-        .parse(rest)
-        {
-            return Some(connector);
-        }
-        rest = &rest[rest.chars().next().map_or(1, char::len_utf8)..];
-    }
-    None
+        .parse(input)
+    })
 }
 
 fn parse_token_description_with_context(
