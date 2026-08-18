@@ -563,12 +563,18 @@ impl Default for PolicyPenalties {
             gift_treasure_penalty: -1.5,
             gift_food_penalty: -1.0,
             gift_fish_penalty: -0.5,
-            // Placed an order of magnitude below the card gift rather than
-            // calibrated: an extra turn is the largest downside in the family by
-            // a wide margin (a whole untapping, draw and attack step for the
-            // opponent), and a single shipped card promises it. A tuned value
-            // needs a paired-seed `ai-gate` report, which this rules fix is not.
-            gift_extra_turn_penalty: -30.0,
+            // The worst gift in the family — a whole untapping, draw and
+            // attack step for the opponent — but bounded by the POLICY'S OWN
+            // band rather than by that judgement. `DownsideAwarenessPolicy`
+            // doubles the penalty on the pure-downside branch and
+            // `PolicyVerdict::score` clamps at `CRITICAL_MAX` (15.0), so any seed
+            // past 7.5 saturates the doubled value and the two branches score
+            // identically — erasing the distinction the doubling exists to draw.
+            // -7.0 keeps both apart (-7.0 / -14.0), above the card gift
+            // (-3.0 / -6.0) and under the ceiling. The true weight awaits a
+            // paired-seed `ai-gate` calibration; see
+            // `UNTUNED_POLICY_PENALTY_FIELDS`.
+            gift_extra_turn_penalty: -7.0,
             worthy_target_threshold: 3.0,
             overkill_base_penalty: -2.0,
             removal_quality_mismatch: -1.5,
@@ -916,8 +922,9 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "gift_extra_turn_penalty",
         "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
-         seeded an order of magnitude below the card gift and awaiting a paired-seed \
-         ai-gate calibration.",
+         seeded at the largest value the downside policy's band admits without its \
+         pure-downside doubling saturating, and awaiting a paired-seed ai-gate \
+         calibration.",
     ),
     (
         "devotion_pip_progress",
