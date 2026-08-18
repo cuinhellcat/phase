@@ -145,11 +145,13 @@ describe("StackEntry", () => {
   });
 
   it("labels a sourceless rule ability with the engine's name and invents nothing", () => {
-    // CR 113.8's four exceptions (CR 725.2 monarch, CR 726.2 initiative,
-    // CR 728.1 rad counters, CR 702.179d speed) mint abilities with NO source
-    // object, so `objects` holds nothing for this entry. The name has to come
-    // off the wire — this line used to fall through to a literal "Unknown",
-    // which is game-facing text no rule produces.
+    // CR 113.7 defines an ability's source; the rules for these engine-modeled
+    // inherent abilities (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad
+    // counters, CR 702.179d speed) give them none. CR 113.8 instead defines an
+    // ability's controller, and CR 901.8 separately does the same for
+    // Planechase's planeswalking ability. `objects` holds nothing for this
+    // entry, so the name has to come off the wire — this line used to fall
+    // through to a literal "Unknown", which is game-facing text no rule produces.
     const entry: StackEntryType = buildStackEntry({
       id: 91,
       source_id: 0,

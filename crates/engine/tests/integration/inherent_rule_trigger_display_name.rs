@@ -1,9 +1,12 @@
-//! CR 113.8 exception: the inherent triggered abilities have NO source object.
+//! CR 113.7 defines an ability's source; these inherent triggered abilities have
+//! no source object by their own rules.
 //!
 //! CR 725.2 (monarch), CR 726.2 (initiative), CR 728.1 (rad counters) and
 //! CR 702.179d (speed) each say so in the same words — "these triggered
-//! abilities have no source". The engine models that faithfully by pushing them
-//! with `ObjectId(0)`, which resolves to no `GameObject`.
+//! abilities have no source". CR 113.8 instead defines an ability's controller;
+//! CR 901.8 separately gives Planechase's planeswalking ability no source. The
+//! engine models these four constructed triggers with `ObjectId(0)`, which
+//! resolves to no `GameObject`.
 //!
 //! The consequence is a display hole, not a rules hole: `StackEntryKind::
 //! TriggeredAbility::source_name` is filled by looking `source_id` up in the

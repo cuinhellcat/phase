@@ -74,9 +74,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // a captured name.
   //
   // There is deliberately NO last-resort literal here. This line used to end in
-  // `|| "Unknown"` for the abilities CR 113.8's four exceptions mint with no
-  // source object at all (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad
-  // counters, CR 702.179d speed) — but "Unknown" is game-facing text no rule
+  // `|| "Unknown"` for the rule-defined sourceless abilities this engine
+  // constructs (CR 725.2 monarch, CR 726.2 initiative, CR 728.1 rad counters,
+  // and CR 702.179d speed). CR 113.7 defines an ability's source; CR 113.8
+  // instead defines its controller. (CR 901.8 separately gives Planechase's
+  // planeswalking ability no source.) "Unknown" is game-facing text no rule
   // ever produced, invented by the display layer because the wire carried
   // nothing. The engine names those abilities now, so the invention has nothing
   // left to cover; if a name is ever missing again, an empty label is the honest

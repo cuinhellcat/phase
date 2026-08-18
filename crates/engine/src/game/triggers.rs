@@ -6894,11 +6894,13 @@ pub fn drain_order_triggers_with_identity(
 /// Returns `None` if every group is `ordered` (caller should dispatch).
 /// The name a viewer shows for a triggered ability's source.
 ///
-/// CR 113.8 says an ability's source is the object it exists on. Four rules make
-/// an explicit exception and mint abilities with NO source: CR 725.2 (the
-/// monarch), CR 726.2 (the initiative), CR 728.1 (rad counters) and CR 702.179d
-/// (speed) each spell it out — "this ability has no source". The engine models
-/// that faithfully, which leaves the wire with nothing to name.
+/// CR 113.7 defines an ability's source as the object that generated it; CR
+/// 113.8 instead defines an ability's controller. The inherent ability rules
+/// modeled here directly make four abilities sourceless: CR 725.2 (the monarch),
+/// CR 726.2 (the initiative), CR 728.1 (rad counters), and CR 702.179d (speed).
+/// CR 901.8 separately makes Planechase's planeswalking ability sourceless. The
+/// engine models the four triggers here faithfully, which leaves the wire with
+/// nothing to name.
 ///
 /// A sourceless ability names itself: the rule that mints it IS its identity,
 /// which is what `description` already carries — the same short label
@@ -7480,10 +7482,11 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     // "From <name>" without rebinding an old trigger to a reused id.
     let source_name =
         trigger_source_display_name(state, source_id, &ability, description.as_deref());
-    // CR 113.8's four exceptions (CR 725.2 monarch, CR 726.2 initiative,
-    // CR 728.1 rad counters, CR 702.179d speed) are the abilities with NO source
-    // object, and the engine spells that out with the `ObjectId(0)` no-source
-    // sentinel. A viewer cannot dereference that sentinel, so such an entry MUST
+    // The four source-less inherent triggers constructed here (CR 725.2 monarch,
+    // CR 726.2 initiative, CR 728.1 rad counters, CR 702.179d speed) use the
+    // `ObjectId(0)` no-source sentinel. CR 113.7 governs source; CR 113.8 governs
+    // controller, while CR 901.8 separately makes the planeswalking ability
+    // sourceless. A viewer cannot dereference the sentinel, so such an entry MUST
     // carry its own name or the display layer is left to invent one.
     //
     // Keyed on the sentinel rather than on a list of the four rules, so a fifth
@@ -7498,8 +7501,8 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     // where the id exists — so neither is this defect. See the PR's open-gap note.
     debug_assert!(
         source_id != ObjectId(0) || !source_name.is_empty(),
-        "a sourceless rule ability must carry its own name — CR 113.8's \
-         exceptions have no object for the display layer to read one from"
+        "a source-less rule ability must carry its own name — the display layer \
+         has no object from which to read one"
     );
     let crime_candidate = super::casting::targets_commit_crime(
         state,
