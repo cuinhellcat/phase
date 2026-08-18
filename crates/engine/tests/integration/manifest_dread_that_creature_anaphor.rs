@@ -193,3 +193,89 @@ fn a_plain_manifest_puts_its_counter_on_the_manifested_creature() {
         "the +1/+1 counter belongs on the manifested creature, not on the sorcery"
     );
 }
+
+/// The bare object pronoun is NOT re-routed. "…then attach this Equipment to
+/// **it**" keeps the binding its own subject-aware authority
+/// (`attach_neuter_recipient_resolves_via_subject`) gives it, which for this
+/// shape is `SelfRef` — Cryptic Coat prints exactly this line after a cloak.
+///
+/// The demonstrative-only entry point is what makes that true: routing bare "it"
+/// through the chain-created binding as well would change attachment for chains
+/// that have nothing to do with a chain-created referent.
+#[test]
+fn the_bare_pronoun_recipient_is_left_to_its_own_authority() {
+    let parsed = engine::parser::parse_oracle_text(
+        "When this Equipment enters, manifest dread, then attach this Equipment to it.",
+        "Bare Pronoun Coat",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    let attach = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("the attach clause is the producer's continuation");
+    assert!(
+        matches!(
+            &*attach.effect,
+            engine::types::ability::Effect::Attach {
+                target: engine::types::ability::TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "bare \"it\" must keep its pre-existing binding, got {:?}",
+        attach.effect
+    );
+}
+
+/// CR 603.12 + CR 608.2c: a face-down producer under an AFFIRMATIVE reflexive
+/// gate seeds the referent, and its consumer must stay inside the gated
+/// instruction — carrying the same condition — rather than becoming an
+/// independent sibling that reads the game-lifetime `last_created_token_ids`
+/// ledger when the gate is false.
+///
+/// This is the shape the widened producer predicate has to cover: seeding
+/// (`chain_prior_referent_is_created_token`), gated relinking
+/// (`relink_gated_token_referent_consumers`) and clone transplanting
+/// (`clone_would_transplant_gated_referent`) now ask one question, so a gated
+/// manifest cannot seed a referent that the relink pass then declines to protect.
+#[test]
+fn a_gated_face_down_producer_keeps_its_consumer_under_the_gate() {
+    let parsed = engine::parser::parse_oracle_text(
+        "When this Equipment enters, you may pay {1}. If you do, manifest dread, then attach this Equipment to that creature.",
+        "Gated Machete",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    let producer = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("the gated manifest dread is the payment's continuation");
+    assert!(
+        producer.condition.is_some(),
+        "the producer must carry the reflexive gate, got {:?}",
+        producer.condition
+    );
+    let attach = producer
+        .sub_ability
+        .as_deref()
+        .expect("the attach clause must sit INSIDE the gated instruction");
+    assert!(
+        matches!(
+            &*attach.effect,
+            engine::types::ability::Effect::Attach {
+                target: engine::types::ability::TargetFilter::LastCreated,
+                ..
+            }
+        ),
+        "the gated producer's consumer binds the chain-created referent, got {:?}",
+        attach.effect
+    );
+    assert_eq!(
+        attach.condition, producer.condition,
+        "and it cannot resolve when the gate is false"
+    );
+}

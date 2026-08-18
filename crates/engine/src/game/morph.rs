@@ -554,13 +554,10 @@ pub fn manifest_card(
         request = request.under_control_of(controller);
     }
     match super::zone_pipeline::move_object(state, request, events) {
-        super::zone_pipeline::ZoneMoveResult::Done => {
-            publish_face_down_entry_referent(state, object_id);
-            Ok(())
-        }
-        // CR 616.1: the entry parked. The object has not entered yet, so it is
-        // not the chain's referent — the resume path is where a publish would
-        // belong, and it is not wired (see `publish_face_down_entry_referent`).
+        // Both arms are silent about the chain referent: the publish lives in
+        // `zone_pipeline::apply_face_down_entry_profile`, which the synchronous
+        // delivery and the CR 616.1 resume both run.
+        super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
     }

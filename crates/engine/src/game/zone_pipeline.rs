@@ -3193,6 +3193,29 @@ pub(crate) fn apply_face_down_entry_profile(
         obj.face_down_cause = Some(profile.cause);
         obj.back_face = Some(original);
     }
+
+    // CR 608.2c: a permanent that just entered the battlefield face down is the
+    // chain's most-recent created referent, so a following "it" / "that
+    // creature" anaphor (`TargetFilter::LastCreated`) binds to it — "manifest
+    // dread, then attach this Equipment to that creature" (#7531).
+    //
+    // Published HERE, in the single helper every face-down entry runs through,
+    // rather than at the producing effects: manifest's synchronous arm, manifest
+    // dread's two-card continuation and the CR 616.1 parked-entry resume all
+    // reach this one line, so a paused entry cannot resume with the referent
+    // unpublished (or with a stale one from an earlier resolution).
+    //
+    // Gated on the object's zone, not on the caller: `casting.rs` runs the same
+    // helper for a face-down CAST, where the object is on the stack and has
+    // produced no permanent to name yet. That is a state question with a state
+    // answer, not a classification of the call site.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+    {
+        crate::game::morph::publish_face_down_entry_referent(state, object_id);
+    }
 }
 
 /// CR 730.3e (second clause) + CR 730.2d + CR 614.6: compute the card-component
@@ -6253,6 +6276,72 @@ mod effect_driven_transformed_entry_tests {
         assert!(
             obj.transformed,
             "CR 712.14a: the DFC must be transformed (back face) after this entry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod face_down_entry_referent_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::FaceDownProfile;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 608.2c: the chain-created referent is published by the ONE helper every
+    /// face-down entry runs through — the synchronous manifest, manifest dread's
+    /// two-card continuation and the CR 616.1 parked-entry resume all reach this
+    /// line, so none of them can leave the referent unpublished (#7531).
+    ///
+    /// What this test proves is the ZONE gate, which is the part that decides
+    /// which callers publish. It does NOT drive a real CR 616.1 pause end to end;
+    /// the manifest-dread integration test covers the continuation arm, and the
+    /// parked arm is covered only by sharing this line.
+    #[test]
+    fn a_battlefield_face_down_entry_publishes_the_chain_referent() {
+        let mut state = GameState::new_two_player(7);
+        let player = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Manifested".to_string(),
+            Zone::Battlefield,
+        );
+        state.last_created_token_ids = vec![ObjectId(999)];
+
+        apply_face_down_entry_profile(&mut state, id, &FaceDownProfile::vanilla_2_2());
+
+        assert_eq!(
+            state.last_created_token_ids,
+            vec![id],
+            "a face-down permanent is the chain's most-recent created referent"
+        );
+    }
+
+    /// The counter-direction that makes the gate load-bearing: `casting.rs` runs
+    /// the same helper for a face-down CAST, where the object is on the STACK and
+    /// has produced no permanent to name. Publishing there would let a later
+    /// `LastCreated` bind a spell.
+    #[test]
+    fn a_face_down_cast_on_the_stack_publishes_nothing() {
+        let mut state = GameState::new_two_player(7);
+        let player = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Morph Spell".to_string(),
+            Zone::Stack,
+        );
+        let before = vec![ObjectId(999)];
+        state.last_created_token_ids = before.clone();
+
+        apply_face_down_entry_profile(&mut state, id, &FaceDownProfile::vanilla_2_2());
+
+        assert_eq!(
+            state.last_created_token_ids, before,
+            "a face-down spell on the stack is not a created permanent"
         );
     }
 }

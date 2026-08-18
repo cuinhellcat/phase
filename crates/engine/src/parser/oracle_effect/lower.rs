@@ -2693,11 +2693,19 @@ pub(super) fn publishes_chain_created_referent(effect: &Effect) -> bool {
 /// without the other re-opens the stale-`LastCreated` bind. The prediction's
 /// blind spot (assembly-time `SequentialSibling` minters) is enumerated on
 /// [`instruction_spine_is_continuation`].
+///
+/// The producer half is [`publishes_chain_created_referent`] — the SAME
+/// predicate `chain_prior_referent_is_created_token` seeds `LastCreated` from,
+/// and the same one `clone_would_transplant_gated_referent` re-asks. Three
+/// passes, one question: a producer that can seed the referent must also be
+/// able to relink its consumer, or a gated face-down producer seeds
+/// `LastCreated` and then leaves the consumer a `SequentialSibling` that reads
+/// the game-lifetime ledger when the gate is false.
 pub(super) fn relink_gated_token_referent_consumers(defs: &mut [AbilityDefinition]) {
     for i in 0..defs.len() {
         let Some(publisher) = defs[..i]
             .iter()
-            .rposition(|d| is_token_creating_effect(&d.effect))
+            .rposition(|d| publishes_chain_created_referent(&d.effect))
         else {
             continue;
         };
@@ -2963,7 +2971,7 @@ pub(super) fn clone_would_transplant_gated_referent(
     }
     let Some(publisher) = defs[..template]
         .iter()
-        .rposition(|d| is_token_creating_effect(&d.effect))
+        .rposition(|d| publishes_chain_created_referent(&d.effect))
     else {
         return false;
     };

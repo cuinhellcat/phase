@@ -1833,15 +1833,7 @@ pub(super) fn handle_resolution_choice(
                 .face_down(face_down),
                 events,
             ) {
-                crate::game::zone_pipeline::ZoneMoveResult::Done => {
-                    // CR 608.2c: the manifested card is the chain's most-recent
-                    // created referent, so a following "that creature" anaphor
-                    // binds to it (Conductive Machete, #7531). Manifest dread's
-                    // count == 1 arm publishes through `morph::manifest_card`;
-                    // this two-card arm moves the chosen card itself, so it
-                    // publishes through the same helper here.
-                    crate::game::morph::publish_face_down_entry_referent(state, manifest_id);
-                }
+                crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                 // CR 303.4f / CR 616.1 + CR 701.62a: the chosen card's manifest
                 // entry paused (aura host pick or a replacement-ordering prompt).
                 // Defer the non-manifested card's graveyard move + reveal-marker
