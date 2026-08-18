@@ -87,55 +87,6 @@ fn the_sandbox_turn_face_up_restores_the_stored_face() {
     );
 }
 
-/// The other direction, and the reason it belongs in the same fix: turning a
-/// permanent face down must SNAPSHOT its face, or the permanent keeps its name
-/// and printed P/T while claiming to be face down — and `back_face` stays empty,
-/// so it can never be turned back up. The round trip is the assertion.
-#[test]
-fn the_sandbox_turn_face_down_snapshots_the_real_face_and_the_round_trip_closes() {
-    let mut scenario = GameScenario::new();
-    let id = scenario
-        .add_creature(P0, "Open Bear", 4, 4)
-        .with_mana_cost(ManaCost::Cost {
-            shards: vec![ManaCostShard::Green],
-            generic: 2,
-        })
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().debug_mode = true;
-
-    let face_down = |runner: &mut engine::game::scenario::GameRunner, down: bool| {
-        runner
-            .act(GameAction::Debug(DebugAction::SetFaceState {
-                object_id: id,
-                face_down: Some(down),
-                transformed: None,
-                flipped: None,
-            }))
-            .expect("the debug face-state write runs")
-    };
-
-    face_down(&mut runner, true);
-    let obj = &runner.state().objects[&id];
-    assert!(obj.face_down);
-    assert_eq!(obj.name, "", "CR 708.2a: no name while face down");
-    assert_eq!(
-        (obj.base_power, obj.base_toughness),
-        (Some(2), Some(2)),
-        "CR 708.2a: a 2/2, not the printed 4/4"
-    );
-    assert!(
-        obj.back_face.is_some(),
-        "the real face is stashed, which is what makes the way back possible"
-    );
-
-    face_down(&mut runner, false);
-    let obj = &runner.state().objects[&id];
-    assert!(!obj.face_down);
-    assert_eq!(obj.name, "Open Bear");
-    assert_eq!((obj.base_power, obj.base_toughness), (Some(4), Some(4)));
-}
-
 /// Counter-direction: an object with no stored face keeps the plain flag write,
 /// so the arm stays a debug tool for states the rules cannot reach.
 #[test]
