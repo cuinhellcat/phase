@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
+import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { ArtCropCard } from "../ArtCropCard.tsx";
 
@@ -276,6 +277,43 @@ describe("ArtCropCard", () => {
     render(<ArtCropCard objectId={101} />);
 
     expect(screen.getByAltText("Hidden Sorcery")).toBeInTheDocument();
+  });
+
+  it("falls back to the card back when face-down marker art fails to load", () => {
+    // ArtCropCard is the default battlefield renderer. Keep its marker failure
+    // path covered separately from CardImage: the component owns its own
+    // artError state and must never leave a face-down permanent as a broken
+    // image when a marker printing is unavailable.
+    mockUseCardImage.mockReturnValue({
+      src: "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+    });
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      face_down_cause: "Manifest" as const,
+      transformed: false,
+      back_face: null,
+      color: [],
+      base_color: [],
+    };
+    useGameStore.setState({
+      gameState: { objects: { [permanent.id]: permanent } } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    const marker = screen.getByAltText("Face-down card");
+    expect(marker).toHaveAttribute(
+      "src",
+      "https://cards.scryfall.io/normal/front/m/a/manifest.jpg",
+    );
+
+    fireEvent.error(marker);
+
+    expect(screen.getByAltText("Face-down card")).toHaveAttribute("src", CARD_BACK_URL);
   });
 
   it("keeps loyalty and P/T readable for planeswalkers and creature planeswalkers", () => {
