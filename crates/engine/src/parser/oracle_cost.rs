@@ -14,7 +14,7 @@ use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_cost_self_reference;
 use super::oracle_static::parse_dynamic_x_clause;
-use super::oracle_target::{parse_target, parse_type_phrase};
+use super::oracle_target::{distribute_shared_properties, parse_target, parse_type_phrase};
 use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
@@ -1081,7 +1081,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
                 let filter = match count_word {
-                    CountWord::SourceExclusion => apply_source_exclusion(filter),
+                    CountWord::SourceExclusion => {
+                        distribute_shared_properties(filter, &[FilterProp::Another])
+                    }
                     CountWord::Plain => filter,
                 };
                 return AbilityCost::TapCreatures {
@@ -1558,38 +1560,7 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
     if !has_another_prefix {
         return filter;
     }
-    apply_source_exclusion(filter)
-}
-
-/// CR 109.4 + CR 701.21a: Put the source exclusion (`FilterProp::Another`) on a
-/// cost filter, distributing it over every leg of an `Or` disjunction.
-///
-/// "Another" means "not this source permanent", so it belongs on each leg the
-/// source's type could match; it is vacuous, never wrong, on a leg the source
-/// cannot match. Marking only the first leg leaves a hole for a source that
-/// matches a later one — Spire Mechcycle is a Vehicle paying "tap another
-/// untapped Mount or Vehicle you control" (#7522), the tap-cost twin of the
-/// sacrifice case in #4513.
-///
-/// The catch-all arm is a mapping, not a classification: the exclusion is a
-/// `TypedFilter` property, and the remaining `TargetFilter` variants
-/// (`SelfRef`, `Any`, zone/player filters, …) carry no property list to put it
-/// on. Callers detect the exclusion word themselves — `parse_oracle_cost`'s tap
-/// branch via a typed `CountWord`, the sacrifice branch via
-/// `ensure_another_sacrifice_filter`'s phrase prefix.
-fn apply_source_exclusion(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(mut typed) => {
-            if !typed.properties.contains(&FilterProp::Another) {
-                typed.properties.push(FilterProp::Another);
-            }
-            TargetFilter::Typed(typed)
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters.into_iter().map(apply_source_exclusion).collect(),
-        },
-        other => other,
-    }
+    distribute_shared_properties(filter, &[FilterProp::Another])
 }
 
 /// CR 117.1 + CR 601.2b + CR 107.4a/107.4e/202.1: Parse Baron Helmut Zemo's
@@ -2386,9 +2357,10 @@ mod tests {
         );
     }
 
-    /// CR 109.4 + CR 701.21a: the source-exclusion "another" in a `TapCreatures`
-    /// activation cost must survive into the cost filter — a permanent may not
-    /// pay its own "tap another untapped …" cost (Spire Mechcycle, #7522).
+    /// CR 602.2b + CR 118.3: the source-exclusion "another" in a
+    /// `TapCreatures` activation cost must survive into the cost filter, so the
+    /// ability's source cannot pay an activation cost that requires another
+    /// untapped creature (Spire Mechcycle, #7522).
     ///
     /// Table-driven over the printed shapes the tap-cost grammar distinguishes,
     /// with both counter-directions: an ordinary article and a plain numeric
@@ -2451,6 +2423,34 @@ mod tests {
                 "every leg must carry the exclusion, got {typed:?}"
             );
         }
+    }
+
+    /// CR 602.2b + CR 118.3: shared source exclusion must flow through the
+    /// `And` shape for "creature you control but don't own" without changing
+    /// the negated ownership leg.
+    #[test]
+    fn tap_cost_another_preserves_exclusion_in_conjunctive_filter() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped creature you control but don't own")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected an And filter, got {filter:?}");
+        };
+        assert!(matches!(
+            filters.first(),
+            Some(TargetFilter::Typed(TypedFilter { properties, .. }))
+                if properties.contains(&FilterProp::Another)
+        ));
+        assert!(matches!(
+            filters.get(1),
+            Some(TargetFilter::Not { filter }) if matches!(
+                filter.as_ref(),
+                TargetFilter::Typed(TypedFilter { properties, .. })
+                    if !properties.contains(&FilterProp::Another)
+            )
+        ));
     }
 
     #[test]

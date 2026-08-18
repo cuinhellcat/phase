@@ -1,5 +1,5 @@
-//! CR 109.4 + CR 601.2b + CR 701.21a: a `"Tap another untapped … you control"`
-//! activation cost excludes the ability's own source (#7522).
+//! CR 602.2b + CR 118.3: a `"Tap another untapped … you control"` activation
+//! cost excludes the ability's own source (#7522).
 //!
 //! Spire Mechcycle's exhaust cost reads "Tap another untapped Mount or Vehicle
 //! you control", and the Mechcycle is itself a Vehicle — before the fix the
@@ -38,16 +38,16 @@ const PLAIN: &str =
 
 /// One creature carrying `oracle` plus `helpers` vanilla untapped creatures,
 /// all controlled by P0, with P0 holding priority in its precombat main phase.
-fn board(oracle: &str, helpers: usize) -> (GameRunner, ObjectId) {
+fn board(oracle: &str, helper_count: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario
         .add_creature_from_oracle(P0, "Tapper", 2, 2, oracle)
         .id();
-    for i in 0..helpers {
-        scenario.add_creature(P0, &format!("Helper {i}"), 1, 1);
-    }
-    (scenario.build(), source)
+    let helpers = (0..helper_count)
+        .map(|i| scenario.add_creature(P0, &format!("Helper {i}"), 1, 1).id())
+        .collect();
+    (scenario.build(), source, helpers)
 }
 
 /// Does the engine offer `source`'s first activated ability right now?
@@ -76,7 +76,7 @@ fn offers_activation(runner: &GameRunner, source: ObjectId) -> bool {
 /// fails, and the `Err` expectation below becomes `Ok`.
 #[test]
 fn the_source_alone_cannot_pay_its_own_tap_another_cost() {
-    let (mut runner, source) = board(ANOTHER, 0);
+    let (mut runner, source, _) = board(ANOTHER, 0);
     assert!(
         !offers_activation(&runner, source),
         "a lone source must not be offered its own \"tap another untapped creature\" ability"
@@ -97,10 +97,20 @@ fn the_source_alone_cannot_pay_its_own_tap_another_cost() {
 /// expensive collateral of a self-exclusion fix.
 #[test]
 fn a_second_untapped_creature_pays_the_tap_another_cost() {
-    let (runner, source) = board(ANOTHER, 1);
+    let (mut runner, source, helpers) = board(ANOTHER, 1);
     assert!(
         offers_activation(&runner, source),
         "another untapped creature makes the cost payable"
+    );
+    let helper = helpers[0];
+    runner.activate(source, 0).pay_with(&[helper]).resolve();
+    assert!(
+        runner.state().objects[&helper].tapped,
+        "the selected helper must be tapped by the real activation cost payment"
+    );
+    assert!(
+        !runner.state().objects[&source].tapped,
+        "the source must remain untapped; only another creature pays this cost"
     );
 }
 
@@ -109,7 +119,7 @@ fn a_second_untapped_creature_pays_the_tap_another_cost() {
 /// reach guard for the negative assertion in the first test.
 #[test]
 fn a_plain_tap_cost_still_includes_the_source() {
-    let (runner, source) = board(PLAIN, 0);
+    let (runner, source, _) = board(PLAIN, 0);
     assert!(
         offers_activation(&runner, source),
         "\"tap an untapped creature you control\" is payable by the source itself (CR 601.2b)"
