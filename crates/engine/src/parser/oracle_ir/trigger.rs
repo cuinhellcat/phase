@@ -97,7 +97,7 @@ impl TriggerIr {
     pub(crate) fn has_terminal_roll_die(&self) -> bool {
         let chain = match &self.body {
             Some(TriggerBody::EffectChain(chain)) => chain,
-            Some(TriggerBody::ReflexivePayment(reflexive)) => &reflexive.effect_chain,
+            Some(TriggerBody::Reflexive(reflexive)) => &reflexive.effect_chain,
             Some(TriggerBody::Modal(_))
             | Some(TriggerBody::Vote(_))
             | Some(TriggerBody::Pile(_))
@@ -116,9 +116,9 @@ impl TriggerIr {
 pub(crate) enum TriggerBody {
     /// Normal effect chain — lowering calls `lower_effect_chain_ir`.
     EffectChain(EffectChainIr),
-    /// CR 118.12 + CR 603.12: A resolution-time optional cost and the
-    /// reflexive effect that follows when the player pays it.
-    ReflexivePayment(Box<ReflexivePaymentIr>),
+    /// CR 118.12 + CR 603.12: A printed parent instruction and the reflexive
+    /// effect that follows when its event occurred.
+    Reflexive(Box<ReflexiveParentIr>),
     /// CR 700.2: An inline modal's marker clause and its already-lowered mode
     /// bodies. The marker still flows through ordinary trigger-chain lowering;
     /// this payload carries the modal metadata no clause can represent.
@@ -130,12 +130,42 @@ pub(crate) enum TriggerBody {
     Pile(Box<PileIr>),
 }
 
+/// CR 603.12: A reflexive "when you do" body together with the printed parent
+/// instruction it rides on.
+///
+/// `parent` is the axis that used to be assumed rather than represented: this
+/// node only existed for the `"you may <cost>. When you do"` surface, so a
+/// MANDATORY parent had nowhere to live. CR 118.12 prints both — "[Do
+/// something]. If [a player] [does] …" and "[A player] may [do something]. If
+/// [that player] [does] …" — and CR 603.12 gates the reflexive on the event
+/// either way. Keeping the parent as a parameterized field rather than a
+/// sibling node means the reflexive lowering has exactly one shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ReflexivePaymentIr {
-    pub(crate) cost: AbilityCost,
+pub(crate) struct ReflexiveParentIr {
+    /// How the parent instruction is printed and offered.
+    pub(crate) parent: ReflexiveParent,
+    /// The reflexive body — what `"When you do, …"` introduces.
     pub(crate) effect_chain: EffectChainIr,
-    pub(crate) payment_chain: Option<EffectChainIr>,
+    /// CR 700.2b: modal metadata when the reflexive body is a mode choice.
     pub(crate) modal: Option<ModalIr>,
+}
+
+/// CR 118.12: the two printed shapes a reflexive parent can take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReflexiveParent {
+    /// `"you may <cost>. When you do, …"` — a resolution-time offer the
+    /// controller may decline (Caesar, Legion's Emperor). `payment_chain`
+    /// carries the printed cost as an effect chain when one parsed; otherwise
+    /// lowering synthesizes an `Effect::PayCost` from `cost`.
+    MayPay {
+        cost: AbilityCost,
+        payment_chain: Option<EffectChainIr>,
+    },
+    /// `"<instruction>. When you do, …"` — the instruction is not an offer, it
+    /// simply happens (Cemetery Desecrator, Dialogue Tree). The trigger parser
+    /// already lowered the printed instruction into this chain, so lowering
+    /// reuses it instead of re-parsing the same words a second time.
+    Mandatory { instruction: EffectChainIr },
 }
 
 /// CR 700.2: Typed inline-modal trigger body.

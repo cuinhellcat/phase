@@ -18,7 +18,8 @@ use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
-    FirstTimeLimit, ReflexivePaymentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
+    FirstTimeLimit, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr, TriggerModifiers,
+    TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
@@ -1506,14 +1507,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             optional = false;
             let effect_chain =
                 parse_effect_chain_ir(&reflexive_effect_text, AbilityKind::Spell, &mut effect_ctx);
-            Some(TriggerBody::ReflexivePayment(Box::new(
-                ReflexivePaymentIr {
+            Some(TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
+                parent: ReflexiveParent::MayPay {
                     cost,
-                    effect_chain,
                     payment_chain: None,
-                    modal: None,
                 },
-            )))
+                effect_chain,
+                modal: None,
+            })))
         } else if is_unsupported_disjunctive_reflexive_optional_payment(&effect_for_parse) {
             Some(TriggerBody::EffectChain(EffectChainIr::single_clause(
                 &effect_for_parse,
@@ -1764,7 +1765,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             modifiers,
             &ir.die_results,
         ))),
-        Some(TriggerBody::ReflexivePayment(reflexive)) => {
+        Some(TriggerBody::Reflexive(reflexive)) => {
             let mut reflexive_ability =
                 lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
@@ -1780,20 +1781,39 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 );
             }
 
-            let mut pay_ability = match &reflexive.payment_chain {
-                Some(chain) => lower_trigger_effect_chain(chain, modifiers, &[]),
-                None => AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PayCost {
-                        cost: reflexive.cost.clone(),
-                        scale: None,
-                        payer: TargetFilter::Controller,
-                    },
-                ),
+            // CR 118.12: the parent is a cost the controller may decline, or a
+            // printed instruction that simply happens. `optional` is the ONLY
+            // difference between the two arms — CR 603.12 gates the reflexive
+            // on the event in both cases, so both build the same parent →
+            // `WhenYouDo` sub shape.
+            let mut parent_ability = match &reflexive.parent {
+                ReflexiveParent::MayPay {
+                    cost,
+                    payment_chain,
+                } => {
+                    let mut pay_ability = match payment_chain {
+                        Some(chain) => lower_trigger_effect_chain(chain, modifiers, &[]),
+                        None => AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::PayCost {
+                                cost: cost.clone(),
+                                scale: None,
+                                payer: TargetFilter::Controller,
+                            },
+                        ),
+                    };
+                    pay_ability.optional = true;
+                    pay_ability
+                }
+                // CR 118.12 + CR 608.2c: a mandatory instruction is the next
+                // printed instruction, not an offer — it carries no `optional`
+                // flag and no decline prompt.
+                ReflexiveParent::Mandatory { instruction } => {
+                    lower_trigger_effect_chain(instruction, modifiers, &[])
+                }
             };
-            pay_ability.optional = true;
-            pay_ability.sub_ability = Some(Box::new(reflexive_ability));
-            Some(Box::new(pay_ability))
+            parent_ability.sub_ability = Some(Box::new(reflexive_ability));
+            Some(Box::new(parent_ability))
         }
         Some(TriggerBody::Modal(modal)) => Some(Box::new(
             lower_trigger_effect_chain(&modal.marker, modifiers, &[]).with_modal(
