@@ -119,9 +119,13 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  // The card back remains the fallback: a marker that fails to resolve must not
-  // leave the permanent blank.
-  const renderedSrc = renderCardBack ? (src ?? CARD_BACK_URL) : (src ?? "");
+  // The card back is the fallback in BOTH directions: a marker that never
+  // resolves and a marker URL whose `<img>` fails to load both land here. The
+  // artless text tile below is for face-UP cards with no printing; a face-down
+  // permanent always has the card back to fall back to.
+  const renderedSrc = renderCardBack
+    ? (artError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
+    : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";
@@ -196,7 +200,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   an artless permanent loses its picture but never its game
                   state. `src` is non-null for face-down cards (CARD_BACK_URL),
                   so those still render the card back here. */}
-              {src && !artError ? (
+              {renderCardBack || (src && !artError) ? (
                 <img
                   src={renderedSrc}
                   alt={cardName}

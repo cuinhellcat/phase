@@ -431,7 +431,7 @@ pub struct GameObject {
     pub tapped: bool,
     pub face_down: bool,
     /// Which keyword action put this permanent face down (CR 701.40a manifest,
-    /// CR 702.36a morph, CR 701.58a cloak, CR 702.166a disguise). `None` for a
+    /// CR 702.37a morph, CR 701.58a cloak, CR 702.168a disguise). `None` for a
     /// face-up permanent.
     ///
     /// CR 708.2a makes every face-down permanent look alike, so this is not a

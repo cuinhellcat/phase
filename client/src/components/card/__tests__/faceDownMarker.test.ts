@@ -5,7 +5,7 @@ describe("faceDownMarkerRef", () => {
   it("maps each rules cause onto the printing paper play uses", () => {
     expect(faceDownMarkerRef(true, "Manifest")?.face_name).toBe("manifest");
     expect(faceDownMarkerRef(true, "Morph")?.face_name).toBe("morph");
-    // Cloak (CR 701.58a) and disguise (CR 702.166a) are different rules that
+    // Cloak (CR 701.58a) and disguise (CR 702.168a) are different rules that
     // share one printed token — the mapping is where they converge, not the
     // engine's enum.
     expect(faceDownMarkerRef(true, "Cloak")?.face_name).toBe("a mysterious creature");

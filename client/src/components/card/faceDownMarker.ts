@@ -30,7 +30,7 @@ const MARKERS: Partial<Record<FaceDownCause, TokenImageRef>> = {
     preset_id: "face-down-morph",
   },
   // https://scryfall.com/card/tmkm/21/a-mysterious-creature — cloak and
-  // disguise are different rules (CR 701.58a vs CR 702.166a) with one printing.
+  // disguise are different rules (CR 701.58a vs CR 702.168a) with one printing.
   Cloak: {
     scryfall_id: "",
     scryfall_oracle_id: "6481a124-6859-4f02-9fd3-b1302528dd2e",

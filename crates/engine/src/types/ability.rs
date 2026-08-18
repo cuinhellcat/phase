@@ -11643,8 +11643,8 @@ pub enum FaceDownBody {
 /// token for each family.
 ///
 /// The variants follow the RULES, not the markers: morph and megamorph share
-/// one printed token but are one keyword ability (CR 702.36a/702.36b), while
-/// cloak (CR 701.58a, a keyword action) and disguise (CR 702.166a, a cast
+/// one printed token but are one keyword ability (CR 702.37a/702.37b), while
+/// cloak (CR 701.58a, a keyword action) and disguise (CR 702.168a, a cast
 /// permission) share a token and are two different rules. Collapsing them here
 /// would put a display decision inside the engine; mapping the four causes onto
 /// three markers is the display layer's job.
@@ -11655,11 +11655,11 @@ pub enum FaceDownCause {
     /// otherwise is manifesting it.
     #[default]
     Manifest,
-    /// CR 702.36a (morph) and CR 702.36b (megamorph) — cast face down for {3}.
+    /// CR 702.37a (morph) and CR 702.37b (megamorph) — cast face down for {3}.
     Morph,
     /// CR 701.58a (cloak) — like manifest, plus ward {2}.
     Cloak,
-    /// CR 702.166a (disguise) — cast face down for {3}, plus ward {2}.
+    /// CR 702.168a (disguise) — cast face down for {3}, plus ward {2}.
     Disguise,
     /// CR 708.2: an effect turned a permanent that was already on the
     /// battlefield face down (Ixidron class). No keyword action governs it and

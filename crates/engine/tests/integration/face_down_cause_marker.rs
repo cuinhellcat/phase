@@ -112,3 +112,105 @@ fn a_face_up_permanent_records_no_cause() {
     assert!(!runner.state().objects[&creature].face_down);
     assert_eq!(runner.state().objects[&creature].face_down_cause, None);
 }
+
+/// CR 702.37a: a face-down CAST is morph, not manifest, even though it reuses
+/// the same vanilla 2/2 characteristics. Keying the marker on those
+/// characteristics would show the wrong token.
+#[test]
+fn a_morph_cast_records_the_morph_cause() {
+    assert_eq!(
+        cause_after_face_down_cast(engine::types::keywords::Keyword::Morph(
+            engine::types::mana::ManaCost::generic(5)
+        )),
+        Some(FaceDownCause::Morph)
+    );
+}
+
+/// CR 702.168a: disguise reuses cloak's warded characteristics and is still its
+/// own action — the ward is shared, the marker source is not.
+#[test]
+fn a_disguise_cast_records_the_disguise_cause() {
+    assert_eq!(
+        cause_after_face_down_cast(engine::types::keywords::Keyword::Disguise(
+            engine::types::keywords::DisguiseCost::Mana(engine::types::mana::ManaCost::generic(5))
+        )),
+        Some(FaceDownCause::Disguise)
+    );
+}
+
+/// Cast a creature carrying `keyword` face down for its fixed {3} and report the
+/// cause recorded on the resulting permanent.
+fn cause_after_face_down_cast(keyword: engine::types::keywords::Keyword) -> Option<FaceDownCause> {
+    use engine::types::mana::{ManaType, ManaUnit};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario
+        .add_creature_to_hand(P0, "Face-Down Cast Probe", 4, 4)
+        .with_mana_cost(ManaCost::NoCost)
+        .with_keyword(keyword)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, card, false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(card).commit().resolve();
+    runner.advance_until_stack_empty();
+
+    let object = &runner.state().objects[&card];
+    assert!(
+        object.face_down && object.zone == Zone::Battlefield,
+        "reach guard: the card must have entered the battlefield face down, got {object:?}"
+    );
+    object.face_down_cause
+}
+
+/// CR 708.2: an effect that turns a permanent already on the battlefield face
+/// down is no keyword action at all — Wizards prints no marker for it, so the
+/// cause must say so instead of inheriting the manifest default the vanilla
+/// profile carries.
+#[test]
+fn a_generic_turn_face_down_records_its_own_cause() {
+    assert_eq!(
+        cause_after_turn_face_down("Turn target creature face down."),
+        Some(FaceDownCause::TurnedFaceDown)
+    );
+}
+
+/// The PROFILED variant (Cyber Conversion) takes the same path with an authored
+/// body, and must not pick up a different cause because its profile is authored
+/// rather than defaulted.
+#[test]
+fn a_profiled_turn_face_down_records_its_own_cause() {
+    assert_eq!(
+        cause_after_turn_face_down(
+            "Turn target creature face down. It's a 2/2 Cyberman artifact creature."
+        ),
+        Some(FaceDownCause::TurnedFaceDown)
+    );
+}
+
+fn cause_after_turn_face_down(oracle: &str) -> Option<FaceDownCause> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario.add_creature(P0, "Victim", 3, 3).id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Turn-Down Probe", false)
+        .from_oracle_text(oracle)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(P0, vec![]);
+    let mut runner = scenario.build();
+
+    runner.cast(spell).target_object(victim).resolve();
+    runner.advance_until_stack_empty();
+
+    let object = &runner.state().objects[&victim];
+    assert!(
+        object.face_down,
+        "reach guard: the creature must have been turned face down, got {object:?}"
+    );
+    object.face_down_cause
+}

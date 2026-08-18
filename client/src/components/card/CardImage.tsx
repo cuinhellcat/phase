@@ -126,9 +126,15 @@ export function CardImage({
   //   - `imageError`: the resolved `<img>` failed to load.
   // Both render the card/token name (and Oracle text when known) so every artless
   // card or token — not just one hard-coded name — stays identifiable.
-  // The card back remains the fallback: a marker that fails to resolve (offline,
-  // missing printing) must not leave the permanent blank.
-  const renderedSrc = faceDown ? (src ?? CARD_BACK_URL) : (src ?? "");
+  // The card back is the fallback in BOTH directions: a marker that never
+  // resolves (`!src`) and a marker URL whose `<img>` fails to load
+  // (`imageError` — offline, CDN gap, stale printing) both fall back to it. A
+  // face-down permanent must never render a broken image, and it must never
+  // fall through to the artless text tile either: `showArtFallback` stays gated
+  // on `!faceDown`, so this is the only fallback the face-down path has.
+  const renderedSrc = faceDown
+    ? (imageError ? CARD_BACK_URL : (src ?? CARD_BACK_URL))
+    : (src ?? "");
   const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
   return (

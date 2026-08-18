@@ -1,4 +1,6 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, FaceDownProfile, ResolvedAbility};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, FaceDownCause, FaceDownProfile, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -24,7 +26,16 @@ pub fn resolve(
     let (target, profile) = match &ability.effect {
         Effect::TurnFaceDown { target, profile } => (
             target.clone(),
-            profile.clone().unwrap_or_else(FaceDownProfile::vanilla_2_2),
+            // CR 708.2: whatever characteristics the effect specifies, the
+            // ACTION here is a plain turn-face-down (Ixidron, Cyber Conversion)
+            // — no keyword action, and no marker token printed for it. The
+            // constructor default (manifest) and any authored profile both get
+            // the cause restated, so the profiled path cannot inherit a marker
+            // the rules never gave it.
+            profile
+                .clone()
+                .unwrap_or_else(FaceDownProfile::vanilla_2_2)
+                .caused_by(FaceDownCause::TurnedFaceDown),
         ),
         _ => return Ok(()),
     };
@@ -70,6 +81,11 @@ pub fn resolve(
         // CR 708.2a + CR 205.1a: Apply the effect-specified (or default vanilla
         // 2/2) face-down body.
         crate::game::morph::apply_face_down_creature_characteristics(obj, &profile);
+        // The public record of what turned this permanent face down. The zone
+        // authority (`zone_pipeline::apply_face_down_entry_profile`) stamps the
+        // same field for an ENTERING face-down permanent; this resolver turns a
+        // permanent already on the battlefield, so it stamps its own.
+        obj.face_down_cause = Some(profile.cause);
         obj.back_face = Some(snapshot);
         changed = true;
         events.push(GameEvent::TurnedFaceDown { object_id: id });
