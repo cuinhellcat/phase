@@ -159,7 +159,7 @@ fn the_legal_action_list_does_not_surface_mana_abilities_at_priority() {
 
 /// CR 702.178a is SOURCE-relative, so the activating player is the wrong person
 /// to ask. Raised in review of the fix for this file: the restriction evaluator
-/// is handed whoever is activating, and CR 602.1a lets that be someone other
+/// is handed whoever is activating, and CR 602.2 lets that be someone other
 /// than the controller — 42 cards in the pool print "Any player may activate
 /// this ability" (`PlayerFilter::All`), measured against
 /// `client/public/card-data.json`.
