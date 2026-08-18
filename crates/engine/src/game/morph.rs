@@ -438,7 +438,9 @@ pub(crate) fn turn_face_up_prepare(
         })
 }
 
-/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+/// CR 702.37e: Turning a face-down permanent face up ends the morph effect and
+/// the permanent "regains its normal characteristics". (CR 702.37c is the
+/// CASTING half — it is what turns the card face down in the first place.)
 ///
 /// Validates that the player controls the permanent and that it has morph/disguise
 /// cost data stored. Sets `face_down = false`, restores characteristics from
