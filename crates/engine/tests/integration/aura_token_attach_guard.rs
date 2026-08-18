@@ -12,7 +12,7 @@
 //!
 //! Questing Cosplayer is the card that surfaced it, and it needed the parser
 //! half too — "create a Questing Role token **and attach it to** target
-//! creature" is the ACTION surface of the same CR 303.7 relation Oracle
+//! creature" is the ACTION surface of the same CR 303.4 relation Oracle
 //! otherwise prints as "…token **attached to** target creature", and only the
 //! state surface was recognised, so the token was created with no host at all.
 //!

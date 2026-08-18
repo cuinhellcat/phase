@@ -453,11 +453,34 @@ fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
         .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
 }
 
-/// CR 303.7: The printed surfaces that bind a created token to a host inside the
-/// same create-token instruction. `" attached to "` states the relation,
+/// CR 303.4: The printed surfaces that bind a created token to a host inside the
+/// same create-token instruction — "an Aura enters the battlefield attached to
+/// an object or player". `" attached to "` states the relation and
 /// `" and attach it to "` states the action; the resulting permanent is
 /// identical, so both feed one `attach_to` field rather than two code paths.
-const TOKEN_ATTACHMENT_CONNECTORS: [&str; 2] = [" and attach it to ", " attached to "];
+///
+/// Scanned at word boundaries with a single `alt`, so the connector that occurs
+/// FIRST in the text wins regardless of which spelling it is — testing each
+/// spelling over the whole string separately would let a later "attached to"
+/// beat an earlier "and attach it to".
+fn first_token_attachment_connector(lower: &str) -> Option<&'static str> {
+    let mut rest = lower;
+    while !rest.is_empty() {
+        if let Ok((_, connector)) = alt((
+            value(
+                " and attach it to ",
+                tag::<_, _, OracleError<'_>>(" and attach it to "),
+            ),
+            value(" attached to ", tag(" attached to ")),
+        ))
+        .parse(rest)
+        {
+            return Some(connector);
+        }
+        rest = &rest[rest.chars().next().map_or(1, char::len_utf8)..];
+    }
+    None
+}
 
 fn parse_token_description_with_context(
     text: &str,
@@ -466,19 +489,17 @@ fn parse_token_description_with_context(
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
-    // CR 303.7: Strip the attachment clause and capture its target. Oracle
+    // CR 303.4: Strip the attachment clause and capture its target. Oracle
     // prints the same relation two ways in a create-token instruction — as a
     // STATE ("create a Cursed Role token attached to target creature") and as an
     // ACTION ("create a Questing Role token and attach it to target creature").
     // Both mean the token enters attached, in the same instruction, so both bind
     // the same `attach_to` field; only the printed surface differs. Keying on the
     // state form alone dropped the attachment entirely for the action form, and
-    // a hostless Aura token is not created at all under CR 303.4i (#7302).
-    // Longest connector first so " and attach it to " is not shadowed.
+    // CR 303.4i then says a hostless Aura token is not created at all (#7302).
     let tp = TextPair::new(text, &lower);
-    let (text, attach_to) = TOKEN_ATTACHMENT_CONNECTORS
-        .iter()
-        .find_map(|connector| tp.split_around(connector))
+    let (text, attach_to) = first_token_attachment_connector(&lower)
+        .and_then(|connector| tp.split_around(connector))
         .map_or((text, None), |(before, after)| {
             let (target, _) = parse_target(after.original);
             (before.original, Some(target))
@@ -3511,7 +3532,7 @@ fn copy_token_non_saga_token_you_control_issue_3294() {
 mod token_attachment_connector_tests {
     use super::*;
 
-    /// CR 303.7 + CR 303.4i: Oracle prints one relation two ways inside a
+    /// CR 303.4 + CR 303.4i: Oracle prints one relation two ways inside a
     /// create-token instruction — as a STATE ("…token attached to target
     /// creature") and as an ACTION ("…token and attach it to target creature").
     /// Both must bind `attach_to`; the action surface used to drop it, leaving a
