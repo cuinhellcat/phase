@@ -95,19 +95,44 @@ pub(crate) struct TriggerIr {
 impl TriggerIr {
     /// Whether the body ends in the typed die-roll node that owns a result table.
     pub(crate) fn has_terminal_roll_die(&self) -> bool {
-        let chain = match &self.body {
-            Some(TriggerBody::EffectChain(chain)) => chain,
-            Some(TriggerBody::Reflexive(reflexive)) => &reflexive.effect_chain,
+        match &self.body {
+            Some(TriggerBody::EffectChain(chain)) => effect_chain_has_terminal_roll_die(chain),
+            // CR 706.3b: the table belongs to the printed die-roll instruction,
+            // not the reflexive `WhenYouDo` body it creates. A modal reflexive
+            // body contains only the mode marker, so looking there drops rows
+            // for a parent such as "roll a d20. When you do, choose one".
+            Some(TriggerBody::Reflexive(reflexive)) => {
+                effect_chain_has_terminal_roll_die(&reflexive.effect_chain)
+                    || match &reflexive.parent {
+                        ReflexiveParent::MayPay {
+                            payment_chain: Some(chain),
+                            ..
+                        } => effect_chain_has_terminal_roll_die(chain),
+                        ReflexiveParent::MayPay {
+                            payment_chain: None,
+                            ..
+                        } => false,
+                        ReflexiveParent::Mandatory { instruction } => {
+                            effect_chain_has_terminal_roll_die(instruction)
+                        }
+                    }
+            }
             Some(TriggerBody::Modal(_))
             | Some(TriggerBody::Vote(_))
             | Some(TriggerBody::Pile(_))
-            | None => return false,
-        };
-        let Some(clause) = chain.clauses.last() else {
-            return false;
-        };
-        matches!(clause.parsed.effect, Effect::RollDie { .. })
+            | None => false,
+        }
     }
+}
+
+/// Whether this exact chain ends at the typed die roll that owns its following
+/// result table. Parent and reflexive chains are distinct printed instructions,
+/// so callers use this to preserve the table on whichever one owns the roll.
+pub(crate) fn effect_chain_has_terminal_roll_die(chain: &EffectChainIr) -> bool {
+    chain
+        .clauses
+        .last()
+        .is_some_and(|clause| matches!(clause.parsed.effect, Effect::RollDie { .. }))
 }
 
 /// The body of a trigger. Whole-body recognizers retain their typed payloads

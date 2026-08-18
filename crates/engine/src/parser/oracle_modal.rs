@@ -4430,6 +4430,51 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
     }
 
+    /// CR 706.3b: result-table rows belong to the mandatory printed die-roll
+    /// parent, even when its CR 603.12 reflexive body is a modal marker.
+    #[test]
+    fn mandatory_roll_die_parent_retains_its_result_table() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, roll a d20. When you do, choose one —\n• Draw a card.\n• You gain 2 life.\n1—10 | Draw a card.\n11—20 | You gain 2 life.",
+            "Roll Parent Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_ref())
+            .expect("the enters trigger must carry its mandatory parent");
+        let Effect::RollDie { results, .. } = execute.effect.as_ref() else {
+            panic!(
+                "the printed roll must remain the parent effect, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(
+            results.len(),
+            2,
+            "the parent roll must retain both immediately following result rows"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|branch| (branch.min, branch.max))
+                .collect::<Vec<_>>(),
+            vec![(1, 10), (11, 20)],
+            "the result ranges must remain attached to the printed parent roll"
+        );
+        assert_eq!(
+            execute
+                .sub_ability
+                .as_ref()
+                .and_then(|sub| sub.condition.clone()),
+            Some(AbilityCondition::WhenYouDo),
+            "the mode list remains the parent roll's reflexive body"
+        );
+    }
+
     #[test]
     fn caesar_lowers_to_reflexive_gated_modal() {
         // CR 603.12 + CR 700.2b: Caesar's attack trigger must lower to an

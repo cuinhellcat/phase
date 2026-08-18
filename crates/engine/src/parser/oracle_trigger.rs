@@ -18,8 +18,8 @@ use super::oracle_ir::context::{ParseContext, TriggerConditionScope};
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{DieResultBranchIr, EffectChainIr};
 use super::oracle_ir::trigger::{
-    FirstTimeLimit, ReflexiveParent, ReflexiveParentIr, TriggerBody, TriggerIr, TriggerModifiers,
-    TriggerNodeIr,
+    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveParent, ReflexiveParentIr,
+    TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::condition::parse_elided_subject_state_condition;
@@ -1766,8 +1766,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             &ir.die_results,
         ))),
         Some(TriggerBody::Reflexive(reflexive)) => {
-            let mut reflexive_ability =
-                lower_trigger_effect_chain(&reflexive.effect_chain, modifiers, &ir.die_results);
+            let reflexive_owns_die_results =
+                effect_chain_has_terminal_roll_die(&reflexive.effect_chain);
+            let (reflexive_die_results, parent_die_results) = if reflexive_owns_die_results {
+                (ir.die_results.as_slice(), &[])
+            } else {
+                (&[], ir.die_results.as_slice())
+            };
+            let mut reflexive_ability = lower_trigger_effect_chain(
+                &reflexive.effect_chain,
+                modifiers,
+                reflexive_die_results,
+            );
             reflexive_ability.condition = Some(AbilityCondition::WhenYouDo);
 
             if let Some(modal) = &reflexive.modal {
@@ -1790,7 +1800,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                     payment_chain,
                 } => {
                     let mut pay_ability = match payment_chain {
-                        Some(chain) => lower_trigger_effect_chain(chain, modifiers, &[]),
+                        Some(chain) => {
+                            lower_trigger_effect_chain(chain, modifiers, parent_die_results)
+                        }
                         None => AbilityDefinition::new(
                             AbilityKind::Spell,
                             Effect::PayCost {
@@ -1807,7 +1819,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // printed instruction, not an offer — it carries no `optional`
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
-                    lower_trigger_effect_chain(instruction, modifiers, &[])
+                    lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
                 }
             };
             parent_ability.sub_ability = Some(Box::new(reflexive_ability));
