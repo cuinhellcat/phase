@@ -1853,7 +1853,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Alimento",
-        "tappedFish": "un Pez girado"
+        "tappedFish": "un Pez girado",
+        "extraTurn": "un turno adicional"
       }
     }
   },

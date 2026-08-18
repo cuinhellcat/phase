@@ -1897,7 +1897,8 @@
         "card": "a card",
         "treasure": "a Treasure",
         "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "tappedFish": "a tapped Fish",
+        "extraTurn": "an extra turn"
       }
     }
   },

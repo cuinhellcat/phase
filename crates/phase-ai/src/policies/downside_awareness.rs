@@ -34,6 +34,10 @@ impl DownsideAwarenessPolicy {
                     GiftKind::Treasure => ctx.penalties().gift_treasure_penalty,
                     GiftKind::Food => ctx.penalties().gift_food_penalty,
                     GiftKind::TappedFish => ctx.penalties().gift_fish_penalty,
+                    // CR 702.174g: "The chosen player takes an extra turn after
+                    // this one." The only promised gift that hands the opponent
+                    // a whole turn rather than an object.
+                    GiftKind::ExtraTurn => ctx.penalties().gift_extra_turn_penalty,
                 };
             }
         }

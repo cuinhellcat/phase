@@ -1853,7 +1853,8 @@
         "card": "una carta",
         "treasure": "un Tesoro",
         "food": "un Cibo",
-        "tappedFish": "un Pesce TAPpato"
+        "tappedFish": "un Pesce TAPpato",
+        "extraTurn": "un turno extra"
       }
     }
   },

@@ -501,6 +501,15 @@ pub enum GiftKind {
     Food,
     /// Opponent creates a tapped 1/1 blue Fish creature token.
     TappedFish,
+    /// CR 702.174g: "Gift an extra turn" means "The chosen player takes an extra
+    /// turn after this one." The only promised gift that is not an object, which
+    /// is why it sits outside the token family rather than inside it.
+    ///
+    /// Perch Protection is the only shipped card in this class. CR 702.174i's
+    /// Octopus is still missing (#5975); it belongs to the token family
+    /// (Treasure / Food / tapped Fish), which is a parameterization those three
+    /// already want and this variant deliberately does not join.
+    ExtraTurn,
 }
 
 /// CR 702.11d: What a hexproof-from keyword protects against.

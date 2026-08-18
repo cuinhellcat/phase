@@ -242,6 +242,9 @@ pub struct PolicyPenalties {
     pub gift_food_penalty: f64,
     /// Penalty for gifting opponent a tapped 1/1 Fish token.
     pub gift_fish_penalty: f64,
+    /// CR 702.174g: penalty for gifting an opponent an extra turn. Untuned — see
+    /// `UNTUNED_POLICY_PENALTY_FIELDS`.
+    pub gift_extra_turn_penalty: f64,
     /// Minimum creature value (from evaluate_creature) to justify gift removal.
     pub worthy_target_threshold: f64,
 
@@ -560,6 +563,12 @@ impl Default for PolicyPenalties {
             gift_treasure_penalty: -1.5,
             gift_food_penalty: -1.0,
             gift_fish_penalty: -0.5,
+            // Placed an order of magnitude below the card gift rather than
+            // calibrated: an extra turn is the largest downside in the family by
+            // a wide margin (a whole untapping, draw and attack step for the
+            // opponent), and a single shipped card promises it. A tuned value
+            // needs a paired-seed `ai-gate` report, which this rules fix is not.
+            gift_extra_turn_penalty: -30.0,
             worthy_target_threshold: 3.0,
             overkill_base_penalty: -2.0,
             removal_quality_mismatch: -1.5,
@@ -904,6 +913,12 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "gift_extra_turn_penalty",
+        "CR 702.174g extra-turn gift downside — one shipped card (Perch Protection); \
+         seeded an order of magnitude below the card gift and awaiting a paired-seed \
+         ai-gate calibration.",
+    ),
     (
         "devotion_pip_progress",
         "CR 700.5 per-pip devotion progress weight — awaiting a paired-seed ai-gate calibration.",
