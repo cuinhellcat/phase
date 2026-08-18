@@ -570,6 +570,9 @@ pub fn resolve(
         })
         .collect();
 
+    // CR 303.4i: read the host-binding outcome before the spec consumes it.
+    let host_named_but_unbound = attach_to.is_some() && attach_target.is_none();
+
     let spec = build_token_spec(
         &script_name,
         parsed.as_ref(),
@@ -583,6 +586,35 @@ pub fn resolve(
         ability,
         state,
     );
+
+    // CR 303.4i: "If an effect attempts to put an Aura onto the battlefield
+    // attached to … an object or player that is undefined, the Aura remains in
+    // its current zone. … If the Aura is a token, it isn't created."
+    //
+    // The instruction NAMED a host (`attach_to` is set) and nothing bound it, so
+    // the host is undefined and the token is not created — no propose, no
+    // replacement pipeline, no enters-the-battlefield triggers. Until now the
+    // token was created hostless and the CR 704.5m state-based action swept it
+    // into a graveyard, which is observably different: the token existed for a
+    // beat, fired ETB triggers, and left a graveyard entry (#7302).
+    //
+    // Gated on the RESOLVED spec's subtypes rather than the effect's `types`, so
+    // a named token script ("Cursed Role") is covered the same as a typed
+    // `Effect::Token`. A token with no `attach_to` at all is an ordinary token
+    // and is untouched; so is an Aura token whose host bound successfully.
+    //
+    // Not covered here: a host that is DEFINED but cannot legally be enchanted
+    // (CR 303.4i's other half). Host legality is owned by `attach::attach_to` /
+    // `attach::attach_to_player`, and routing that verdict back to this
+    // pre-propose gate is a separate change.
+    if host_named_but_unbound && spec_is_aura(&spec) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // CR 614.1a: Propose entire token batch for replacement pipeline.
     // Replacement effects (Doubling Season, Primal Vigor) modify count.
@@ -639,6 +671,16 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 205.3h: Is this token an Aura? Aura is an enchantment SUBTYPE, so the
+/// question is answered off the resolved characteristics — the one place a
+/// script-named token ("Cursed Role") and a typed `Effect::Token` agree.
+fn spec_is_aura(spec: &crate::types::proposed_event::TokenSpec) -> bool {
+    spec.characteristics
+        .subtypes
+        .iter()
+        .any(|subtype| subtype.eq_ignore_ascii_case("aura"))
 }
 
 /// CR 111.1 + CR 111.4 + CR 111.10: Build the resolved `TokenSpec` for a

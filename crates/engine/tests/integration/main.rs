@@ -46,6 +46,7 @@ mod attacks_while_saddled_trigger;
 mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
 mod aura_on_player;
+mod aura_token_attach_guard;
 mod aurification_gold_counter_defender_cant_attack;
 mod awaken_runtime;
 mod awe_strike_prevention;

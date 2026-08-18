@@ -453,6 +453,12 @@ fn tracked_set_count_is_type_restricted(qty: &QuantityRef) -> bool {
         .any(|type_filter| !matches!(type_filter, TypeFilter::Card))
 }
 
+/// CR 303.7: The printed surfaces that bind a created token to a host inside the
+/// same create-token instruction. `" attached to "` states the relation,
+/// `" and attach it to "` states the action; the resulting permanent is
+/// identical, so both feed one `attach_to` field rather than two code paths.
+const TOKEN_ATTACHMENT_CONNECTORS: [&str; 2] = [" and attach it to ", " attached to "];
+
 fn parse_token_description_with_context(
     text: &str,
     ctx: &ParseContext,
@@ -460,14 +466,23 @@ fn parse_token_description_with_context(
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
-    // CR 303.7: Strip "attached to [target]" suffix and capture the attachment target.
+    // CR 303.7: Strip the attachment clause and capture its target. Oracle
+    // prints the same relation two ways in a create-token instruction — as a
+    // STATE ("create a Cursed Role token attached to target creature") and as an
+    // ACTION ("create a Questing Role token and attach it to target creature").
+    // Both mean the token enters attached, in the same instruction, so both bind
+    // the same `attach_to` field; only the printed surface differs. Keying on the
+    // state form alone dropped the attachment entirely for the action form, and
+    // a hostless Aura token is not created at all under CR 303.4i (#7302).
+    // Longest connector first so " and attach it to " is not shadowed.
     let tp = TextPair::new(text, &lower);
-    let (text, attach_to) = if let Some((before, after)) = tp.split_around(" attached to ") {
-        let (target, _) = parse_target(after.original);
-        (before.original, Some(target))
-    } else {
-        (text, None)
-    };
+    let (text, attach_to) = TOKEN_ATTACHMENT_CONNECTORS
+        .iter()
+        .find_map(|connector| tp.split_around(connector))
+        .map_or((text, None), |(before, after)| {
+            let (target, _) = parse_target(after.original);
+            (before.original, Some(target))
+        });
 
     // CR 508.4 + CR 506.3a: Strip inline "that's tapped and attacking" /
     // "that is tapped and attacking" / "thats tapped and attacking" /
@@ -3490,4 +3505,45 @@ fn copy_token_non_saga_token_you_control_issue_3294() {
     );
     assert!(tf.properties.contains(&FilterProp::Token));
     assert_eq!(tf.controller, Some(ControllerRef::You));
+}
+
+#[cfg(test)]
+mod token_attachment_connector_tests {
+    use super::*;
+
+    /// CR 303.7 + CR 303.4i: Oracle prints one relation two ways inside a
+    /// create-token instruction — as a STATE ("…token attached to target
+    /// creature") and as an ACTION ("…token and attach it to target creature").
+    /// Both must bind `attach_to`; the action surface used to drop it, leaving a
+    /// hostless Aura token that CR 303.4i says is not created at all
+    /// (Questing Cosplayer, #7302).
+    ///
+    /// Table-driven over both surfaces plus the counter-direction: a token line
+    /// with no attachment clause must keep `attach_to` at `None`.
+    #[test]
+    fn both_printed_attachment_surfaces_bind_the_host() {
+        let cases: &[(&str, bool)] = &[
+            (
+                "create a Questing Role token and attach it to target creature",
+                true,
+            ),
+            (
+                "create a Cursed Role token attached to target creature",
+                true,
+            ),
+            ("create a 1/1 white Soldier creature token", false),
+        ];
+        for (text, expects_host) in cases {
+            let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("{text:?} must parse as a token line"));
+            let Effect::Token { attach_to, .. } = effect else {
+                panic!("{text:?} must lower to Effect::Token");
+            };
+            assert_eq!(
+                attach_to.is_some(),
+                *expects_host,
+                "{text:?} host binding mismatch, got {attach_to:?}"
+            );
+        }
+    }
 }
