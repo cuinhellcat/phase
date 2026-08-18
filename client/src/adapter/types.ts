@@ -795,6 +795,18 @@ export interface TokenCharacteristics {
   keywords: Keyword[];
 }
 
+/**
+ * Which keyword action put a permanent onto the battlefield face down
+ * (engine `FaceDownCause`). Only meaningful while `face_down` is true.
+ * `TurnedFaceDown` is the Ixidron class, for which no marker token is printed.
+ */
+export type FaceDownCause =
+  | "Manifest"
+  | "Morph"
+  | "Cloak"
+  | "Disguise"
+  | "TurnedFaceDown";
+
 export interface TokenImageRef {
   scryfall_id: string;
   scryfall_oracle_id?: string | null;
@@ -1008,6 +1020,8 @@ export interface GameObject {
   display_visible_to_viewer?: boolean;
   tapped: boolean;
   face_down: boolean;
+  /** Set only while `face_down` is true; absent on older saves. */
+  face_down_cause?: FaceDownCause | null;
   flipped: boolean;
   transformed: boolean;
   damage_marked: number;

@@ -11633,6 +11633,42 @@ pub enum FaceDownBody {
     Noncreature,
 }
 
+/// Which keyword action put a permanent onto the battlefield face down.
+///
+/// CR 708.2a gives every face-down permanent the same characteristics, so the
+/// object itself cannot say how it got there — but the rules do distinguish the
+/// actions, and so does play: the 2024-09-20 Duskmourn rulings require that
+/// "the order in which they entered should remain clear, as well as what ability
+/// caused them to be face down", which is why Wizards prints a separate marker
+/// token for each family.
+///
+/// The variants follow the RULES, not the markers: morph and megamorph share
+/// one printed token but are one keyword ability (CR 702.36a/702.36b), while
+/// cloak (CR 701.58a, a keyword action) and disguise (CR 702.166a, a cast
+/// permission) share a token and are two different rules. Collapsing them here
+/// would put a display decision inside the engine; mapping the four causes onto
+/// three markers is the display layer's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FaceDownCause {
+    /// CR 701.40a (manifest) and CR 701.62a (manifest dread). The default: an
+    /// effect that puts a card onto the battlefield face down without saying
+    /// otherwise is manifesting it.
+    #[default]
+    Manifest,
+    /// CR 702.36a (morph) and CR 702.36b (megamorph) — cast face down for {3}.
+    Morph,
+    /// CR 701.58a (cloak) — like manifest, plus ward {2}.
+    Cloak,
+    /// CR 702.166a (disguise) — cast face down for {3}, plus ward {2}.
+    Disguise,
+    /// CR 708.2: an effect turned a permanent that was already on the
+    /// battlefield face down (Ixidron class). No keyword action governs it and
+    /// Wizards prints no marker token for it, so a display layer has nothing to
+    /// show beyond the card back — which is why it is a variant rather than
+    /// being folded into `Manifest`.
+    TurnedFaceDown,
+}
+
 /// CR 708.2a: Characteristics an effect specifies for a permanent it puts onto
 /// the battlefield face down ("...unless otherwise specified by the effect that
 /// put it onto the battlefield face down"). When an effect lists no
@@ -11671,6 +11707,12 @@ pub struct FaceDownProfile {
     /// when the card is turned face up (the real card's keywords take over).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ward: Option<crate::types::keywords::WardCost>,
+    /// Which keyword action is putting the permanent face down. Rides the
+    /// profile because the profile is what survives a CR 616.1 entry pause —
+    /// the parked `ZoneMoveRequest` carries it, and the resume path applies it
+    /// through the same helper.
+    #[serde(default)]
+    pub cause: FaceDownCause,
 }
 
 /// `serde` skip helper: the creature body is the CR 708.2a default and need not
@@ -11691,7 +11733,20 @@ impl FaceDownProfile {
             extra_core_types: vec![],
             subtypes: vec![],
             ward: None,
+            cause: FaceDownCause::Manifest,
         }
+    }
+
+    /// Restate the keyword action responsible for this face-down entry.
+    ///
+    /// The two constructors carry the characteristics-defining default
+    /// (manifest for the vanilla profile, cloak for the warded one). A caster
+    /// that reuses those characteristics for a DIFFERENT action — morph reuses
+    /// the vanilla profile, disguise the warded one — says so here rather than
+    /// letting the reader infer the action from the ward.
+    pub fn caused_by(mut self, cause: FaceDownCause) -> Self {
+        self.cause = cause;
+        self
     }
 
     /// CR 701.58a: The cloak face-down characteristics — a vanilla 2/2 creature
@@ -11702,6 +11757,7 @@ impl FaceDownProfile {
             ward: Some(crate::types::keywords::WardCost::Mana(
                 crate::types::mana::ManaCost::generic(2),
             )),
+            cause: FaceDownCause::Cloak,
             ..Self::vanilla_2_2()
         }
     }

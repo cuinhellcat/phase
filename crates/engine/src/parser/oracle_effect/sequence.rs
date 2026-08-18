@@ -6129,6 +6129,7 @@ pub(super) fn parse_theyre_face_down_profile(lower: &str) -> Option<FaceDownProf
                 extra_core_types,
                 subtypes,
                 ward: None,
+                cause: crate::types::ability::FaceDownCause::Manifest,
             });
         }
         // Extra core type word (Creature excluded — always implicit).
@@ -6269,6 +6270,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                     extra_core_types,
                     subtypes,
                     ward: None,
+                    cause: crate::types::ability::FaceDownCause::Manifest,
                 }),
                 // "... land/artifact/enchantment/planeswalker." — non-creature
                 // body whose core type is the terminal noun; no implicit
@@ -6287,6 +6289,7 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
                         extra_core_types,
                         subtypes,
                         ward: None,
+                        cause: crate::types::ability::FaceDownCause::Manifest,
                     })
                 }
             };

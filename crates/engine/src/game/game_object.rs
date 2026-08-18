@@ -430,6 +430,23 @@ pub struct GameObject {
     // Battlefield state
     pub tapped: bool,
     pub face_down: bool,
+    /// Which keyword action put this permanent face down (CR 701.40a manifest,
+    /// CR 702.36a morph, CR 701.58a cloak, CR 702.166a disguise). `None` for a
+    /// face-up permanent.
+    ///
+    /// CR 708.2a makes every face-down permanent look alike, so this is not a
+    /// characteristic — it is the public record of how the permanent got here,
+    /// which the 2024-09-20 Duskmourn rulings require play to keep visible. No
+    /// game rule reads it; it exists so the display layer can show the marker
+    /// the physical game uses.
+    ///
+    /// Only meaningful while `face_down` is true. It is stamped on every
+    /// face-down entry and deliberately NOT cleared when the permanent turns
+    /// face up — a dozen unrelated paths clear `face_down`, and requiring each
+    /// to remember a second field is how a stale marker would eventually ship.
+    /// Read it gated on `face_down`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_down_cause: Option<crate::types::ability::FaceDownCause>,
     pub flipped: bool,
     pub transformed: bool,
     /// CR 701.27f: Number of successful transforms/conversions of this object.
@@ -1284,6 +1301,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         display_visible_to_viewer: _,
         tapped: _,
         face_down: _,
+        face_down_cause: _,
         flipped: _,
         transformed: _,
         transformation_count: _,
@@ -2171,6 +2189,7 @@ impl GameObject {
             display_visible_to_viewer: false,
             tapped: false,
             face_down: false,
+            face_down_cause: None,
             flipped: false,
             transformed: false,
             transformation_count: 0,

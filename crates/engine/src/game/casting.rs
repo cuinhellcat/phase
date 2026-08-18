@@ -10340,10 +10340,15 @@ fn face_down_cast_profile(
     state: &GameState,
     object_id: ObjectId,
 ) -> crate::types::ability::FaceDownProfile {
+    // CR 702.166a / CR 702.36a: a face-down CAST reuses the manifest/cloak
+    // characteristics but is a different keyword action, so it restates the
+    // cause instead of leaving the constructor's default in place.
     if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disguise) {
         crate::types::ability::FaceDownProfile::cloaked_2_2()
+            .caused_by(crate::types::ability::FaceDownCause::Disguise)
     } else {
         crate::types::ability::FaceDownProfile::vanilla_2_2()
+            .caused_by(crate::types::ability::FaceDownCause::Morph)
     }
 }
 

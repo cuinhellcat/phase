@@ -411,6 +411,7 @@ mod tests {
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
             ward: None,
+            cause: crate::types::ability::FaceDownCause::Manifest,
         };
         let ability = ResolvedAbility::new(
             Effect::Manifest {

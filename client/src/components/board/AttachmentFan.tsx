@@ -319,6 +319,7 @@ function FanCard({
           tokenImageRef={isToken ? obj.token_image_ref : undefined}
           oracleText={isToken ? obj.token_rules_text : undefined}
           faceDown={shouldRenderCardBack(obj)}
+          faceDownCause={obj.face_down ? obj.face_down_cause : undefined}
           className="!w-[var(--fan-card-w)] !h-[var(--fan-card-h)]"
         />
       </div>

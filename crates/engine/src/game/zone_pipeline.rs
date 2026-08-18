@@ -3186,6 +3186,11 @@ pub(crate) fn apply_face_down_entry_profile(
         // survive the entry guard (which runs before exit cleanup); this is the
         // authoritative final assertion that survives it.
         obj.face_down = true;
+        // The public record of WHICH keyword action put this permanent face
+        // down. Re-stamped on every face-down entry, and only meaningful while
+        // `face_down` is true — the many turn-face-up paths leave it alone
+        // rather than each having to remember to clear it.
+        obj.face_down_cause = Some(profile.cause);
         obj.back_face = Some(original);
     }
 }

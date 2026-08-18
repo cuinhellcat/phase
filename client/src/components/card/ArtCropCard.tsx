@@ -8,6 +8,7 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, shouldRenderCardBack, toRoman } from "../../viewmodel/cardProps.ts";
@@ -43,12 +44,20 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down (Morph / Manifest / A Mysterious Creature), the way paper play
+  // does. Without a marker the card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
   const { src: cardSrc, isLoading: cardLoading } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken: renderCardBack ? false : isToken,
+    isToken: renderCardBack ? faceDownMarker !== null : isToken,
     tokenFilters: !renderCardBack && isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: !renderCardBack && isToken && obj ? obj.token_image_ref : undefined,
+    tokenImageRef: renderCardBack
+      ? (faceDownMarker ?? undefined)
+      : isToken && obj
+        ? obj.token_image_ref
+        : undefined,
     oracleId: renderCardBack ? undefined : imageLookup.oracleId,
     faceName: renderCardBack ? undefined : imageLookup.faceName,
   });
@@ -74,7 +83,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const src = renderCardBack ? CARD_BACK_URL : cardSrc;
+  const src = renderCardBack ? (cardSrc ?? CARD_BACK_URL) : cardSrc;
   const isLoading = renderCardBack ? false : cardLoading;
   // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
   // Kamigawa flip card stores its alternative half in the same slot and has no
@@ -110,7 +119,9 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     );
   }
 
-  const renderedSrc = renderCardBack ? CARD_BACK_URL : (src ?? "");
+  // The card back remains the fallback: a marker that fails to resolve must not
+  // leave the permanent blank.
+  const renderedSrc = renderCardBack ? (src ?? CARD_BACK_URL) : (src ?? "");
   const headerHeight = isCompactHeight
     ? "clamp(8px, calc(var(--art-crop-h) * 0.16), 12px)"
     : "clamp(8px, calc(var(--art-crop-h) * 0.18), 20px)";

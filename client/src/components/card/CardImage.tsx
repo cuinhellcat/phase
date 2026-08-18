@@ -3,8 +3,9 @@ import { useTranslation } from "react-i18next";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
-import type { TokenImageRef } from "../../adapter/types.ts";
+import type { FaceDownCause, TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -23,6 +24,12 @@ interface CardImageProps {
   tokenFilters?: TokenSearchFilters;
   tokenImageRef?: TokenImageRef | null;
   faceDown?: boolean;
+  /**
+   * Which keyword action turned the permanent face down. Selects the marker
+   * token paper play uses (Morph / Manifest / A Mysterious Creature); without
+   * it — or for a cause with no printed marker — the generic card back stays.
+   */
+  faceDownCause?: FaceDownCause | null;
   /**
    * Renders a {T} symbol overlay in the corner to mark a tapped battlefield
    * permanent. Used by selection modals — which display cards upright rather
@@ -56,18 +63,24 @@ export function CardImage({
   tokenFilters,
   tokenImageRef,
   faceDown = false,
+  faceDownCause,
   tapIndicator = false,
   oracleId,
   faceName,
   oracleText,
 }: CardImageProps) {
   const { t } = useTranslation("game");
+  // A face-down permanent shows the marker token for the ability that turned it
+  // face down, the way paper play does. With no marker (unknown cause, or the
+  // Ixidron class, which has no printing) the lookup is skipped entirely and the
+  // generic card back is rendered exactly as before.
+  const faceDownMarker = faceDownMarkerRef(faceDown, faceDownCause);
   const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
-    isToken: faceDown ? false : isToken,
+    isToken: faceDown ? faceDownMarker !== null : isToken,
     tokenFilters: faceDown ? undefined : tokenFilters,
-    tokenImageRef: faceDown ? undefined : tokenImageRef,
+    tokenImageRef: faceDown ? (faceDownMarker ?? undefined) : tokenImageRef,
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
   });
@@ -113,7 +126,9 @@ export function CardImage({
   //   - `imageError`: the resolved `<img>` failed to load.
   // Both render the card/token name (and Oracle text when known) so every artless
   // card or token — not just one hard-coded name — stays identifiable.
-  const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
+  // The card back remains the fallback: a marker that fails to resolve (offline,
+  // missing printing) must not leave the permanent blank.
+  const renderedSrc = faceDown ? (src ?? CARD_BACK_URL) : (src ?? "");
   const renderedAlt = faceDown ? t("card.faceDownName") : cardName;
 
   return (
