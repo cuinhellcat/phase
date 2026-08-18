@@ -840,6 +840,7 @@ mod martial_impetus_other_attacker_exclusion_6017;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod mauhur_swarming_of_moria;
+mod max_speed_owner_arm_from_graveyard;
 mod maze_of_ith_untap_bidirectional_prevent;
 mod mazemind_tome_existential_counter_state_trigger;
 mod mbaku_attacked_monarch_intervening_if;

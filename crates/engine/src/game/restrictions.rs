@@ -1646,9 +1646,10 @@ pub(crate) fn evaluate_condition(
         //
         // SOURCE-relative, not activator-relative — the one place this leaf
         // differs from its designation siblings above. `player` here is whoever
-        // is activating, and CR 602.1a lets an `activator_filter` of
-        // `PlayerFilter::All` ("Any player may activate this ability", 42 cards
-        // in the pool) make the activator someone other than the controller.
+        // is activating, and CR 602.2's "unless the object specifically says
+        // otherwise" lets an `activator_filter` of `PlayerFilter::All` ("Any
+        // player may activate this ability", 42 cards in the pool) make the
+        // activator someone other than the controller.
         // `HasCityBlessing` reading `player` is right because its cards print
         // "only if YOU have the city's blessing", addressed to the activator;
         // CR 702.178a's "your" is addressed to the source instead.
@@ -1658,9 +1659,10 @@ pub(crate) fn evaluate_condition(
         // reachable: five Aetherdrift Surveyors activate theirs from a graveyard.
         //
         // Delegates to the single `game::speed` authority — the same helper
-        // `layers.rs` uses for `StaticCondition::HasMaxSpeed` — so the
-        // CR 702.179d "speed may exceed 4" exception reads identically whether a
-        // card gates a static ability or an activation on it.
+        // `layers.rs` uses for `StaticCondition::HasMaxSpeed` — so CR 702.179e
+        // ("a player has max speed if their speed is 4") and the CR 101.1
+        // card-over-rule override that lets a static raise that cap (Gomif) read
+        // identically whether a card gates a static ability or an activation.
         ParsedCondition::HasMaxSpeed => state.objects.get(&source_id).is_some_and(|object| {
             let whose_speed = if object.zone == Zone::Battlefield {
                 object.controller

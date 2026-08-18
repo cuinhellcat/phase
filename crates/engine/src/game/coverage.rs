@@ -22,12 +22,12 @@ use crate::types::ability::{
     CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
     Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    VoteSubject, ZoneRef,
+    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3915,6 +3915,30 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         if is_lift_shape {
             d.push(("repeat_for".into(), fmt_quantity(rf)));
         }
+    }
+    // CR 702.178a: the "Max speed —" prefix is a GATE, not an effect — it lowers
+    // to an `activation_restrictions` entry, and that field is otherwise absent
+    // from the per-card parse signature. Without this projection the gate is
+    // invisible to the parse-diff, so adding or losing it on a card reads as
+    // "no card-parse changes".
+    //
+    // Scoped to exactly the shape `keyword_prefix_activation_restriction`
+    // (parser/oracle.rs) produces, mirroring the `repeat_for` discipline above:
+    // projecting the whole `activation_restrictions` surface would migrate every
+    // card printing an "Activate only if …" clause in one shot, which is a
+    // deliberate global coverage-schema migration and not this change.
+    // COUPLING: if another keyword prefix is ever lowered to an activation
+    // restriction, widen this scope in lockstep or that new class is false-green
+    // in the parse-diff.
+    if def.activation_restrictions.iter().any(|r| {
+        matches!(
+            r,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::HasMaxSpeed),
+            }
+        )
+    }) {
+        d.push(("gate".into(), "max speed".into()));
     }
     if def.optional_targeting {
         d.push(("targeting".into(), "optional (up to)".into()));

@@ -1082,7 +1082,7 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
         // CR 702.179e: reads the controller's `speed` plus a controller-scoped
-        // battlefield scan for the CR 702.179d cap-lifting static (via
+        // battlefield scan for the CR 101.1 cap-raising static (via
         // `game::speed`) — the same two apply()-constant sources as the
         // designation predicates above and `ControlsCommander` below. No combat,
         // damage, or pending-cast history.
