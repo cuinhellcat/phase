@@ -537,9 +537,10 @@ pub(crate) fn handle_turn_face_up(
         ));
     }
 
-    match pay_turn_face_up_cost(state, player, object_id, &cost, has_x, announced_x, events)? {
+    let announced_x = has_x.then_some(announced_x);
+    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
         super::casting::SpecialActionManaPayment::Paid => {
-            finish_paid_turn_face_up(state, player, object_id, has_x, announced_x, events)
+            finish_paid_turn_face_up(state, player, object_id, announced_x, events)
         }
         // The permanent is still face down and nothing has been committed: the
         // mana source's replacement choice owns the window now.
@@ -556,15 +557,13 @@ fn pay_turn_face_up_cost(
     player: PlayerId,
     object_id: ObjectId,
     cost: &ManaCost,
-    cost_had_x: bool,
-    announced_x: u32,
+    announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<super::casting::SpecialActionManaPayment, EngineError> {
     let resume = crate::types::game_state::ManaAbilityResume::TurnFaceUp {
         player,
         object_id,
         cost: cost.clone(),
-        cost_had_x,
         announced_x,
     };
     super::casting::pay_special_action_mana_cost_with_resume(
@@ -586,24 +585,15 @@ pub(crate) fn resume_turn_face_up_payment(
     player: PlayerId,
     object_id: ObjectId,
     cost: ManaCost,
-    cost_had_x: bool,
-    announced_x: u32,
+    announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // The locked cost already had CR 107.3d's `{X}` concretized, so its shards
     // no longer say X. Keep the pre-concretization fact separately: X=0 is a
     // real announcement and must still bind to the resulting trigger.
-    match pay_turn_face_up_cost(
-        state,
-        player,
-        object_id,
-        &cost,
-        cost_had_x,
-        announced_x,
-        events,
-    )? {
+    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
         super::casting::SpecialActionManaPayment::Paid => {
-            finish_paid_turn_face_up(state, player, object_id, cost_had_x, announced_x, events)
+            finish_paid_turn_face_up(state, player, object_id, announced_x, events)
         }
         super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }
@@ -614,8 +604,7 @@ pub(crate) fn finish_paid_turn_face_up(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
-    has_x: bool,
-    announced_x: u32,
+    announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
@@ -637,7 +626,7 @@ pub(crate) fn finish_paid_turn_face_up(
     // ANOTHER object may be on the stack with its own announced X in flight, and
     // that value must survive. The carrier is cleared at the start of the next
     // `resolve_top`, so this publication cannot outlive the trigger it is for.
-    if has_x {
+    if let Some(announced_x) = announced_x {
         state.announced_source_x = Some((object_id, announced_x));
     }
 
@@ -645,7 +634,9 @@ pub(crate) fn finish_paid_turn_face_up(
     Ok(WaitingFor::Priority { player })
 }
 
-/// CR 702.37c: Turning a face-down permanent face up restores its original characteristics.
+/// CR 702.37e: Turning a face-down permanent face up ends the morph effect and
+/// the permanent "regains its normal characteristics". (CR 702.37c is the
+/// CASTING half — it is what turns the card face down in the first place.)
 ///
 /// Validates that the player controls the permanent and that it has morph/disguise
 /// cost data stored. Sets `face_down = false`, restores characteristics from

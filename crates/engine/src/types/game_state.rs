@@ -6975,12 +6975,10 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         object_id: ObjectId,
         cost: ManaCost,
-        /// Whether the pre-concretization turn-face-up cost contained X. This
-        /// must remain distinct from an announced value of zero: CR 107.3d
-        /// permits X=0, and CR 702.37f / CR 702.168e still bind that zero to a
-        /// resulting turn-face-up trigger after a paused payment resumes.
-        cost_had_x: bool,
-        announced_x: u32,
+        /// The announced value for a cost that contained X. `None` means the
+        /// cost had no X; `Some(0)` remains a real CR 107.3d announcement and
+        /// binds that zero to the resulting turn-face-up trigger.
+        announced_x: Option<u32>,
     },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
     /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
@@ -10419,6 +10417,47 @@ fn migrate_legacy_tap_effect(effect: &mut serde_json::Value) {
     );
     effect.insert("scope".to_string(), serde_json::json!({ "type": scope }));
     effect.insert("state".to_string(), serde_json::json!({ "type": state }));
+}
+
+/// Maps the pre-Option turn-face-up continuation wire shape onto the typed
+/// `Option<u32>` representation. A legacy `cost_had_x: false` plus zero was
+/// never an X announcement, while `true` plus zero was.
+fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(resume) = object.get_mut("TurnFaceUp") {
+                let fields = resume
+                    .as_object_mut()
+                    .ok_or_else(|| "legacy TurnFaceUp resume must be an object".to_string())?;
+                if let Some(cost_had_x) = fields.remove("cost_had_x") {
+                    let cost_had_x = cost_had_x.as_bool().ok_or_else(|| {
+                        "legacy TurnFaceUp resume cost_had_x must be a boolean".to_string()
+                    })?;
+                    let announced_x = fields
+                        .remove("announced_x")
+                        .unwrap_or_else(|| serde_json::Value::from(0));
+                    fields.insert(
+                        "announced_x".to_string(),
+                        if cost_had_x {
+                            announced_x
+                        } else {
+                            serde_json::Value::Null
+                        },
+                    );
+                }
+            }
+            for value in object.values_mut() {
+                migrate_legacy_turn_face_up_resume(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn delayed_trigger_install_command(
@@ -17630,6 +17669,7 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        migrate_legacy_turn_face_up_resume(&mut value)?;
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
@@ -17657,6 +17697,7 @@ impl GameStateDecode {
                 ),
             )?;
         }
+        migrate_legacy_turn_face_up_resume(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -17687,6 +17728,7 @@ impl GameStateDecode {
         )?;
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
+        migrate_legacy_turn_face_up_resume(value)?;
         Ok(())
     }
 
@@ -25066,6 +25108,34 @@ mod tests {
             serde_json::json!({ "type": "Untap" }),
             "only serialized Effect payloads are migrated"
         );
+    }
+
+    #[test]
+    fn legacy_turn_face_up_resume_preserves_none_and_zero() {
+        let mut legacy = serde_json::json!({
+            "no_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": false,
+                    "announced_x": 0
+                }
+            },
+            "zero_x": {
+                "TurnFaceUp": {
+                    "cost_had_x": true,
+                    "announced_x": 0
+                }
+            }
+        });
+
+        migrate_legacy_turn_face_up_resume(&mut legacy).expect("legacy shape migrates");
+
+        assert_eq!(
+            legacy["no_x"]["TurnFaceUp"]["announced_x"],
+            serde_json::Value::Null
+        );
+        assert_eq!(legacy["zero_x"]["TurnFaceUp"]["announced_x"], 0);
+        assert!(legacy["no_x"]["TurnFaceUp"].get("cost_had_x").is_none());
+        assert!(legacy["zero_x"]["TurnFaceUp"].get("cost_had_x").is_none());
     }
 
     #[test]

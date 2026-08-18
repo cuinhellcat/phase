@@ -4241,6 +4241,12 @@ pub(crate) fn priority_actions_with_probe(
     // Split second does NOT stop it: CR 702.61b prohibits casting spells and
     // activating abilities, and a special action is neither (CR 116.1).
     for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if !object.face_down || object.controller != player {
+            continue;
+        }
         match crate::game::morph::turn_face_up_offer(state, player, object_id) {
             Some(crate::game::morph::TurnFaceUpOffer::Ready) => {
                 actions.push(candidate(

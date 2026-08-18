@@ -190,7 +190,7 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
                 AbilityKind::Activated,
                 Effect::Mana {
                     produced: ManaProduction::Fixed {
-                        colors: vec![ManaColor::Blue],
+                        colors: vec![ManaColor::Red],
                         contribution: ManaContribution::Base,
                     },
                     restrictions: vec![],
@@ -240,8 +240,12 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
             Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. })
                 if matches!(
                     &pending.resume,
-                    ManaAbilityResume::TurnFaceUp { player, object_id, .. }
-                        if *player == P0 && *object_id == id
+                    ManaAbilityResume::TurnFaceUp {
+                        player,
+                        object_id,
+                        announced_x: Some(0),
+                        ..
+                    } if *player == P0 && *object_id == id
                 )
         ),
         "the typed continuation names the action to finish"

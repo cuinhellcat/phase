@@ -3285,14 +3285,12 @@ pub(crate) fn resume_mana_ability_root(
             player,
             object_id,
             cost,
-            cost_had_x,
             announced_x,
         } => super::morph::resume_turn_face_up_payment(
             state,
             player,
             object_id,
             cost,
-            cost_had_x,
             announced_x,
             events,
         ),
@@ -3414,17 +3412,9 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         ManaAbilityResume::TurnFaceUp {
             player,
             object_id,
-            cost_had_x,
             announced_x,
             ..
-        } => super::morph::finish_paid_turn_face_up(
-            state,
-            player,
-            object_id,
-            cost_had_x,
-            announced_x,
-            events,
-        ),
+        } => super::morph::finish_paid_turn_face_up(state, player, object_id, announced_x, events),
         ManaAbilityResume::EndContinuousEffect { player, group, .. } => Ok(
             super::end_continuous_effect::finish_paid_end_continuous_effect(
                 state, player, group, events,
