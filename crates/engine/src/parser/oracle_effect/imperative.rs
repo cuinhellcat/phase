@@ -6043,7 +6043,8 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
         // Equipment to that creature" (Conductive Machete, #7531). Same anaphor
         // and same authority the counter path already uses for the identical
         // shape ("create a token, then put a counter on that creature"), so the
-        // two consumers cannot disagree about what "that creature" means. The
+        // two consumers cannot disagree about what "that creature" means.
+        //
         // The DEMONSTRATIVE-only entry point is deliberate: bare "it" is already
         // resolved by the branch above through
         // `attach_neuter_recipient_resolves_via_subject`, a wider gate, and
@@ -6053,16 +6054,6 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
         {
             return (bound, &trimmed[lower.len()..]);
         }
-        // CR 608.2c: a DEMONSTRATIVE recipient after a clause that produced a
-        // permanent names that permanent — "manifest dread, then attach this
-        // Equipment to that creature" (Conductive Machete, #7531). Same anaphor
-        // and same authority the counter path already uses for the identical
-        // shape ("create a token, then put a counter on that creature"), so the
-        // two consumers cannot disagree about what "that creature" means. The
-        // bare "it" form is handled by the branch above and is left untouched:
-        // its gate is deliberately wider (`attach_neuter_recipient_resolves_via_subject`)
-        // and re-routing it here would change bindings that have nothing to do
-        // with a chain-created referent.
     }
     (target, rest)
 }

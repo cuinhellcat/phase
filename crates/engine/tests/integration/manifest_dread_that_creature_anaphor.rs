@@ -128,6 +128,116 @@ fn an_empty_library_manifests_nothing_and_attaches_nothing() {
     );
 }
 
+/// A board that plays a REAL producer first, so the referent slot already holds
+/// something when the Machete's own producer runs. Both Equipment start in
+/// hand; the Blade is cast and resolved, leaving its Soldier token as the
+/// chain's most-recent referent.
+fn board_with_a_prior_referent(library: usize) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for i in 0..library {
+        scenario.add_card_to_library_top(P0, &format!("Library {i}"));
+    }
+    let blade = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Ancestral Blade", ANCESTRAL_BLADE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let machete = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Conductive Machete", MACHETE)
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(P0, vec![]);
+    let mut runner = scenario.build();
+
+    runner.cast(blade).resolve();
+    runner.advance_until_stack_empty();
+    let prior = host_of(&runner, blade).expect("setup: the Blade equips its own token");
+    assert_eq!(
+        runner.state().last_created_token_ids,
+        vec![prior],
+        "setup: the prior producer left its token as the chain referent"
+    );
+
+    (runner, machete, prior)
+}
+
+/// The reviewer's continuation case, accepted: with a PRIOR referent already in
+/// the slot, the paused two-card choice must leave the newly manifested card as
+/// the referent — not the token the previous instruction produced.
+///
+/// The starting slot is non-empty on purpose. A test that starts empty cannot
+/// tell "published the new entrant" from "retained whatever was there", because
+/// both leave a slot that happens to be right.
+#[test]
+fn a_paused_continuation_overwrites_a_prior_referent() {
+    let (mut runner, machete, prior) = board_with_a_prior_referent(2);
+    let manifested = runner.state().players[0].library[0];
+
+    runner.cast(machete).resolve();
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManifestDreadChoice { .. }
+        ),
+        "manifest dread must pause for the two-card choice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![manifested],
+        })
+        .expect("choose the card to manifest");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        host_of(&runner, machete),
+        Some(manifested),
+        "the Machete equips what its OWN manifest dread produced"
+    );
+    assert_ne!(
+        host_of(&runner, machete),
+        Some(prior),
+        "and never the earlier instruction's token"
+    );
+    assert_eq!(
+        runner.state().last_created_token_ids,
+        vec![manifested],
+        "the slot names the most recent producer's output"
+    );
+}
+
+/// The same board, declined: manifest dread produces NOTHING, so the
+/// demonstrative names nothing and the Equipment stays unattached.
+///
+/// This is the row the stale-referent failure mode shows up in. `LastCreated`
+/// is a game-lifetime slot, so a producer that runs and produces nothing must
+/// leave it EMPTY — otherwise "that creature" silently reaches back to the
+/// previous instruction's token and the Machete equips a creature the sentence
+/// never mentioned. Without the producer's up-front clear this row equips
+/// `prior`.
+#[test]
+fn a_producer_that_produces_nothing_does_not_leave_a_prior_referent_standing() {
+    let (mut runner, machete, prior) = board_with_a_prior_referent(0);
+
+    runner.cast(machete).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        host_of(&runner, machete),
+        None,
+        "nothing was manifested, so there is no creature to equip — and \
+         certainly not {prior:?} from the previous instruction"
+    );
+    assert!(
+        runner.state().last_created_token_ids.is_empty(),
+        "a producer that produced nothing leaves nothing behind, got {:?}",
+        runner.state().last_created_token_ids
+    );
+}
+
 /// The token sibling must keep working — and it is the reach guard for the
 /// negative assertion above: if this harness could not attach an Equipment at
 /// all, this test would fail too.

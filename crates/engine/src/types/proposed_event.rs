@@ -19,7 +19,7 @@ use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
-pub use super::zones::EtbTapState;
+pub use super::zones::{ChainReferentIntent, EtbTapState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
@@ -456,6 +456,11 @@ pub enum ProposedEvent {
         /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face_down_profile: Option<Box<FaceDownProfile>>,
+        /// CR 608.2c: whether this entry is the producer a following
+        /// demonstrative anaphor binds to. Rides the event so a CR 616.1
+        /// pause/resume delivers the same answer the effect asked for.
+        #[serde(default, skip_serializing_if = "ChainReferentIntent::is_silent")]
+        chain_referent: ChainReferentIntent,
         /// CR 614.12a + CR 616.1c + CR 707.2: Pre-entry copy payload for
         /// Mystic Reflection-style replacements. The copied values ride the
         /// event so later replacement passes can match the entering permanent
@@ -809,6 +814,7 @@ impl ProposedEvent {
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            chain_referent: ChainReferentIntent::default(),
             enter_as_copy: None,
             discard_frame: None,
             applied: HashSet::new(),

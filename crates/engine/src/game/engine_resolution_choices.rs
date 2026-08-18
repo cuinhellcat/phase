@@ -1830,7 +1830,10 @@ pub(super) fn handle_resolution_choice(
                     Zone::Battlefield,
                     source_id,
                 )
-                .face_down(face_down),
+                // CR 608.2c + CR 701.62a: the same producer as `manifest_card`,
+                // reached through the two-card choice instead of synchronously.
+                .face_down(face_down)
+                .publishing_chain_referent(),
                 events,
             ) {
                 crate::game::zone_pipeline::ZoneMoveResult::Done => {}
