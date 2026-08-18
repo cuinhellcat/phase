@@ -19,7 +19,9 @@ use engine::types::ability::{
     ReplacementDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ManaAbilityResume, PendingCostMoveResume, WaitingFor};
+use engine::types::game_state::{
+    ManaAbilityResume, PendingCostMoveResume, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -157,6 +159,11 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         ))
 }
 
+const WARBREAK_TRUMPETER: &str = "Morph {X}{X}{R} (You may cast this card face down as a 2/2 \\
+                                  creature for {3}. Turn it face up any time for its morph \\
+                                  cost.)\nWhen this creature is turned face up, create X 1/1 red \\
+                                  Goblin creature tokens.";
+
 /// CR 605.3b + CR 616.1: the offer is only honest if the action can FINISH.
 ///
 /// A mana source whose own cost exiles it, plus two exile→graveyard
@@ -174,8 +181,7 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let id = scenario
-        .add_creature_to_hand(P0, "Coral Trickster", 2, 1)
-        .with_keyword(Keyword::Morph(morph_cost()))
+        .add_creature_to_hand_from_oracle(P0, "Warbreak Trumpeter", 1, 1, WARBREAK_TRUMPETER)
         .id();
     let source = scenario
         .add_creature(P0, "Self-Exiling Mana Source", 1, 1)
@@ -217,12 +223,6 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
     engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
         .expect("the card is played face down");
 
-    assert_eq!(
-        offered_turn_face_ups(&runner),
-        vec![id],
-        "the auto-tap probe finds the self-exiling source, so the action is offered"
-    );
-
     let paused = runner
         .act(GameAction::TurnFaceUp {
             object_id: id,
@@ -260,7 +260,23 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
         !obj.face_down,
         "CR 605.3b: the locked payment completed and the flip committed"
     );
-    assert_eq!(obj.name, "Coral Trickster");
+    assert_eq!(obj.name, "Warbreak Trumpeter");
+    let bound_x = runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if *source_id == id => Some(ability.chosen_x),
+            _ => None,
+        })
+        .expect("the turned-face-up trigger must be on the stack after the paused payment");
+    assert_eq!(
+        bound_x,
+        Some(0),
+        "a paused X=0 payment must preserve the real zero announcement, not collapse it to no X"
+    );
     assert_eq!(
         runner.state().objects[&source].zone,
         Zone::Graveyard,

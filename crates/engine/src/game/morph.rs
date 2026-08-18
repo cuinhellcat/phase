@@ -537,7 +537,7 @@ pub(crate) fn handle_turn_face_up(
         ));
     }
 
-    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
+    match pay_turn_face_up_cost(state, player, object_id, &cost, has_x, announced_x, events)? {
         super::casting::SpecialActionManaPayment::Paid => {
             finish_paid_turn_face_up(state, player, object_id, has_x, announced_x, events)
         }
@@ -556,6 +556,7 @@ fn pay_turn_face_up_cost(
     player: PlayerId,
     object_id: ObjectId,
     cost: &ManaCost,
+    cost_had_x: bool,
     announced_x: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<super::casting::SpecialActionManaPayment, EngineError> {
@@ -563,6 +564,7 @@ fn pay_turn_face_up_cost(
         player,
         object_id,
         cost: cost.clone(),
+        cost_had_x,
         announced_x,
     };
     super::casting::pay_special_action_mana_cost_with_resume(
@@ -584,16 +586,24 @@ pub(crate) fn resume_turn_face_up_payment(
     player: PlayerId,
     object_id: ObjectId,
     cost: ManaCost,
+    cost_had_x: bool,
     announced_x: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // The locked cost already had CR 107.3d's `{X}` concretized, so its shards
-    // no longer say X. `announced_x` is what CR 702.37f publishes, and a nonzero
-    // value can only have come from a cost that had one.
-    let has_x = announced_x > 0;
-    match pay_turn_face_up_cost(state, player, object_id, &cost, announced_x, events)? {
+    // no longer say X. Keep the pre-concretization fact separately: X=0 is a
+    // real announcement and must still bind to the resulting trigger.
+    match pay_turn_face_up_cost(
+        state,
+        player,
+        object_id,
+        &cost,
+        cost_had_x,
+        announced_x,
+        events,
+    )? {
         super::casting::SpecialActionManaPayment::Paid => {
-            finish_paid_turn_face_up(state, player, object_id, has_x, announced_x, events)
+            finish_paid_turn_face_up(state, player, object_id, cost_had_x, announced_x, events)
         }
         super::casting::SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
     }

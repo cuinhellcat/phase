@@ -6975,6 +6975,11 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         object_id: ObjectId,
         cost: ManaCost,
+        /// Whether the pre-concretization turn-face-up cost contained X. This
+        /// must remain distinct from an announced value of zero: CR 107.3d
+        /// permits X=0, and CR 702.37f / CR 702.168e still bind that zero to a
+        /// resulting turn-face-up trigger after a paused payment resumes.
+        cost_had_x: bool,
         announced_x: u32,
     },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
