@@ -554,10 +554,36 @@ pub fn manifest_card(
         request = request.under_control_of(controller);
     }
     match super::zone_pipeline::move_object(state, request, events) {
-        super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
+        super::zone_pipeline::ZoneMoveResult::Done => {
+            publish_face_down_entry_referent(state, object_id);
+            Ok(())
+        }
+        // CR 616.1: the entry parked. The object has not entered yet, so it is
+        // not the chain's referent — the resume path is where a publish would
+        // belong, and it is not wired (see `publish_face_down_entry_referent`).
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
     }
+}
+
+/// CR 608.2c: Record a face-down entrant as the chain's most-recent created
+/// referent, so a following "it" / "that creature" anaphor
+/// (`TargetFilter::LastCreated`) binds to it — "manifest dread, then attach
+/// this Equipment to that creature" (Conductive Machete, #7531).
+///
+/// This writes the SAME slot the token producer writes
+/// (`engine_replacement.rs`, `state.last_created_token_ids`). The slot's name
+/// says "token", but its job is the anaphor's referent, not a claim about
+/// token-ness: CR 608.2c binds a demonstrative to the thing the previous
+/// instruction produced, and a manifested card and a created token are the same
+/// thing to that binding. The parser side keys on the same equivalence
+/// (`publishes_chain_created_referent`).
+///
+/// Assignment, not append — mirroring the token producer. The slot names the
+/// MOST RECENT producer, so a chain that manifests twice leaves the second
+/// entrant as the referent, which is what "that creature" means after it.
+pub(crate) fn publish_face_down_entry_referent(state: &mut GameState, object_id: ObjectId) {
+    state.last_created_token_ids = vec![object_id];
 }
 
 /// Find the object id of the top card of `player`'s library, if any.

@@ -2631,6 +2631,29 @@ pub(super) fn is_token_creating_effect(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c + CR 701.40a + CR 701.58a + CR 701.62a: Does this clause put a NEW
+/// permanent onto the battlefield that a later same-chain anaphor can name?
+///
+/// A created token and a face-down entry are indistinguishable to the anaphor.
+/// Both clauses produce exactly one new permanent and declare NO target, so a
+/// following "it" / "that creature" has exactly one possible referent — the
+/// thing the clause just made. Manifest (CR 701.40a), manifest dread
+/// (CR 701.62a) and cloak (CR 701.58a) all route through the one runtime
+/// producer (`game::morph::manifest_card`) and put a 2/2 face-down creature
+/// onto the battlefield, exactly as `Effect::Token` puts a token there.
+///
+/// Keying the chain-referent flag on "token" alone left the face-down producers
+/// with no referent, so their anaphor fell through to `ParentTarget` (empty —
+/// the producer has no targets) or to the trigger source: Conductive Machete
+/// attached to nothing, Weight Room put its counters on the Room (#7531).
+pub(super) fn publishes_chain_created_referent(effect: &Effect) -> bool {
+    is_token_creating_effect(effect)
+        || matches!(
+            effect,
+            Effect::Manifest { .. } | Effect::ManifestDread | Effect::Cloak { .. }
+        )
+}
+
 /// CR 603.12 + CR 609.3: Re-link a clause that READS the just-created-token
 /// referent published by a clause under an AFFIRMATIVE reflexive gate.
 ///

@@ -44,7 +44,7 @@ use lower::{
     extract_put_counter_multi_target, extract_remove_counter_multi_target,
     extract_switch_pt_multi_target, instruction_spine_is_continuation, is_token_creating_effect,
     parse_damage_player_scope, parse_for_each_opponent_target_fanout_clause,
-    rebind_clause_recipients_with, rebind_decline_body_recipient,
+    publishes_chain_created_referent, rebind_clause_recipients_with, rebind_decline_body_recipient,
     rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
     split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
     strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
@@ -20967,7 +20967,7 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
             .sub_ability
             .as_deref()
             .is_none_or(instruction_spine_is_continuation);
-        if is_token_creating_effect(&prev.parsed.effect) {
+        if publishes_chain_created_referent(&prev.parsed.effect) {
             // CR 603.12: a GATED publisher may create no token, so seeding
             // `LastCreated` from it is safe only when
             // `relink_gated_token_referent_consumers` (lower.rs) will move the
