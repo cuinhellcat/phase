@@ -4389,6 +4389,42 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
     }
 
+    /// CR 603.12: the connector may be followed by an intervening condition
+    /// before the mode list ("When you do, if you control five or more …,
+    /// choose one —"). The modal header split then leaves the trigger line
+    /// ending on the bare connector, which is the second surface this class
+    /// takes — The Cobra King, whose Cobra Coil token was dropped the same way
+    /// Cemetery Desecrator's exile was.
+    ///
+    /// Does NOT assert the "five or more" gate: that condition lands in the
+    /// modal header and is unrepresented both before and after this change.
+    #[test]
+    fn a_mandatory_parent_survives_a_condition_between_connector_and_modes() {
+        let parsed = parse_oracle_text(
+            "At the beginning of each player's upkeep, create a 1/1 blue Serpent creature token named Cobra Coil. When you do, if you control five or more Snakes and/or Serpents, choose one —\n• Strike first — Target Snake or Serpent you control fights target creature an opponent controls.\n• Strike hard — Put a +1/+1 counter on each Snake and Serpent you control.",
+            "The Cobra King",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Snake".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_ref())
+            .expect("the upkeep trigger must carry an execute");
+        assert!(
+            matches!(*execute.effect, Effect::Token { .. }),
+            "the printed token instruction must survive as the parent effect, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the mode list must hang off the instruction as its reflexive body");
+        assert_eq!(sub.condition, Some(AbilityCondition::WhenYouDo));
+        assert_eq!(sub.mode_abilities.len(), 2, "both modes must survive");
+    }
+
     #[test]
     fn caesar_lowers_to_reflexive_gated_modal() {
         // CR 603.12 + CR 700.2b: Caesar's attack trigger must lower to an

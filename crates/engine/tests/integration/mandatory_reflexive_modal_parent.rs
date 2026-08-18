@@ -76,20 +76,43 @@ fn resolve_enters(graveyard_fodder: bool) -> Resolution {
     runner.cast(desecrator).commit();
 
     let mut prompts = Vec::new();
+    let mut settled = false;
     for _ in 0..40 {
-        let (label, action) = match &runner.state().waiting_for {
+        let (label, action) = match runner.state().waiting_for.clone() {
             // Priority with an empty stack is the resting state: the spell, its
-            // enters trigger and any reflexive it created have all finished.
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            // enters trigger and the reflexive it created have all finished.
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                settled = true;
+                break;
+            }
             WaitingFor::Priority { .. } => (None, GameAction::PassPriority),
             WaitingFor::AbilityModeChoice { .. } => (
                 Some("AbilityModeChoice".to_string()),
                 GameAction::SelectModes { indices: vec![1] },
             ),
-            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                prompts.push("TargetSelection".to_string());
-                break;
+            // Answer every slot with its first legal target so the chosen mode
+            // actually resolves. Recording the prompt and stopping here would
+            // leave the reflexive half-resolved and prove only that a question
+            // was asked.
+            WaitingFor::TriggerTargetSelection { target_slots, .. }
+            | WaitingFor::TargetSelection { target_slots, .. } => {
+                let targets: Vec<_> = target_slots
+                    .iter()
+                    .filter_map(|slot| slot.legal_targets.first().cloned())
+                    .collect();
+                (
+                    Some("TargetSelection".to_string()),
+                    GameAction::SelectTargets { targets },
+                )
             }
+            // CR 702.21a: the chosen mode targets the opponent's warded
+            // creature. Declining the ward cost counters that mode and lets the
+            // resolution finish, which is what makes the settled state
+            // reachable without turning this file into a ward test.
+            WaitingFor::UnlessPayment { .. } => (
+                Some("UnlessPayment".to_string()),
+                GameAction::PayUnlessCost { pay: false },
+            ),
             other => {
                 prompts.push(format!("PROMPT: {}", other.variant_name()));
                 break;
@@ -102,6 +125,10 @@ fn resolve_enters(graveyard_fodder: bool) -> Resolution {
             break;
         }
     }
+    assert!(
+        settled,
+        "the resolution must reach an empty stack — prompts seen: {prompts:?}"
+    );
 
     // Count only the fodder card: the Desecrator itself is on the battlefield
     // and the library cards never moved, so a zone census over the named card
@@ -164,6 +191,16 @@ fn the_mode_list_still_resolves_after_the_instruction() {
 #[test]
 fn an_impossible_exile_moves_no_card() {
     let resolved = resolve_enters(false);
+    // Reach-guard: no object named "Fodder Card" exists in this game, so the
+    // census below would read (0, 0) even if the card failed to parse or the
+    // trigger never fired. The mode choice proves the enters trigger resolved
+    // its instruction and created the reflexive.
+    assert!(
+        resolved.prompts.iter().any(|p| p == "AbilityModeChoice"),
+        "the enters trigger must have run its instruction and created the \
+         reflexive mode choice — {:?}",
+        resolved.prompts
+    );
     assert_eq!(
         (resolved.exiled, resolved.graveyard),
         (0, 0),
