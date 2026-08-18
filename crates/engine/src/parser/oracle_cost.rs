@@ -19,6 +19,7 @@ use super::oracle_util::parse_count_expr;
 use super::oracle_util::parse_creature_subtype;
 use super::oracle_util::parse_mana_symbols;
 use super::oracle_util::parse_number;
+use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, BeholdCostAction, ChoiceType, Comparator, ControllerRef,
@@ -1031,19 +1032,32 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         value((), alt((tag("tap "), tag("tapped ")))).parse(i)
     }) {
         let tap_lower = tap_rest.to_lowercase();
-        let (count, filter_text) = if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            value(
-                (),
-                alt((tag("another untapped "), tag("an untapped "), tag("an "))),
-            )
+        // The leading quantifier reports a typed `CountWord` alongside the
+        // count. "Another"/"other" is not merely a quantity of one: it is the
+        // source-exclusion qualifier, and this branch CONSUMES it, so the
+        // remainder handed to `parse_target` no longer carries it. Without the
+        // signal the exclusion is lost and the source pays its own cost
+        // (Spire Mechcycle, #7522). Same failure and same typed remedy as the
+        // sacrifice imperative's `parse_count_expr_with_exclusion` (#4513).
+        let (count, filter_text, count_word) = if let Some((word, r)) =
+            nom_on_lower(tap_rest, &tap_lower, |i| {
+                alt((
+                    value(CountWord::SourceExclusion, tag("another untapped ")),
+                    value(CountWord::Plain, tag("an untapped ")),
+                    value(CountWord::Plain, tag("an ")),
+                ))
+                .parse(i)
+            }) {
+            (1u32, r.to_lowercase(), word)
+        } else if let Some((word, r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
+            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
+            alt((
+                value(CountWord::Plain, tag("x untapped ")),
+                value(CountWord::SourceExclusion, tag("x other untapped ")),
+            ))
             .parse(i)
         }) {
-            (1u32, r.to_lowercase())
-        } else if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
-            value((), alt((tag("x untapped "), tag("x other untapped ")))).parse(i)
-        }) {
-            (u32::MAX, r.to_lowercase())
+            (u32::MAX, r.to_lowercase(), word)
         } else if let Some((n, r)) = super::oracle_util::parse_number(&tap_lower) {
             let r = nom_on_lower(
                 &tap_rest[tap_lower.len() - r.len()..],
@@ -1052,15 +1066,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             )
             .map(|((), rest)| rest.to_lowercase())
             .unwrap_or_else(|| r.trim_start().to_string());
-            (n, r)
+            // The numeric branch does NOT consume "other" ("tap two other
+            // untapped artifacts you control"): the `untapped ` tag fails on
+            // the "other " lead, so the phrase reaches `parse_target` intact
+            // and `parse_type_phrase` supplies `FilterProp::Another` itself.
+            // Nothing to re-apply here.
+            (n, r, CountWord::Plain)
         } else {
-            (0, String::new())
+            (0, String::new(), CountWord::Plain)
         };
 
         if count > 0 {
             let target_text = format!("target {filter_text}");
             let (filter, remainder) = parse_target(&target_text);
             if remainder.trim().is_empty() {
+                let filter = match count_word {
+                    CountWord::SourceExclusion => apply_source_exclusion(filter),
+                    CountWord::Plain => filter,
+                };
                 return AbilityCost::TapCreatures {
                     requirement: TapCreaturesRequirement::count(count),
                     filter,
@@ -1535,6 +1558,26 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
     if !has_another_prefix {
         return filter;
     }
+    apply_source_exclusion(filter)
+}
+
+/// CR 109.4 + CR 701.21a: Put the source exclusion (`FilterProp::Another`) on a
+/// cost filter, distributing it over every leg of an `Or` disjunction.
+///
+/// "Another" means "not this source permanent", so it belongs on each leg the
+/// source's type could match; it is vacuous, never wrong, on a leg the source
+/// cannot match. Marking only the first leg leaves a hole for a source that
+/// matches a later one — Spire Mechcycle is a Vehicle paying "tap another
+/// untapped Mount or Vehicle you control" (#7522), the tap-cost twin of the
+/// sacrifice case in #4513.
+///
+/// The catch-all arm is a mapping, not a classification: the exclusion is a
+/// `TypedFilter` property, and the remaining `TargetFilter` variants
+/// (`SelfRef`, `Any`, zone/player filters, …) carry no property list to put it
+/// on. Callers detect the exclusion word themselves — `parse_oracle_cost`'s tap
+/// branch via a typed `CountWord`, the sacrifice branch via
+/// `ensure_another_sacrifice_filter`'s phrase prefix.
+fn apply_source_exclusion(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
             if !typed.properties.contains(&FilterProp::Another) {
@@ -1543,10 +1586,7 @@ fn ensure_another_sacrifice_filter(filter: TargetFilter, phrase: &str) -> Target
             TargetFilter::Typed(typed)
         }
         TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(|f| ensure_another_sacrifice_filter(f, phrase))
-                .collect(),
+            filters: filters.into_iter().map(apply_source_exclusion).collect(),
         },
         other => other,
     }
@@ -2344,6 +2384,73 @@ mod tests {
                 }),
             }
         );
+    }
+
+    /// CR 109.4 + CR 701.21a: the source-exclusion "another" in a `TapCreatures`
+    /// activation cost must survive into the cost filter — a permanent may not
+    /// pay its own "tap another untapped …" cost (Spire Mechcycle, #7522).
+    ///
+    /// Table-driven over the printed shapes the tap-cost grammar distinguishes,
+    /// with both counter-directions: an ordinary article and a plain numeric
+    /// count must NOT gain the exclusion (CR 601.2b — a standalone tap cost
+    /// with no "another" does include the source).
+    ///
+    /// The "two other untapped" row was already green before this fix: the
+    /// numeric branch never consumes "other", so the phrase reaches
+    /// `parse_type_phrase` intact and it supplies the property. That row pins
+    /// the path; it is not evidence for the fix.
+    #[test]
+    fn tap_cost_another_carries_the_source_exclusion() {
+        let cases: &[(&str, bool)] = &[
+            ("Tap another untapped Merfolk you control", true),
+            (
+                "Tap another untapped creature you control with flying",
+                true,
+            ),
+            ("Tap two other untapped artifacts you control", true),
+            ("Tap an untapped Merfolk you control", false),
+            ("Tap three untapped Merfolk you control", false),
+        ];
+        for (text, excluded) in cases {
+            let AbilityCost::TapCreatures { filter, .. } = parse_oracle_cost(text) else {
+                panic!("{text:?} must parse to a TapCreatures cost");
+            };
+            let TargetFilter::Typed(typed) = &filter else {
+                panic!("{text:?} must parse to a typed filter, got {filter:?}");
+            };
+            assert_eq!(
+                typed.properties.contains(&FilterProp::Another),
+                *excluded,
+                "{text:?} exclusion mismatch, got {:?}",
+                typed.properties
+            );
+        }
+    }
+
+    /// Spire Mechcycle (#7522): "Tap another untapped Mount or Vehicle you
+    /// control" — the exclusion must land on EVERY leg of the disjunction. The
+    /// Mechcycle is itself a Vehicle, so it matches the SECOND leg; marking
+    /// only the first would still let it pay its own cost.
+    #[test]
+    fn tap_cost_another_marks_every_leg_of_a_disjunction() {
+        let AbilityCost::TapCreatures { filter, .. } =
+            parse_oracle_cost("Tap another untapped Mount or Vehicle you control")
+        else {
+            panic!("expected a TapCreatures cost");
+        };
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or filter for 'Mount or Vehicle', got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two legs, got {filters:?}");
+        for leg in filters {
+            let TargetFilter::Typed(typed) = leg else {
+                panic!("expected typed legs, got {leg:?}");
+            };
+            assert!(
+                typed.properties.contains(&FilterProp::Another),
+                "every leg must carry the exclusion, got {typed:?}"
+            );
+        }
     }
 
     #[test]

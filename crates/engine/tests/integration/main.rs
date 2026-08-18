@@ -1021,6 +1021,7 @@ mod swans_prevention_followup;
 mod swarm_combat_witness;
 mod tales_of_the_ancestors_catch_up_draw;
 mod talon_gates_from_hand_activation;
+mod tap_cost_another_self_exclusion;
 mod targeted_exchange_preview_budget;
 mod tchaka_venerable_king;
 mod teamwork_aggregate_legal_actions;
