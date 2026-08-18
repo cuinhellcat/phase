@@ -1588,7 +1588,28 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of counter kinds among {}", fmt_target(filter))
         }
         QuantityRef::VoteCount { choice_index } => format!("# of votes for choice {choice_index}"),
-        QuantityRef::PreviousEffectAmount { .. } => "amount from preceding effect".into(),
+        QuantityRef::PreviousEffectAmount { channel, aggregate } => match (channel, aggregate) {
+            // Byte-identical to the pre-change string, so no existing card's
+            // coverage signature moves. Must stay FIRST: the Excess-channel
+            // corpus cards are all `Sum` and must keep hitting this arm.
+            (_, AggregateFunction::Sum) => "amount from preceding effect".into(),
+            // CR 120.10: excess damage is "equal to the difference" beyond lethal —
+            // one amount per damaged permanent, never a per-player tally. Naming a
+            // "single player's" extremum over it would describe a reduction that
+            // never happened. (The per-player table the Total channel publishes is
+            // an engine structure; no CR governs its shape, so none is cited for it.)
+            // No parser path builds that pair today; the arm exists so the renderer
+            // stays honest if one ever does.
+            (crate::types::ability::DamageChannel::Total, AggregateFunction::Max) => {
+                "greatest single player's amount from preceding effect".into()
+            }
+            (crate::types::ability::DamageChannel::Total, AggregateFunction::Min) => {
+                "least single player's amount from preceding effect".into()
+            }
+            (crate::types::ability::DamageChannel::Excess, _) => {
+                "excess amount from preceding effect".into()
+            }
+        },
         QuantityRef::PreviousEffectCount => "count from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::FilteredTrackedSetSize { filter, .. } => {
@@ -15992,6 +16013,54 @@ mod tests {
         assert!(
             card_face_gaps(&face).is_empty(),
             "CantHaveKeyword(Flying) should be covered by is_data_carrying_static()"
+        );
+    }
+    /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:
+    /// the `(_, Sum)` arm must stay first so every Excess-channel corpus card
+    /// (all of which are `Sum`) keeps rendering the pre-change string. Nothing
+    /// enforced that ordering — reordering the arms would silently move the
+    /// coverage signature of every Excess card, reddening CI's coverage check
+    /// with no indication of the cause. rustc emits NO `unreachable pattern`
+    /// warning for the reorder, so the compiler will not catch it either. These
+    /// six assertions -- one per channel/aggregate pair -- are that guard.
+    #[test]
+    fn previous_effect_amount_renders_every_channel_aggregate_pair() {
+        use crate::types::ability::{AggregateFunction, DamageChannel};
+        let render = |channel, aggregate| {
+            fmt_quantity_ref(&QuantityRef::PreviousEffectAmount { channel, aggregate })
+        };
+
+        // Order-dependent: `(_, Sum)` is matched before the Excess catch-all, so
+        // the Excess+Sum pair renders the SUM string, not the excess one.
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Sum),
+            "amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Sum),
+            "amount from preceding effect",
+            "the (_, Sum) arm must stay FIRST: Excess+Sum is the shape the corpus \
+             actually holds, and it must keep the pre-change signature"
+        );
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Max),
+            "greatest single player's amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Total, AggregateFunction::Min),
+            "least single player's amount from preceding effect"
+        );
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Max),
+            "excess amount from preceding effect"
+        );
+        // The pair space is 2 channels x 3 aggregates = 6, which is more than the
+        // four match arms; `(Excess, Min)` routes through the same catch-all as
+        // `(Excess, Max)` and is asserted so the name's claim of completeness is
+        // literally true rather than true-of-the-arms.
+        assert_eq!(
+            render(DamageChannel::Excess, AggregateFunction::Min),
+            "excess amount from preceding effect"
         );
     }
 }
