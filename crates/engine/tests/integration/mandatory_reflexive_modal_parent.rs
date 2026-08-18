@@ -1,4 +1,4 @@
-//! CR 118.12 + CR 603.12: a MANDATORY instruction printed before a reflexive
+//! CR 603.12: a mandatory instruction printed before a reflexive
 //! "When you do" whose body is a mode list.
 //!
 //! Cemetery Desecrator — "When this creature enters or dies, exile another card
@@ -18,9 +18,6 @@
 //! Oracle text verified against `client/public/card-data.json`.
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
-//! - CR 118.12: the parent is printed two ways — "[Do something]. If [a player]
-//!   [does] …" and "[A player] may [do something]. If [that player] [does] …".
-//!   The marker says how the instruction is offered, not whether one exists.
 //! - CR 603.12: a reflexive triggered ability triggers "based on whether the
 //!   trigger event or events occurred earlier during the resolution of the
 //!   spell or ability that created them".
@@ -148,7 +145,7 @@ fn resolve_enters(graveyard_fodder: bool) -> Resolution {
     }
 }
 
-/// CR 118.12: the printed instruction before the reflexive connector is a real
+/// CR 603.12: the printed instruction before the reflexive connector is a real
 /// instruction and must be performed.
 ///
 /// Counter-probe: with the `Mandatory` arm removed from

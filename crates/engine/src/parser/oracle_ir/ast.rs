@@ -1992,20 +1992,17 @@ fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
 
 // --- Modal types (moved from oracle_modal.rs) ---
 
-/// CR 118.12 + CR 603.12: The printed instruction a triggered modal's reflexive
+/// CR 603.12: The printed instruction a triggered modal's reflexive
 /// connector rides on — `"<trigger>, <instruction>. When you do, choose …"`.
 ///
-/// CR 118.12 prints the instruction two ways, and the connector reads the same
-/// in both: `"[A player] may [do something]. If [that player] [does] …"` and
-/// the bare `"[Do something]. If [a player] [does] …"`. Classifying on the
-/// `"you may "` marker alone therefore answers the wrong question — the marker
-/// says how the instruction is OFFERED, not whether a reflexive exists. The
-/// connector is what decides that, so this type keeps the two apart.
+/// The `"When you do"` connector creates the reflexive triggered ability. The
+/// `"you may "` marker only makes its parent instruction optional, so it cannot
+/// decide whether a reflexive exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ReflexiveModalParent {
-    /// `"…, you may <cost>. When you do, choose …"` — a declinable
-    /// resolution-time payment (Caesar, Legion's Emperor). Carries the printed
-    /// cost text with the `"you may "` marker and the connector stripped;
+    /// `"…, you may <instruction>. When you do, choose …"` — a declinable
+    /// resolution-time instruction (Caesar, Legion's Emperor). Carries the
+    /// printed instruction text with the `"you may "` marker and connector stripped;
     /// `trigger_line` is reduced to the bare trigger condition alongside it.
     MayPay(String),
     /// `"…, <instruction>. When you do, choose …"` — a mandatory instruction

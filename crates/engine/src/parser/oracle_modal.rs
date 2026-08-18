@@ -974,19 +974,19 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
     None
 }
 
-/// CR 118.12 + CR 603.12: Classify how a triggered modal's mode list is
+/// CR 603.12: Classify how a triggered modal's mode list is
 /// introduced, and reduce `trigger_line` to what the trigger parser should see.
 ///
 /// This is the single authority for that question. The reflexive CONNECTOR
 /// decides whether a reflexive exists at all; the `"you may "` marker only says
-/// how the parent instruction is offered (CR 118.12 prints both forms). Keying
-/// the whole decision on the marker — as this dispatch did — silently answered
+/// whether the parent instruction is optional. Keying the whole decision on the
+/// marker — as this dispatch did — silently answered
 /// "no reflexive here" for every mandatory parent, and the mode list then
 /// attached straight to the trigger with the printed instruction discarded.
 ///
 /// * `MayPay` — `trigger_line` is reduced to the bare trigger condition and the
-///   cost text travels separately, because the cost is not something the
-///   trigger parser can lower on its own (it is a resolution-time payment).
+///   instruction text travels separately, because that optional instruction is
+///   lowered by the resolution-time path.
 /// * `Mandatory` — `trigger_line` is returned WHOLE, instruction and connector
 ///   included. The trigger parser already lowers exactly this shape correctly
 ///   for every non-modal reflexive; lowering then hangs the modal off that
@@ -1022,17 +1022,17 @@ fn ends_in_reflexive_connector(trigger_line: &str) -> bool {
     nom_condition::match_when_you_do(tail).is_ok_and(|(rest, ())| rest.is_empty())
 }
 
-/// CR 603.12 + CR 700.2b: Recognize a reflexive optional-cost trigger header of
-/// the shape `"<trigger>, you may <cost>. When you do"` (Caesar, Legion's
+/// CR 603.12 + CR 700.2b: Recognize a reflexive optional-instruction trigger
+/// header of the shape `"<trigger>, you may <instruction>. When you do"` (Caesar, Legion's
 /// Emperor) and split it into the bare trigger condition (`"Whenever you
-/// attack"`) and the cost effect text (`"Sacrifice another creature"`, with the
+/// attack"`) and the instruction text (`"Sacrifice another creature"`, with the
 /// `"you may "` optional marker and the trailing `". When you do"` reflexive
 /// connector stripped). Returns `None` for a plain triggered modal (Pip-Boy
 /// 3000's `"Whenever equipped creature attacks ..."`), which has neither a
-/// `"you may "` optional cost nor a `"when you do"` reflexive connector — that
+/// `"you may "` optional instruction nor a `"when you do"` reflexive connector — that
 /// modal attaches directly to the trigger's execute.
 ///
-/// The cost text is returned with an uppercased leading letter so it parses as
+/// The instruction text is returned with an uppercased leading letter so it parses as
 /// an imperative effect clause (`parse_effect_chain` expects sentence case).
 fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)> {
     // Combinator (run on lowercase, slice original by equal ASCII byte offset):
@@ -1230,7 +1230,7 @@ pub(crate) fn lower_oracle_block_ir(
                             modal: Some(payload.clone()),
                         }))
                     }
-                    // CR 118.12 + CR 608.2c: a mandatory parent. The trigger
+                    // CR 603.12 + CR 608.2c: a mandatory parent. The trigger
                     // parser already lowered the printed instruction — the same
                     // path that handles every non-modal reflexive — so take
                     // that chain as the parent and hang the mode list off it as
@@ -1245,12 +1245,17 @@ pub(crate) fn lower_oracle_block_ir(
                             }))
                         }
                         // The connector is there but the instruction did not
-                        // lower to a plain chain (it is itself a vote, pile or
-                        // reflexive payment block). Those shapes carry their own
+                        // lower to a plain chain. These shapes carry their own
                         // root transforms and nesting them here would misreport
                         // what the card does, so keep the pre-existing plain
                         // modal rather than invent a parent.
-                        _ => TriggerBody::Modal(Box::new(payload.clone())),
+                        Some(
+                            TriggerBody::Reflexive(_)
+                            | TriggerBody::Modal(_)
+                            | TriggerBody::Vote(_)
+                            | TriggerBody::Pile(_),
+                        )
+                        | None => TriggerBody::Modal(Box::new(payload.clone())),
                     },
                     None => TriggerBody::Modal(Box::new(payload.clone())),
                 };
@@ -1515,9 +1520,9 @@ pub(crate) fn lower_oracle_block(
             // produced, so it is resolved inside the loop below.
             let execute = match &reflexive_parent {
                 // CR 603.12 + CR 700.2b: The modal is gated behind a reflexive
-                // optional cost. Build `Effect::Sacrifice { optional }` whose
+                // optional instruction. Build `Effect::Sacrifice { optional }` whose
                 // `WhenYouDo` sub_ability carries the modal, so the modes are
-                // chosen and resolved only after the controller pays the cost
+                // chosen and resolved only after the controller performs that instruction
                 // (Caesar, Legion's Emperor). The decline path is handled by
                 // `should_resolve_subability_on_optional_decline` (WhenYouDo →
                 // false), so declining the sacrifice resolves no modes.
@@ -1527,14 +1532,14 @@ pub(crate) fn lower_oracle_block(
                         cost_text,
                         AbilityKind::Spell,
                     );
-                    // CR 118.12 + CR 701.21: "you may sacrifice" makes the
-                    // sacrifice cost optional during resolution; the controller
-                    // is prompted before paying it.
+                    // CR 603.12 + CR 701.21: "you may sacrifice" makes the
+                    // sacrifice instruction optional during resolution; the
+                    // controller chooses whether to perform it.
                     cost_ability.optional = true;
                     cost_ability.sub_ability = Some(Box::new(modal_ability));
                     Box::new(cost_ability)
                 }
-                // CR 118.12 + CR 608.2c: a mandatory parent stays in the trigger
+                // CR 603.12 + CR 608.2c: a mandatory parent stays in the trigger
                 // line, so the parent is the trigger's own execute and the modal
                 // becomes its reflexive body.
                 Some(ReflexiveModalParent::Mandatory) => {
@@ -4305,7 +4310,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         );
     }
 
-    /// CR 118.12: the classifier answers on the reflexive CONNECTOR, so the
+    /// CR 603.12: the classifier answers on the reflexive CONNECTOR, so the
     /// `"you may "` marker only chooses between the two parent shapes.
     ///
     /// Table-driven on purpose: the marker and the connector are independent
@@ -4351,8 +4356,8 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         }
     }
 
-    /// CR 118.12 + CR 608.2c: a mandatory instruction printed before the mode
-    /// list is kept and the modal becomes its CR 603.12 reflexive body — the
+    /// CR 603.12 + CR 608.2c: a mandatory instruction printed before the mode
+    /// list is kept and the modal becomes its reflexive body — the
     /// same shape Caesar's optional parent produces, minus the decline.
     ///
     /// Guards the class, not the card: `Mandatory` carries no card-specific

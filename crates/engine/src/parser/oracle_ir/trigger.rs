@@ -116,7 +116,7 @@ impl TriggerIr {
 pub(crate) enum TriggerBody {
     /// Normal effect chain — lowering calls `lower_effect_chain_ir`.
     EffectChain(EffectChainIr),
-    /// CR 118.12 + CR 603.12: A printed parent instruction and the reflexive
+    /// CR 603.12: A printed parent instruction and the reflexive
     /// effect that follows when its event occurred.
     Reflexive(Box<ReflexiveParentIr>),
     /// CR 700.2: An inline modal's marker clause and its already-lowered mode
@@ -134,12 +134,10 @@ pub(crate) enum TriggerBody {
 /// instruction it rides on.
 ///
 /// `parent` is the axis that used to be assumed rather than represented: this
-/// node only existed for the `"you may <cost>. When you do"` surface, so a
-/// MANDATORY parent had nowhere to live. CR 118.12 prints both — "[Do
-/// something]. If [a player] [does] …" and "[A player] may [do something]. If
-/// [that player] [does] …" — and CR 603.12 gates the reflexive on the event
-/// either way. Keeping the parent as a parameterized field rather than a
-/// sibling node means the reflexive lowering has exactly one shape.
+/// node only existed for the `"you may <instruction>. When you do"` surface, so
+/// a mandatory parent had nowhere to live. Keeping the parent as a parameterized
+/// field rather than a sibling node means the reflexive lowering has exactly one
+/// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReflexiveParentIr {
     /// How the parent instruction is printed and offered.
@@ -150,12 +148,12 @@ pub(crate) struct ReflexiveParentIr {
     pub(crate) modal: Option<ModalIr>,
 }
 
-/// CR 118.12: the two printed shapes a reflexive parent can take.
+/// CR 603.12: the two printed forms a reflexive parent can take.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ReflexiveParent {
-    /// `"you may <cost>. When you do, …"` — a resolution-time offer the
+    /// `"you may <instruction>. When you do, …"` — a resolution-time offer the
     /// controller may decline (Caesar, Legion's Emperor). `payment_chain`
-    /// carries the printed cost as an effect chain when one parsed; otherwise
+    /// carries the printed instruction as an effect chain when one parsed; otherwise
     /// lowering synthesizes an `Effect::PayCost` from `cost`.
     MayPay {
         cost: AbilityCost,

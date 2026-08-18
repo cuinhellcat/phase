@@ -1781,11 +1781,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 );
             }
 
-            // CR 118.12: the parent is a cost the controller may decline, or a
-            // printed instruction that simply happens. `optional` is the ONLY
-            // difference between the two arms — CR 603.12 gates the reflexive
-            // on the event in both cases, so both build the same parent →
-            // `WhenYouDo` sub shape.
+            // CR 603.12: the parent is either an optional instruction the
+            // controller may decline or a mandatory instruction. Both build the
+            // same parent → `WhenYouDo` sub shape.
             let mut parent_ability = match &reflexive.parent {
                 ReflexiveParent::MayPay {
                     cost,
@@ -1805,7 +1803,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                     pay_ability.optional = true;
                     pay_ability
                 }
-                // CR 118.12 + CR 608.2c: a mandatory instruction is the next
+                // CR 603.12 + CR 608.2c: a mandatory instruction is the next
                 // printed instruction, not an offer — it carries no `optional`
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
