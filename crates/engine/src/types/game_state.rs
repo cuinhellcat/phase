@@ -6962,6 +6962,21 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         cost: ManaCost,
     },
+    /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 605.3b + CR 616.1:
+    /// A turn-face-up special action whose auto-tapped mana source paused on a
+    /// replacement-aware cost move. `cost` is the final cost locked at action
+    /// initiation — after the special-action reduction and after CR 107.3d's
+    /// `{X}` was concretized — so resumption cannot re-derive it against a board
+    /// that changed while the replacement choice was pending. `announced_x`
+    /// travels with it because CR 702.37f / CR 702.168e publish that value to the
+    /// permanent's own turn-face-up trigger, which fires after the payment
+    /// completes.
+    TurnFaceUp {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        announced_x: u32,
+    },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
     /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
     /// is the permission's printed cost, latched at action initiation;
