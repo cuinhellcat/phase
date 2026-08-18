@@ -2006,7 +2006,7 @@ pub(crate) enum ReflexiveModalParent {
     /// `trigger_line` is reduced to the bare trigger condition alongside it.
     MayPay(String),
     /// `"…, <instruction>. When you do, choose …"` — a mandatory instruction
-    /// (Cemetery Desecrator, Dialogue Tree). No text is carried: the
+    /// (Cemetery Desecrator). No text is carried: the
     /// instruction stays in `trigger_line`, where the ordinary trigger parser
     /// lowers it as it already does for every non-modal reflexive (Bone
     /// Rattler, Diregraf Horde). Lowering then attaches the modal as that

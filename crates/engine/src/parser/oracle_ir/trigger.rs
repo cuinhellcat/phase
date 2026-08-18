@@ -185,7 +185,7 @@ pub(crate) enum ReflexiveParent {
         payment_chain: Option<EffectChainIr>,
     },
     /// `"<instruction>. When you do, …"` — the instruction is not an offer, it
-    /// simply happens (Cemetery Desecrator, Dialogue Tree). The trigger parser
+    /// simply happens (Cemetery Desecrator). The trigger parser
     /// already lowered the printed instruction into this chain, so lowering
     /// reuses it instead of re-parsing the same words a second time.
     Mandatory { instruction: EffectChainIr },

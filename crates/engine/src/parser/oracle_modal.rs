@@ -17,6 +17,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
+use super::oracle_classifier::has_trigger_prefix;
 use super::oracle_cost::parse_oracle_cost;
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
@@ -983,6 +984,8 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
 /// marker — as this dispatch did — silently answered
 /// "no reflexive here" for every mandatory parent, and the mode list then
 /// attached straight to the trigger with the printed instruction discarded.
+/// A mandatory parent must still retain the shared trigger-prefix shape;
+/// non-triggered effects keep their original line and existing route.
 ///
 /// * `MayPay` — `trigger_line` is reduced to the bare trigger condition and the
 ///   instruction text travels separately, because that optional instruction is
@@ -995,7 +998,9 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
     if let Some((trigger, cost)) = split_reflexive_optional_cost(&trigger_line) {
         return (trigger, Some(ReflexiveModalParent::MayPay(cost)));
     }
-    if let Some(instruction) = strip_terminal_reflexive_connector(&trigger_line) {
+    if let Some(instruction) = strip_terminal_reflexive_connector(&trigger_line)
+        .filter(|instruction| has_trigger_prefix(&instruction.to_lowercase()))
+    {
         return (
             instruction.to_string(),
             Some(ReflexiveModalParent::Mandatory),
@@ -1009,9 +1014,8 @@ fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<Refl
 ///
 /// `split_triggered_modal_header` has already taken the mode list away, so the
 /// connector is the entire tail — there is no reflexive body left here to
-/// consume. Scanning to the LAST break rather than the first is what keeps a
-/// multi-sentence instruction ("Scry 1. When you do") from being read as a
-/// connector that is not there.
+/// consume. The classifier separately validates that the remaining prefix is
+/// a trigger before accepting this terminal connector as a mandatory parent.
 fn strip_terminal_reflexive_connector(trigger_line: &str) -> Option<&str> {
     let lower = trigger_line.to_lowercase();
     let mut tail = lower.as_str();
@@ -4343,6 +4347,14 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 "When this creature enters or dies, exile another card from a graveyard. When you do",
                 Some(ReflexiveModalParent::Mandatory),
                 "When this creature enters or dies, exile another card from a graveyard",
+            ),
+            // Dialogue Tree is a sorcery, not a triggered parent. Its terminal
+            // connector must stay intact so this targeted reflexive repair does
+            // not alter the non-triggered modal route.
+            (
+                "Scry 1. When you do",
+                None,
+                "Scry 1. When you do",
             ),
             // Neither: Pip-Boy 3000 stays a plain triggered modal.
             (
