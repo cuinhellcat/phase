@@ -987,39 +987,46 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
 /// * `MayPay` — `trigger_line` is reduced to the bare trigger condition and the
 ///   instruction text travels separately, because that optional instruction is
 ///   lowered by the resolution-time path.
-/// * `Mandatory` — `trigger_line` is returned WHOLE, instruction and connector
-///   included. The trigger parser already lowers exactly this shape correctly
-///   for every non-modal reflexive; lowering then hangs the modal off that
-///   chain rather than replacing it.
+/// * `Mandatory` — the terminal connector is removed and the printed
+///   instruction remains in `trigger_line`. The trigger parser lowers that
+///   instruction as the parent chain; lowering then hangs the modal off it.
 /// * `None` — no connector: a plain triggered modal (Pip-Boy 3000).
 fn classify_reflexive_modal_parent(trigger_line: String) -> (String, Option<ReflexiveModalParent>) {
     if let Some((trigger, cost)) = split_reflexive_optional_cost(&trigger_line) {
         return (trigger, Some(ReflexiveModalParent::MayPay(cost)));
     }
-    if ends_in_reflexive_connector(&trigger_line) {
-        return (trigger_line, Some(ReflexiveModalParent::Mandatory));
+    if let Some(instruction) = strip_terminal_reflexive_connector(&trigger_line) {
+        return (
+            instruction.to_string(),
+            Some(ReflexiveModalParent::Mandatory),
+        );
     }
     (trigger_line, None)
 }
 
-/// CR 603.12: whether everything after `trigger_line`'s final sentence break is
-/// the bare reflexive connector.
+/// CR 603.12: remove a bare reflexive connector after `trigger_line`'s final
+/// sentence break, leaving the parent instruction for ordinary trigger parsing.
 ///
 /// `split_triggered_modal_header` has already taken the mode list away, so the
 /// connector is the entire tail — there is no reflexive body left here to
 /// consume. Scanning to the LAST break rather than the first is what keeps a
 /// multi-sentence instruction ("Scry 1. When you do") from being read as a
 /// connector that is not there.
-fn ends_in_reflexive_connector(trigger_line: &str) -> bool {
+fn strip_terminal_reflexive_connector(trigger_line: &str) -> Option<&str> {
     let lower = trigger_line.to_lowercase();
     let mut tail = lower.as_str();
+    let mut connector_start = None;
     while let Ok((after, _)) =
         terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". ")).parse(tail)
     {
+        connector_start = Some(lower.len() - after.len() - 2);
         tail = after;
     }
     let tail = tail.trim().trim_end_matches(',').trim();
-    nom_condition::match_when_you_do(tail).is_ok_and(|(rest, ())| rest.is_empty())
+    if !nom_condition::match_when_you_do(tail).is_ok_and(|(rest, ())| rest.is_empty()) {
+        return None;
+    }
+    trigger_line.get(..connector_start?).map(str::trim_end)
 }
 
 /// CR 603.12 + CR 700.2b: Recognize a reflexive optional-instruction trigger
@@ -4330,11 +4337,12 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 "Whenever you attack",
             ),
             // Connector, NO marker: Cemetery Desecrator. The instruction stays
-            // in `trigger_line` for the ordinary trigger parser to lower.
+            // in `trigger_line`, but its connector is removed before the
+            // ordinary trigger parser lowers the mandatory parent chain.
             (
                 "When this creature enters or dies, exile another card from a graveyard. When you do",
                 Some(ReflexiveModalParent::Mandatory),
-                "When this creature enters or dies, exile another card from a graveyard. When you do",
+                "When this creature enters or dies, exile another card from a graveyard",
             ),
             // Neither: Pip-Boy 3000 stays a plain triggered modal.
             (
