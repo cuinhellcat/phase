@@ -87,6 +87,91 @@ fn the_sandbox_turn_face_up_restores_the_stored_face() {
     );
 }
 
+/// #7541, the other direction: turning a permanent face down must SNAPSHOT its
+/// face, or the permanent keeps its name and printed P/T while claiming to be
+/// face down — and `back_face` stays empty, so the repaired face-up path can
+/// never bring it back. The round trip is the assertion.
+#[test]
+fn the_sandbox_turn_face_down_snapshots_the_real_face_and_the_round_trip_closes() {
+    let mut scenario = GameScenario::new();
+    let id = scenario
+        .add_creature(P0, "Open Bear", 4, 4)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+
+    let write = |runner: &mut engine::game::scenario::GameRunner, down: bool| {
+        runner
+            .act(GameAction::Debug(DebugAction::SetFaceState {
+                object_id: id,
+                face_down: Some(down),
+                transformed: None,
+                flipped: None,
+            }))
+            .expect("the debug face-state write runs")
+    };
+
+    write(&mut runner, true);
+    let obj = &runner.state().objects[&id];
+    assert!(obj.face_down);
+    assert_eq!(obj.name, "", "CR 708.2a: no name while face down");
+    assert_eq!(
+        (obj.base_power, obj.base_toughness),
+        (Some(2), Some(2)),
+        "CR 708.2a: a 2/2, not the printed 4/4"
+    );
+    assert!(
+        obj.back_face.is_some(),
+        "the real face is stashed, which is what makes the way back possible"
+    );
+
+    write(&mut runner, false);
+    let obj = &runner.state().objects[&id];
+    assert!(!obj.face_down);
+    assert_eq!(obj.name, "Open Bear");
+    assert_eq!((obj.base_power, obj.base_toughness), (Some(4), Some(4)));
+}
+
+/// CR 708.2b: "A face-down permanent can't be turned face down. If a spell or
+/// ability attempts to turn a face-down permanent face down, nothing happens
+/// and that effect doesn't change any of its characteristics or their copiable
+/// values."
+///
+/// The stored face must survive a second face-down write, or the 2/2 would be
+/// snapshotted over the real card and the permanent could never be restored.
+///
+/// What this row does NOT do: discriminate. It stays green with the face-down
+/// arm removed, because the flag-only fallback is also harmless here. It pins
+/// the guard so a future rewrite that drops `was_face_down` from the arm's
+/// pattern turns it red.
+#[test]
+fn a_second_turn_face_down_leaves_the_stored_face_alone() {
+    let (mut runner, id) = board();
+    let stored = runner.state().objects[&id]
+        .back_face
+        .clone()
+        .expect("setup: the real face is stashed");
+
+    runner
+        .act(GameAction::Debug(DebugAction::SetFaceState {
+            object_id: id,
+            face_down: Some(true),
+            transformed: None,
+            flipped: None,
+        }))
+        .expect("the debug face-state write runs");
+
+    assert_eq!(
+        runner.state().objects[&id].back_face,
+        Some(stored),
+        "CR 708.2b: nothing happens, so the stored face is untouched"
+    );
+}
+
 /// Counter-direction: an object with no stored face keeps the plain flag write,
 /// so the arm stays a debug tool for states the rules cannot reach.
 #[test]

@@ -338,12 +338,33 @@ pub fn apply_debug_action(
                     (false, true) if on_battlefield && has_stored_face => {
                         crate::game::morph::turn_face_up(state, controller, object_id, events)?;
                     }
+                    // CR 708.2a: turning a permanent face down must SNAPSHOT
+                    // the real face and install the 2/2 in its place. The flag
+                    // alone leaves the permanent with its name, printed P/T and
+                    // abilities while claiming to be face down — and `back_face`
+                    // stays empty, so the arm above can never bring it back
+                    // (#7541).
+                    //
+                    // `zone_pipeline::apply_face_down_entry_profile` is the
+                    // authority the manifest, cloak and face-down-cast paths all
+                    // run through, so the tool cannot drift from them.
+                    //
+                    // CR 708.2b — "A face-down permanent can't be turned face
+                    // down. If a spell or ability attempts to turn a face-down
+                    // permanent face down, nothing happens" — falls out of the
+                    // `was_face_down` guard rather than being re-asserted.
+                    (true, false) if on_battlefield => {
+                        crate::game::zone_pipeline::apply_face_down_entry_profile(
+                            state,
+                            object_id,
+                            &crate::types::ability::FaceDownProfile::vanilla_2_2()
+                                .caused_by(crate::types::ability::FaceDownCause::TurnedFaceDown),
+                        );
+                    }
                     // Everything else is a flag write with nothing to move: the
                     // object is not on the battlefield (no permanent exists to
-                    // turn, it is already in the requested state, it is face
-                    // down with no stored face for `turn_face_up` to restore, or
-                    // it is the debug-only face-down write outside #7539's
-                    // face-up scope.
+                    // turn), it is already in the requested state, or it is face
+                    // down with no stored face for `turn_face_up` to restore.
                     _ => {
                         validate_object_mut(state, object_id)?.face_down = fd;
                     }
