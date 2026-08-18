@@ -852,7 +852,13 @@ pub(crate) fn move_object_with_terminal(
             let source_id = req.source();
             let mut proposed =
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
-            if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            if let ProposedEvent::ZoneChange {
+                applied,
+                chain_referent,
+                ..
+            } = &mut proposed
+            {
+                *chain_referent = req.mods.chain_referent;
                 *applied = req.replacement_applied.clone();
             }
             return match replacement::replace_event(state, proposed, events) {
@@ -926,7 +932,13 @@ pub(crate) fn move_object_with_terminal(
     // `Draw` cause variant — no other cause produces one.
     if let ZoneChangeCause::Draw { seed_applied } = req.cause {
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
-        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+        if let ProposedEvent::ZoneChange {
+            applied,
+            chain_referent,
+            ..
+        } = &mut proposed
+        {
+            *chain_referent = req.mods.chain_referent;
             *applied = req.replacement_applied;
             applied.extend(seed_applied);
         }
