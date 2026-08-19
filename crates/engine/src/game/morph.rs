@@ -630,8 +630,28 @@ pub(crate) fn finish_paid_turn_face_up(
         state.announced_source_x = Some((object_id, announced_x));
     }
 
+    // CR 614.1e + CR 708.11 + CR 616.1: the "As ~ is turned face up" replacement
+    // pipeline inside `turn_face_up` resolves its execute through
+    // `resolve_ability_chain`, which can install an interactive `WaitingFor`
+    // (measured: two materially-ordered counter-addition replacements turn the
+    // execute's `AddCounter` into a CR 616.1 ordering prompt). Seed the settled
+    // outcome FIRST, then hand back whatever the pipeline left: `Priority` when
+    // nothing interfered, the live choice when something did. Seeding also
+    // covers the paused-payment resume route, where `state.waiting_for` still
+    // holds the mana source's just-answered replacement prompt — returning THAT
+    // would resurrect a dead prompt. An `Err` from `turn_face_up` cannot leak
+    // the seed: every dispatch into this completion runs under the action
+    // boundary, which restores the whole pre-action state on `Err`.
+    state.waiting_for = WaitingFor::Priority { player };
     turn_face_up(state, player, object_id, events)?;
-    Ok(WaitingFor::Priority { player })
+    // CR 603.2 + CR 603.3b: when the pipeline paused, the reducer's settled
+    // epilogue will not run for this action, so the `TurnedFaceUp` observer
+    // triggers in `events` would be lost (measured: the "when turned face up"
+    // draw never reached the stack). Park them into `deferred_triggers` — the
+    // established authority for exactly this shape — for the drain once the
+    // interposed choice settles. A no-op when the flip completed undisturbed.
+    crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 702.37e: Turning a face-down permanent face up ends the morph effect and

@@ -287,3 +287,260 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
         "the mana source's own cost still resolved through its replacement"
     );
 }
+
+// ── The interactive turn-up replacement (review round 2) ────────────────────
+
+/// CR 614.1e + CR 708.11: "As ~ is turned face up, put five +1/+1 counters on
+/// it" — the parsed Hooded Hydra class. Its `AddCounter`, modified by two
+/// materially-ordered replacements, raises a CR 616.1 ordering prompt DURING
+/// the flip. The completion must hand that prompt back, not overwrite it with
+/// `Priority`.
+const COUNTER_MORPH: &str = "Morph {1} (You may cast this card face down as a \
+                             2/2 creature for {3}. Turn it face up any time for \
+                             its morph cost.)\nAs this creature is turned face \
+                             up, put five +1/+1 counters on it.\nWhen this \
+                             creature is turned face up, draw a card.";
+
+fn add_counter_modifier(
+    scenario: &mut GameScenario,
+    name: &str,
+    modification: engine::types::ability::QuantityModification,
+) {
+    scenario
+        .add_creature(P0, name, 0, 4)
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(modification)
+                .counter_match(engine::types::counter::CounterMatch::OfType(
+                    engine::types::counter::CounterType::Plus1Plus1,
+                )),
+        );
+}
+
+/// The review-round-2 blocker, fresh route: the flip commits, and the ordering
+/// choice the execute raised stays live instead of being clobbered to
+/// `Priority` (which stranded a live `pending_replacement` record and silently
+/// dropped both modifiers).
+#[test]
+fn an_interactive_turn_up_replacement_keeps_its_choice_live() {
+    use engine::types::ability::QuantityModification;
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let id = scenario
+        .add_creature_to_hand_from_oracle(P0, "Counter Morph", 2, 2, COUNTER_MORPH)
+        .id();
+    add_counter_modifier(
+        &mut scenario,
+        "Plus One Modifier",
+        QuantityModification::Plus { value: 1 },
+    );
+    add_counter_modifier(
+        &mut scenario,
+        "Times Two Modifier",
+        QuantityModification::Times { factor: 2 },
+    );
+    scenario.with_mana_pool(P0, pool(&[ManaType::Colorless]));
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
+        .expect("the card is played face down");
+
+    let paused = runner
+        .act(GameAction::TurnFaceUp {
+            object_id: id,
+            x: 0,
+        })
+        .expect("the special action succeeds up to the replacement's own choice");
+    assert!(
+        matches!(&paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "CR 616.1: the ordering choice the turn-up replacement raised must stay \
+         live, got {:?}",
+        paused.waiting_for
+    );
+    assert!(
+        runner.state().pending_replacement.is_some(),
+        "the parked counter addition is still waiting for its order"
+    );
+    let obj = &runner.state().objects[&id];
+    assert!(
+        !obj.face_down,
+        "CR 708.11: the turn-up itself is not prevented by the pending choice"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Plus1Plus1),
+        None,
+        "no counters land before the order is chosen"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the ordering choice is answered");
+
+    let count = runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        [11, 12].contains(&count),
+        "both modifiers applied in the chosen order — (5+1)*2 = 12 or 5*2+1 = 11, got {count}"
+    );
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "the counter addition settled; no ghost record remains"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == id)),
+        "CR 603.2: the 'when turned face up' trigger still reaches the stack \
+         after the interposed choice"
+    );
+}
+
+const WARBREAK_WITH_COUNTERS: &str = "Morph {X}{X}{R} (You may cast this card face down as a \
+                                      2/2 creature for {3}. Turn it face up any time for its \
+                                      morph cost.)\nAs this creature is turned face up, put \
+                                      five +1/+1 counters on it.\nWhen this creature is \
+                                      turned face up, create X 1/1 red Goblin creature tokens.";
+
+/// The same blocker through the paused-payment route: the mana source's own
+/// replacement choice settles FIRST, the resumed completion flips, and the
+/// turn-up replacement's ordering prompt must then surface — not the stale
+/// exile prompt, and not a premature `Priority` that strands the parked
+/// counters. The X=0 announcement must still bind across BOTH pauses.
+#[test]
+fn a_resumed_payment_still_surfaces_the_turn_up_replacement_choice() {
+    use engine::types::ability::QuantityModification;
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let id = scenario
+        .add_creature_to_hand_from_oracle(P0, "Warbreak Trumpeter", 1, 1, WARBREAK_WITH_COUNTERS)
+        .id();
+    let source = scenario
+        .add_creature(P0, "Self-Exiling Mana Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            }),
+        )
+        .id();
+    for name in ["First Pause Replacement", "Second Pause Replacement"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_exile_to_graveyard());
+    }
+    add_counter_modifier(
+        &mut scenario,
+        "Plus One Modifier",
+        QuantityModification::Plus { value: 1 },
+    );
+    add_counter_modifier(
+        &mut scenario,
+        "Times Two Modifier",
+        QuantityModification::Times { factor: 2 },
+    );
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
+        .expect("the card is played face down");
+
+    let paused = runner
+        .act(GameAction::TurnFaceUp {
+            object_id: id,
+            x: 0,
+        })
+        .expect("the source's own cost pauses the payment rather than failing it");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "first pause: the mana source's exile replacement owns the window"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the exile choice is answered and the payment resumes");
+    let WaitingFor::ReplacementChoice { candidates, .. } = &resumed.waiting_for else {
+        panic!(
+            "second pause: the resumed completion must hand back the turn-up \
+             replacement's ordering choice, got {:?}",
+            resumed.waiting_for
+        );
+    };
+    let names: Vec<&str> = candidates
+        .iter()
+        .map(|candidate| candidate.source_name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"Plus One Modifier") && names.contains(&"Times Two Modifier"),
+        "the live prompt is the COUNTER ordering choice, not the settled exile \
+         prompt resurrected — candidates were {names:?}"
+    );
+    assert!(
+        !runner.state().objects[&id].face_down,
+        "CR 708.11: the flip itself committed before the counter order is chosen"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the ordering choice is answered");
+
+    let count = runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        [11, 12].contains(&count),
+        "both modifiers applied in the chosen order, got {count}"
+    );
+    let bound_x = runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                source_id, ability, ..
+            } if *source_id == id => Some(ability.chosen_x),
+            _ => None,
+        })
+        .expect("the turned-face-up trigger must still reach the stack across both pauses");
+    assert_eq!(
+        bound_x,
+        Some(0),
+        "the X=0 announcement survives the payment pause AND the turn-up choice"
+    );
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Graveyard,
+        "the mana source's own cost still resolved through its replacement"
+    );
+}
