@@ -77,6 +77,14 @@ export interface PoolFilter {
   rarities: DraftPoolGroupKind[];
 }
 
+/** Engine-computed filter option lists (`draft_core::view::PoolFilterOptions`):
+ * the stateless path for views that predate the option fields. */
+export interface PoolFilterOptions {
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
 export interface DraftPoolGroups {
   color_groups: DraftPoolGroup[];
   type_groups: DraftPoolGroup[];
@@ -310,6 +318,16 @@ export class DraftAdapter {
       JSON.stringify(listing),
       JSON.stringify(filter),
     ) as string[];
+  }
+
+  /**
+   * The engine-owned filter option lists, computed from the pool instances
+   * alone — for views whose delivered groups predate the option fields
+   * (review round 5). Never reconstructed in the display layer.
+   */
+  async poolFilterOptions(pool: DraftCardInstance[]): Promise<PoolFilterOptions> {
+    const wasm = await ensureDraftWasm();
+    return wasm.pool_filter_options(JSON.stringify(pool)) as PoolFilterOptions;
   }
 
   async initializeSealed(

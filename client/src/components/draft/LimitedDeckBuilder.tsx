@@ -15,11 +15,12 @@ import { EMPTY_DRAFT_POOL_GROUPS } from "../../adapter/draft-adapter";
 import {
   axisKinds,
   EMPTY_POOL_FILTER,
+  fetchPoolFilterOptions,
   filterPoolListing,
   poolFilterActive,
   toggleKind,
 } from "../../viewmodel/limitedPoolFilter";
-import type { PoolFilter } from "../../adapter/draft-adapter";
+import type { PoolFilter, PoolFilterOptions } from "../../adapter/draft-adapter";
 import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 import type { CardHoverInfo } from "../card/CardPreview";
 import { HoverCardPreview } from "../card/HoverCardPreview";
@@ -250,6 +251,8 @@ export function LimitedDeckBuilder({
   const [poolFilter, setPoolFilter] = useState<PoolFilter>(EMPTY_POOL_FILTER);
   const [keptInstanceIds, setKeptInstanceIds] = useState<string[] | null>(null);
   const [poolFilterFailed, setPoolFilterFailed] = useState(false);
+  const [legacyFilterOptions, setLegacyFilterOptions] =
+    useState<PoolFilterOptions | null>(null);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
@@ -290,6 +293,44 @@ export function LimitedDeckBuilder({
       stale = true;
     };
   }, [remainingPool, poolFilter]);
+  // Review round 5: a view that predates the option fields (legacy) gets its
+  // control options from the ENGINE's stateless path — never from the lossy
+  // exclusive presentation buckets, and never reconstructed here. A v11 view
+  // with a non-empty pool always carries non-empty option lists
+  // (classification is total), so empty lists + a non-empty pool identify
+  // the legacy shape. While the call is pending or failed, the axes stay
+  // hidden rather than mis-offered.
+  const isLegacyView =
+    pool.length > 0 &&
+    poolGroups.type_filter_options.length === 0 &&
+    poolGroups.color_filter_options.length === 0;
+  useEffect(() => {
+    if (!isLegacyView) {
+      setLegacyFilterOptions(null);
+      return;
+    }
+    let stale = false;
+    fetchPoolFilterOptions(pool)
+      .then((options) => {
+        if (!stale) setLegacyFilterOptions(options);
+      })
+      .catch(() => {
+        if (!stale) setLegacyFilterOptions(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [isLegacyView, pool]);
+  const typeChipKinds = isLegacyView
+    ? (legacyFilterOptions?.types ?? [])
+    : poolGroups.type_filter_options;
+  const colorChipKinds = isLegacyView
+    ? (legacyFilterOptions?.colors ?? [])
+    : poolGroups.color_filter_options;
+  const rarityChipKinds = isLegacyView
+    ? (legacyFilterOptions?.rarities ?? [])
+    : axisKinds(poolGroups.rarity_groups);
+
   const displayedPool = useMemo(() => {
     if (keptInstanceIds === null) return remainingPool;
     const kept = new Set(keptInstanceIds);
@@ -363,34 +404,21 @@ export function LimitedDeckBuilder({
                 className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
               />
               <PoolFilterChips
-                kinds={
-                  // Engine-owned multi-type option list; a legacy (pre-v11)
-                  // view carries none, so fall back to its exclusive buckets.
-                  poolGroups.type_filter_options.length > 0
-                    ? poolGroups.type_filter_options
-                    : axisKinds(poolGroups.type_groups)
-                }
+                kinds={typeChipKinds}
                 selected={poolFilter.types}
                 onToggle={(kind) =>
                   setPoolFilter((prev) => ({ ...prev, types: toggleKind(prev.types, kind) }))
                 }
               />
               <PoolFilterChips
-                kinds={
-                  // Engine-owned per-color membership options (CR 105.2); a
-                  // legacy (pre-v11) view carries none — fall back to its
-                  // exclusive buckets.
-                  poolGroups.color_filter_options.length > 0
-                    ? poolGroups.color_filter_options
-                    : axisKinds(poolGroups.color_groups)
-                }
+                kinds={colorChipKinds}
                 selected={poolFilter.colors}
                 onToggle={(kind) =>
                   setPoolFilter((prev) => ({ ...prev, colors: toggleKind(prev.colors, kind) }))
                 }
               />
               <PoolFilterChips
-                kinds={axisKinds(poolGroups.rarity_groups)}
+                kinds={rarityChipKinds}
                 selected={poolFilter.rarities}
                 onToggle={(kind) =>
                   setPoolFilter((prev) => ({

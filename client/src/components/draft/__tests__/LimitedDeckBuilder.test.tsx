@@ -49,11 +49,47 @@ vi.mock("framer-motion", () => ({
 // The engine (wasm) cannot load under vitest; stand in for its filtering
 // authority with a contract-faithful fake. Presentation exports stay real.
 let failFilterCalls = false;
+let failOptionsCalls = false;
 vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../viewmodel/limitedPoolFilter")>();
   return {
     ...actual,
+    // Contract-faithful fake of the engine's stateless option path: classify
+    // each instance from its own fields, exactly as draft-core does.
+    fetchPoolFilterOptions: async (
+      pool: Array<{ colors: string[]; type_line: string; rarity: string }>,
+    ) => {
+      if (failOptionsCalls) throw new Error("engine unavailable");
+      const typeOrder = [
+        "creature",
+        "instant",
+        "sorcery",
+        "enchantment",
+        "artifact",
+        "planeswalker",
+        "land",
+      ];
+      const types = typeOrder.filter((t) =>
+        pool.some((c) => c.type_line.toLowerCase().includes(t)),
+      );
+      const colorOrder: Array<[string, string]> = [
+        ["white", "W"],
+        ["blue", "U"],
+        ["black", "B"],
+        ["red", "R"],
+        ["green", "G"],
+      ];
+      const colors = colorOrder
+        .filter(([, s]) => pool.some((c) => c.colors.includes(s)))
+        .map(([kind]) => kind);
+      if (pool.some((c) => c.colors.length >= 2)) colors.push("multicolor");
+      if (pool.some((c) => c.colors.length === 0)) colors.push("colorless");
+      const rarities = ["mythic", "rare", "uncommon", "common"].filter((r) =>
+        pool.some((c) => c.rarity.toLowerCase() === r),
+      );
+      return { types, colors, rarities };
+    },
     filterPoolListing: async (
       listing: Array<{ instance_id: string; name: string; type_line: string }>,
       filter: { query: string; types: string[] },
@@ -401,6 +437,102 @@ describe("LimitedDeckBuilder pool filters", () => {
     expect(chip.className).toContain("min-w-[44px]");
     expect(chip.className).toContain("pointer-fine:min-h-0");
     expect(chip.className).not.toContain("sm:min-h-0");
+  });
+
+  const LEGACY_VIEW: BuilderView = {
+    ...FILTER_VIEW,
+    pool: [
+      {
+        instance_id: "golem-1",
+        name: "Chrome Golem",
+        set_code: "dmu",
+        collector_number: "1",
+        rarity: "uncommon",
+        colors: [],
+        cmc: 3,
+        type_line: "Artifact Creature — Golem",
+      },
+      {
+        instance_id: "charm-1",
+        name: "Azorius Charm",
+        set_code: "dmu",
+        collector_number: "2",
+        rarity: "common",
+        colors: ["W", "U"],
+        cmc: 2,
+        type_line: "Instant",
+      },
+    ],
+    pool_groups: {
+      ...FILTER_VIEW.pool_groups,
+      // v10 shape: no option lists; the exclusive buckets are present but
+      // lossy (no Artifact, no per-color entries).
+      type_filter_options: [],
+      color_filter_options: [],
+    },
+  };
+
+  it("offers a legacy view's chips from the engine, memberships included", async () => {
+    render(
+      <LimitedDeckBuilder
+        view={LEGACY_VIEW}
+        mainDeck={[]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    // Review round 5: the Artifact and White chips exist only in the
+    // engine-computed memberships — the exclusive buckets would offer
+    // neither.
+    expect(
+      await screen.findByRole("button", { name: "Artifact", pressed: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "White", pressed: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Multicolor", pressed: false }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the axes of a legacy view when the engine options fail", async () => {
+    failOptionsCalls = true;
+    try {
+      render(
+        <LimitedDeckBuilder
+          view={LEGACY_VIEW}
+          mainDeck={[]}
+          landCounts={{}}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />,
+      );
+
+      // Never the lossy exclusive-bucket fallback: with the engine
+      // unavailable there are NO type/color chips at all — not even the
+      // buckets the legacy view carries.
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Creature", pressed: false }),
+        ).toBeNull(),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Artifact", pressed: false }),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Multicolor", pressed: false }),
+      ).toBeNull();
+    } finally {
+      failOptionsCalls = false;
+    }
   });
 
   it("announces a failed engine filter and shows the unfiltered listing", async () => {

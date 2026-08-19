@@ -685,6 +685,39 @@ fn color_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
         .collect()
 }
 
+/// Every rarity bucket any pool member belongs to, in `RARITY_GROUP_ORDER` —
+/// the engine-owned option list a rarity-filter control offers. Rarity is
+/// single-valued per printing, so this equals the non-empty `rarity_groups`
+/// kinds; carried here so a legacy view's controls can be rebuilt from the
+/// pool alone.
+fn rarity_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    RARITY_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| pool.iter().any(|card| rarity_group(card) == *kind))
+        .collect()
+}
+
+/// The complete engine-owned option lists for a limited-pool filter control,
+/// computable from the pool instances alone. The stateless path a display
+/// uses when its delivered view predates the option fields (review round 5:
+/// legacy controls must come from the engine, not from the lossy exclusive
+/// presentation buckets, and never be reconstructed in the display layer).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolFilterOptions {
+    pub types: Vec<DraftPoolGroupKind>,
+    pub colors: Vec<DraftPoolGroupKind>,
+    pub rarities: Vec<DraftPoolGroupKind>,
+}
+
+pub fn pool_filter_options(pool: &[DraftCardInstance]) -> PoolFilterOptions {
+    PoolFilterOptions {
+        types: type_filter_options(pool),
+        colors: color_filter_options(pool),
+        rarities: rarity_filter_options(pool),
+    }
+}
+
 /// The EXCLUSIVE presentation bucket for the sorted pool display — a card
 /// appears in exactly one group, so the priority chain picks its most salient
 /// type. Filtering must NOT use this: see [`type_memberships`].
@@ -1322,6 +1355,36 @@ mod tests {
                 DraftPoolGroupKind::Multicolor,
                 DraftPoolGroupKind::Colorless,
             ]
+        );
+    }
+
+    #[test]
+    fn pool_filter_options_rebuild_every_membership_from_the_pool_alone() {
+        // Review round 5: a legacy view's controls come from THIS stateless
+        // path — the exclusive display buckets would hide the Artifact chip
+        // of an Artifact Creature pool and the White/Blue chips of a
+        // white-blue pool.
+        let pool = vec![draft_card("Golem", &[], 3, "Artifact Creature — Golem"), {
+            let mut charm = draft_card("Charm", &["W", "U"], 2, "Instant");
+            charm.rarity = "rare".to_string();
+            charm
+        }];
+        assert_eq!(
+            pool_filter_options(&pool),
+            PoolFilterOptions {
+                types: vec![
+                    DraftPoolGroupKind::Creature,
+                    DraftPoolGroupKind::Instant,
+                    DraftPoolGroupKind::Artifact,
+                ],
+                colors: vec![
+                    DraftPoolGroupKind::White,
+                    DraftPoolGroupKind::Blue,
+                    DraftPoolGroupKind::Multicolor,
+                    DraftPoolGroupKind::Colorless,
+                ],
+                rarities: vec![DraftPoolGroupKind::Rare, DraftPoolGroupKind::Common],
+            }
         );
     }
 

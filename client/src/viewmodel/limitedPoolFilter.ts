@@ -4,6 +4,7 @@ import {
   type DraftPoolGroup,
   type DraftPoolGroupKind,
   type PoolFilter,
+  type PoolFilterOptions,
 } from "../adapter/draft-adapter";
 
 // ── Limited build screen pool filters (#7507) ───────────────────────────
@@ -61,4 +62,15 @@ export function filterPoolListing(
   filter: PoolFilter,
 ): Promise<string[]> {
   return adapter.filterPoolListing(listing, filter);
+}
+
+/**
+ * The engine-owned filter option lists for a pool whose delivered view
+ * predates the option fields (legacy). Computed by draft-core from the
+ * instances alone — never reconstructed here.
+ */
+export function fetchPoolFilterOptions(
+  pool: DraftCardInstance[],
+): Promise<PoolFilterOptions> {
+  return adapter.poolFilterOptions(pool);
 }

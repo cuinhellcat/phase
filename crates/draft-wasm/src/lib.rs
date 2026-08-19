@@ -548,6 +548,17 @@ pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsVa
     )))
 }
 
+/// The complete engine-owned filter option lists for a pool, computed from
+/// the instances alone (review round 5): the stateless path a display uses
+/// when its delivered view predates the option fields, so legacy controls
+/// never come from the lossy exclusive presentation buckets.
+#[wasm_bindgen]
+pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
+    let pool: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool: {}", e)))?;
+    Ok(to_js(&draft_core::view::pool_filter_options(&pool)))
+}
+
 /// Submit the human player's deck for limited play.
 ///
 /// `main_deck_json`: JSON array of card instance ID strings.
