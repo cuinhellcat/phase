@@ -63,6 +63,7 @@ const VIEW: DraftPlayerView = {
       }, count: 1 }] },
     ],
     cmc_groups: [],
+    rarity_groups: [],
     color_counts: { white: 1, blue: 0, black: 0, red: 1, green: 0 },
   },
   sealed_packs: [],

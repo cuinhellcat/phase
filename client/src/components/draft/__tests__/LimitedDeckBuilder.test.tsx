@@ -21,6 +21,31 @@ vi.mock("../../../stores/draftStore", () => ({
     }),
 }));
 
+// Exit animations would keep filtered-out pool tiles mounted past the
+// assertion (#7507 rows); these tests are about which tiles the filter keeps,
+// not how the others leave. Same idiom as NativeEngineProgressOverlay.test.
+vi.mock("framer-motion", () => ({
+  AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  motion: {
+    div: ({
+      children,
+      layout: _layout,
+      initial: _initial,
+      animate: _animate,
+      exit: _exit,
+      transition: _transition,
+      ...props
+    }: {
+      children?: React.ReactNode;
+      layout?: unknown;
+      initial?: unknown;
+      animate?: unknown;
+      exit?: unknown;
+      transition?: unknown;
+    } & Record<string, unknown>) => <div {...props}>{children}</div>,
+  },
+}));
+
 vi.mock("../../card/HoverCardPreview", () => ({
   HoverCardPreview: ({ card }: { card: { name: string } | null }) => (
     <div data-testid="hover-preview">{card?.name}</div>
@@ -53,6 +78,7 @@ const TEST_VIEW: BuilderView = {
     color_groups: [],
     type_groups: [],
     cmc_groups: [],
+    rarity_groups: [],
     color_counts: { white: 0, blue: 1, black: 0, red: 0, green: 0 },
   },
   seats: [],
@@ -207,5 +233,110 @@ describe("LimitedDeckBuilder", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Deck needs attention: card 'Watery Grave' is not in the drafted pool",
     );
+  });
+});
+
+// ── #7507: pool filter row ──────────────────────────────────────────────
+
+const FILTER_VIEW: BuilderView = {
+  ...TEST_VIEW,
+  pool: [
+    ...TEST_VIEW.pool,
+    {
+      instance_id: "card-2",
+      name: "Shock",
+      set_code: "dmu",
+      collector_number: "9",
+      rarity: "common",
+      colors: ["R"],
+      cmc: 1,
+      type_line: "Instant",
+    },
+  ],
+  pool_groups: {
+    ...TEST_VIEW.pool_groups,
+    type_groups: [
+      {
+        kind: "creature",
+        total: 1,
+        cards: [{ card: TEST_VIEW.pool[0], count: 1 }],
+      },
+      {
+        kind: "instant",
+        total: 1,
+        cards: [
+          {
+            card: {
+              instance_id: "card-2",
+              name: "Shock",
+              set_code: "dmu",
+              collector_number: "9",
+              rarity: "common",
+              colors: ["R"],
+              cmc: 1,
+              type_line: "Instant",
+            },
+            count: 1,
+          },
+        ],
+      },
+    ],
+  },
+};
+
+describe("LimitedDeckBuilder pool filters", () => {
+  afterEach(cleanup);
+
+  it("narrows the pool grid through an engine type chip and restores on untoggle", () => {
+    render(
+      <LimitedDeckBuilder
+        view={FILTER_VIEW}
+        mainDeck={[]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
+
+    const chip = screen.getByRole("button", { name: "Instant", pressed: false });
+    fireEvent.click(chip);
+
+    expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Instant", pressed: true }));
+    expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
+  });
+
+  it("searches the pool by name, independent of the addable-cards box", () => {
+    render(
+      <LimitedDeckBuilder
+        view={FILTER_VIEW}
+        mainDeck={[]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Search your pool..."), {
+      target: { value: "shock" },
+    });
+
+    expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
+    // The addable-cards list is untouched by the pool query.
+    expect(
+      screen.getByRole("button", { name: "Add Academy Ruins" }),
+    ).toBeInTheDocument();
   });
 });

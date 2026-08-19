@@ -31,6 +31,11 @@ export type DraftPoolGroupKind =
   | "planeswalker"
   | "land"
   | "other"
+  | "mythic"
+  | "rare"
+  | "uncommon"
+  | "common"
+  | "rarity_other"
   | "mana_value0"
   | "mana_value1"
   | "mana_value2"
@@ -62,6 +67,7 @@ export interface DraftPoolGroups {
   color_groups: DraftPoolGroup[];
   type_groups: DraftPoolGroup[];
   cmc_groups: DraftPoolGroup[];
+  rarity_groups: DraftPoolGroup[];
   color_counts: DraftPoolColorCounts;
 }
 
@@ -70,6 +76,7 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
   color_groups: [],
   type_groups: [],
   cmc_groups: [],
+  rarity_groups: [],
   color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
 };
 

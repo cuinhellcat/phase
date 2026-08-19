@@ -65,6 +65,12 @@ pub enum DraftPoolGroupKind {
     Planeswalker,
     Land,
     Other,
+    Mythic,
+    Rare,
+    Uncommon,
+    Common,
+    /// Rarities outside the standard four (Scryfall "special" / "bonus").
+    RarityOther,
     ManaValue0,
     ManaValue1,
     ManaValue2,
@@ -107,6 +113,9 @@ pub struct DraftPoolGroups {
     pub color_groups: Vec<DraftPoolGroup>,
     pub type_groups: Vec<DraftPoolGroup>,
     pub cmc_groups: Vec<DraftPoolGroup>,
+    /// Rarity is the fourth engine-owned pool axis (#7507), so a display never
+    /// has to re-derive it from the instance's raw `rarity` string.
+    pub rarity_groups: Vec<DraftPoolGroup>,
     pub color_counts: DraftPoolColorCounts,
 }
 
@@ -118,6 +127,7 @@ impl DraftPoolGroups {
             color_groups: groups_for(pool, &COLOR_GROUP_ORDER, color_group, true),
             type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
             cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
+            rarity_groups: groups_for(pool, &RARITY_GROUP_ORDER, rarity_group, true),
             color_counts: color_counts(pool),
         }
     }
@@ -441,6 +451,14 @@ const TYPE_GROUP_ORDER: [DraftPoolGroupKind; 8] = [
     DraftPoolGroupKind::Other,
 ];
 
+const RARITY_GROUP_ORDER: [DraftPoolGroupKind; 5] = [
+    DraftPoolGroupKind::Mythic,
+    DraftPoolGroupKind::Rare,
+    DraftPoolGroupKind::Uncommon,
+    DraftPoolGroupKind::Common,
+    DraftPoolGroupKind::RarityOther,
+];
+
 const CMC_GROUP_ORDER: [DraftPoolGroupKind; 7] = [
     DraftPoolGroupKind::ManaValue0,
     DraftPoolGroupKind::ManaValue1,
@@ -533,6 +551,19 @@ fn type_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
         DraftPoolGroupKind::Land
     } else {
         DraftPoolGroupKind::Other
+    }
+}
+
+/// Buckets the instance's raw rarity string into the standard four, with
+/// everything else ("special", "bonus", unknown) collected under `RarityOther`
+/// rather than silently dropped from the axis.
+fn rarity_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    match card.rarity.to_ascii_lowercase().as_str() {
+        "mythic" => DraftPoolGroupKind::Mythic,
+        "rare" => DraftPoolGroupKind::Rare,
+        "uncommon" => DraftPoolGroupKind::Uncommon,
+        "common" => DraftPoolGroupKind::Common,
+        _ => DraftPoolGroupKind::RarityOther,
     }
 }
 
@@ -848,6 +879,52 @@ mod tests {
         assert_eq!(groups.type_groups[0].cards[0].count, 2);
         assert_eq!(groups.color_counts.white, 2);
         assert_eq!(groups.color_counts.red, 2);
+    }
+
+    #[test]
+    fn rarity_groups_bucket_the_standard_four_and_collect_the_rest() {
+        let mut mythic = draft_card("Dragon", &["R"], 6, "Creature — Dragon");
+        mythic.rarity = "mythic".to_string();
+        let mut rare = draft_card("Relic", &[], 2, "Artifact");
+        rare.rarity = "Rare".to_string(); // case-insensitive bucketing
+        let mut special = draft_card("Oddity", &["U"], 3, "Sorcery");
+        special.rarity = "special".to_string();
+        let common_a = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        let common_b = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+
+        let groups = DraftPoolGroups::from_pool(&[mythic, rare, special, common_a, common_b]);
+
+        assert_eq!(
+            groups
+                .rarity_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::Mythic,
+                DraftPoolGroupKind::Rare,
+                DraftPoolGroupKind::Common,
+                DraftPoolGroupKind::RarityOther,
+            ],
+            "engine order, empty buckets omitted, non-standard rarities collected"
+        );
+        assert_eq!(groups.rarity_groups[2].cards[0].count, 2);
+        assert_eq!(groups.rarity_groups[2].total, 2);
+    }
+
+    #[test]
+    fn rarity_group_kinds_match_the_wire_contract() {
+        let values = [
+            (DraftPoolGroupKind::Mythic, "mythic"),
+            (DraftPoolGroupKind::Rare, "rare"),
+            (DraftPoolGroupKind::Uncommon, "uncommon"),
+            (DraftPoolGroupKind::Common, "common"),
+            (DraftPoolGroupKind::RarityOther, "rarity_other"),
+        ];
+
+        for (kind, expected) in values {
+            assert_eq!(serde_json::to_value(kind).unwrap(), expected);
+        }
     }
 
     #[test]

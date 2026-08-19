@@ -87,6 +87,7 @@ function mockView(status: string): DraftPlayerView {
       color_groups: [],
       type_groups: [],
       cmc_groups: [],
+      rarity_groups: [],
       color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
     },
     seats: [],

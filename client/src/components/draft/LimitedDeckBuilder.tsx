@@ -6,7 +6,21 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { useLongPress } from "../../hooks/useLongPress";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
-import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
+import type {
+  DraftCardInstance,
+  DraftPlayerView,
+  DraftPoolGroupKind,
+} from "../../adapter/draft-adapter";
+import { EMPTY_DRAFT_POOL_GROUPS } from "../../adapter/draft-adapter";
+import {
+  axisKinds,
+  EMPTY_POOL_FILTER,
+  filterPool,
+  poolFilterActive,
+  toggleKind,
+  type PoolFilterState,
+} from "../../viewmodel/limitedPoolFilter";
+import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 import type { CardHoverInfo } from "../card/CardPreview";
 import { HoverCardPreview } from "../card/HoverCardPreview";
 import { ManaCurve } from "./ManaCurve";
@@ -233,6 +247,7 @@ export function LimitedDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [addableQuery, setAddableQuery] = useState("");
+  const [poolFilter, setPoolFilter] = useState<PoolFilterState>(EMPTY_POOL_FILTER);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
@@ -240,6 +255,14 @@ export function LimitedDeckBuilder({
   const remainingPool = useMemo(
     () => computeRemainingPool(pool, mainDeck),
     [pool, mainDeck],
+  );
+
+  // #7507: every filter axis keys on the ENGINE's own pool classification
+  // (`view.pool_groups`); only the name query is display-layer work.
+  const poolGroups = view?.pool_groups ?? EMPTY_DRAFT_POOL_GROUPS;
+  const displayedPool = useMemo(
+    () => filterPool(remainingPool, poolGroups, poolFilter),
+    [remainingPool, poolGroups, poolFilter],
   );
 
   const deckGroups = useMemo(
@@ -297,9 +320,45 @@ export function LimitedDeckBuilder({
             <h3 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
               {t("limitedDeck.poolHeading", { count: remainingPool.length })}
             </h3>
+            <div className="mb-3 flex flex-col gap-2">
+              <input
+                type="search"
+                value={poolFilter.query}
+                onChange={(event) =>
+                  setPoolFilter((prev) => ({ ...prev, query: event.target.value }))
+                }
+                placeholder={t("limitedDeck.searchPool")}
+                aria-label={t("limitedDeck.searchPool")}
+                className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+              />
+              <PoolFilterChips
+                kinds={axisKinds(poolGroups.type_groups)}
+                selected={poolFilter.types}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({ ...prev, types: toggleKind(prev.types, kind) }))
+                }
+              />
+              <PoolFilterChips
+                kinds={axisKinds(poolGroups.color_groups)}
+                selected={poolFilter.colors}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({ ...prev, colors: toggleKind(prev.colors, kind) }))
+                }
+              />
+              <PoolFilterChips
+                kinds={axisKinds(poolGroups.rarity_groups)}
+                selected={poolFilter.rarities}
+                onToggle={(kind) =>
+                  setPoolFilter((prev) => ({
+                    ...prev,
+                    rarities: toggleKind(prev.rarities, kind),
+                  }))
+                }
+              />
+            </div>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               <AnimatePresence mode="popLayout" initial={false}>
-                {remainingPool.map((card) => (
+                {displayedPool.map((card) => (
                   <motion.div key={card.instance_id} {...CARD_MOTION}>
                     <CardTile
                       card={card}
@@ -311,8 +370,15 @@ export function LimitedDeckBuilder({
                 ))}
               </AnimatePresence>
             </div>
-            {remainingPool.length === 0 && (
+            {remainingPool.length === 0 ? (
               <p className="py-4 text-sm text-white/30">{t("limitedDeck.allAdded")}</p>
+            ) : (
+              displayedPool.length === 0 &&
+              poolFilterActive(poolFilter) && (
+                <p className="py-4 text-sm text-white/30">
+                  {t("limitedDeck.noFilterMatches")}
+                </p>
+              )
             )}
           </section>
 
@@ -459,6 +525,46 @@ function DeckStatus({ spells, lands, min }: { spells: number; lands: number; min
           style={{ width: `${pct}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+// ── Pool filter chips (#7507) ───────────────────────────────────────────
+
+/**
+ * One filter axis as toggle chips. The offered kinds are exactly the groups
+ * the engine delivered for this pool (`axisKinds`), in engine order; labels
+ * come from the shared engine-kind label map. An axis with fewer than two
+ * groups offers no narrowing and renders nothing.
+ */
+function PoolFilterChips({
+  kinds,
+  selected,
+  onToggle,
+}: {
+  kinds: DraftPoolGroupKind[];
+  selected: DraftPoolGroupKind[];
+  onToggle: (kind: DraftPoolGroupKind) => void;
+}) {
+  const { t } = useTranslation("draft");
+  if (kinds.length < 2) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {kinds.map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          aria-pressed={selected.includes(kind)}
+          onClick={() => onToggle(kind)}
+          className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
+            selected.includes(kind)
+              ? "bg-white/10 text-white"
+              : "text-white/40 hover:bg-white/5 hover:text-white/70"
+          }`}
+        >
+          {t(POOL_GROUP_LABEL_KEYS[kind])}
+        </button>
+      ))}
     </div>
   );
 }
