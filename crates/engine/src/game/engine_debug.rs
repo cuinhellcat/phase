@@ -866,6 +866,7 @@ pub fn route_debug_create_to_battlefield(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         discard_frame: None,
         applied: HashSet::new(),

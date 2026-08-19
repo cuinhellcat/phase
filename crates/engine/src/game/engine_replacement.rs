@@ -4411,6 +4411,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let mut events = Vec::new();
         crate::game::sacrifice::apply_sacrifice_after_replacement(&mut state, event, &mut events);
@@ -6330,6 +6331,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6536,6 +6538,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -6658,6 +6661,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -7115,6 +7119,7 @@ mod tests {
             discard_frame: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {

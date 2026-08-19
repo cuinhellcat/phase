@@ -1685,6 +1685,7 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
             discard_frame,
             applied,
@@ -11790,6 +11791,7 @@ mod tests {
             discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -14019,6 +14021,7 @@ mod tests {
             discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
         let result = replace_event(&mut state, proposed.clone(), &mut events);
@@ -15238,6 +15241,7 @@ mod tests {
             discard_frame: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
 
         let replaced = apply_single_replacement(
@@ -18397,6 +18401,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             applied: HashSet::new(),
         };
@@ -18444,6 +18449,7 @@ mod tests {
             enter_transformed: false,
             enter_as_copy: None,
             face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             applied: HashSet::new(),
         };

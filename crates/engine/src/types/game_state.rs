@@ -64,7 +64,7 @@ use super::resolved_commands::{
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
     RulesExecutionNodeRef,
 };
-use super::zones::EtbTapState;
+use super::zones::{ChainReferentIntent, EtbTapState};
 use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::analysis::resource::{object_class, CounterClass, ObjectClass, ResourceAxis};
@@ -5074,6 +5074,10 @@ pub struct PendingBatchZoneMoveRequest {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<FaceDownProfile>,
+    /// Whether this parked entry is the producer a following demonstrative
+    /// anaphor refers back to. It remains with the request across a pause.
+    #[serde(default, skip_serializing_if = "ChainReferentIntent::is_silent")]
+    pub chain_referent: ChainReferentIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_to: Option<AttachTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -549,17 +549,64 @@ pub fn manifest_card(
     // control instead of the library owner's (Cybership routes the damaged
     // player's cards under the Cybership controller). The move is attributed to
     // `source_id` (the manifesting spell/ability), not the moved object.
+    // CR 608.2c: manifest (CR 701.40a), manifest dread (CR 701.62a) and cloak
+    // (CR 701.58a) all reach the battlefield through this one request, and they
+    // are exactly the three effects the parser admits as chain-referent
+    // producers (`oracle_effect::lower::publishes_chain_created_referent`). The
+    // mark lives here, on the producer, rather than in a list of causes or call
+    // sites that a fourth face-down delivery could silently join.
     let mut request =
         super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, source_id)
-            .face_down(profile);
+            .face_down(profile)
+            .publishing_chain_referent();
     if let Some(controller) = controller {
         request = request.under_control_of(controller);
     }
     match super::zone_pipeline::move_object(state, request, events) {
+        // Both arms are silent about the chain referent: the publish lives in
+        // `zone_pipeline::apply_face_down_entry_profile`, which the synchronous
+        // delivery and the CR 616.1 resume both run.
         super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
         super::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | super::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => Ok(()),
     }
+}
+
+/// CR 608.2c: Record a face-down entrant as the chain's most-recent created
+/// referent, so a following "it" / "that creature" anaphor
+/// (`TargetFilter::LastCreated`) binds to it — "manifest dread, then attach
+/// this Equipment to that creature" (Conductive Machete, #7531).
+///
+/// This writes the SAME slot the token producer writes
+/// (`engine_replacement.rs`, `state.last_created_token_ids`). The slot's name
+/// says "token", but its job is the anaphor's referent, not a claim about
+/// token-ness: CR 608.2c binds a demonstrative to the thing the previous
+/// instruction produced, and a manifested card and a created token are the same
+/// thing to that binding. The parser side keys on the same equivalence
+/// (`publishes_chain_created_referent`).
+///
+/// Assignment, not append — mirroring the token producer. The slot names the
+/// MOST RECENT producer, so a chain that manifests twice leaves the second
+/// entrant as the referent, which is what "that creature" means after it.
+pub(crate) fn publish_face_down_entry_referent(state: &mut GameState, object_id: ObjectId) {
+    state.last_created_token_ids = vec![object_id];
+}
+
+/// CR 608.2c: a chain-referent producer that is about to run clears the slot.
+///
+/// Without this, a producer that ends up producing NOTHING — manifest dread on
+/// an empty library — would leave an EARLIER instruction's referent in place,
+/// and the following demonstrative would bind to it. "Manifest dread, then
+/// attach this Equipment to that creature" would equip a creature the sentence
+/// never mentioned.
+///
+/// Mirrors the token producer, which assigns `last_created_token_ids =
+/// created_ids` at its tail whether or not the count was zero. The manifest
+/// family cannot assign at its tail — a CR 616.1 entry pause can park the
+/// delivery past the end of the resolver — so the two halves are split: the
+/// producer clears up front, the successful delivery publishes.
+pub(crate) fn begin_face_down_referent_production(state: &mut GameState) {
+    state.last_created_token_ids.clear();
 }
 
 /// Find the object id of the top card of `player`'s library, if any.

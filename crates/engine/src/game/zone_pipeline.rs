@@ -158,6 +158,9 @@ pub struct EntryMods {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     /// CR 708.2a + CR 708.3 face-down entry profile.
     pub face_down_profile: Option<FaceDownProfile>,
+    /// CR 608.2c: whether this entry is the producer a following demonstrative
+    /// anaphor refers back to. `Silent` unless a producer opted in.
+    pub chain_referent: crate::types::zones::ChainReferentIntent,
     /// CR 303.4f pre-resolved aura host.
     pub attach_to: Option<AttachTarget>,
 }
@@ -240,6 +243,7 @@ impl ZoneMoveRequest {
             controller_override: self.mods.controller_override,
             enter_with_counters: self.mods.enter_with_counters,
             face_down_profile: self.mods.face_down_profile,
+            chain_referent: self.mods.chain_referent,
             attach_to: self.mods.attach_to,
             library_placement: self.placement,
             exile_duration: self.exile_links.duration,
@@ -285,6 +289,7 @@ impl ZoneMoveRequest {
                 controller_override: pending.controller_override,
                 enter_with_counters: pending.enter_with_counters,
                 face_down_profile: pending.face_down_profile,
+                chain_referent: pending.chain_referent,
                 attach_to: pending.attach_to,
             },
             placement: pending.library_placement,
@@ -496,6 +501,14 @@ impl ZoneMoveRequest {
     /// callers no longer override characteristics manually after the move.
     pub fn face_down(mut self, profile: FaceDownProfile) -> Self {
         self.mods.face_down_profile = Some(profile);
+        self
+    }
+
+    /// CR 608.2c: mark this entry as the producer a following demonstrative
+    /// anaphor binds to. Opt-in, so an unmarked delivery never touches the
+    /// game-lifetime referent slot.
+    pub fn publishing_chain_referent(mut self) -> Self {
+        self.mods.chain_referent = crate::types::zones::ChainReferentIntent::Publishes;
         self
     }
 
@@ -839,7 +852,13 @@ pub(crate) fn move_object_with_terminal(
             let source_id = req.source();
             let mut proposed =
                 ProposedEvent::zone_change(req.object_id, from_zone, Zone::Library, source_id);
-            if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            if let ProposedEvent::ZoneChange {
+                applied,
+                chain_referent,
+                ..
+            } = &mut proposed
+            {
+                *chain_referent = req.mods.chain_referent;
                 *applied = req.replacement_applied.clone();
             }
             return match replacement::replace_event(state, proposed, events) {
@@ -913,7 +932,13 @@ pub(crate) fn move_object_with_terminal(
     // `Draw` cause variant — no other cause produces one.
     if let ZoneChangeCause::Draw { seed_applied } = req.cause {
         let mut proposed = ProposedEvent::zone_change(req.object_id, from_zone, req.to, source_id);
-        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+        if let ProposedEvent::ZoneChange {
+            applied,
+            chain_referent,
+            ..
+        } = &mut proposed
+        {
+            *chain_referent = req.mods.chain_referent;
             *applied = req.replacement_applied;
             applied.extend(seed_applied);
         }
@@ -1007,6 +1032,7 @@ pub(crate) fn move_object_with_terminal(
             controller_override,
             enter_with_counters,
             face_down_profile,
+            chain_referent,
             applied,
             ..
         } = &mut proposed
@@ -1019,6 +1045,7 @@ pub(crate) fn move_object_with_terminal(
             *controller_override = req.mods.controller_override;
             enter_with_counters.extend(req.mods.enter_with_counters.iter().cloned());
             *face_down_profile = req.mods.face_down_profile.clone().map(Box::new);
+            *chain_referent = req.mods.chain_referent;
             *applied = req.replacement_applied;
         }
         let approved = ApprovedZoneChange::seal(proposed);
@@ -1060,6 +1087,7 @@ pub(crate) fn move_object_with_terminal(
         req.mods.controller_override,
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
+        req.mods.chain_referent,
         track_exiled_by_source,
         None,
         None,
@@ -1439,6 +1467,7 @@ fn anticipated_zone_change_delivery(
         controller_override,
         enter_with_counters,
         face_down_profile,
+        chain_referent,
         attach_to,
         applied,
         ..
@@ -1450,6 +1479,7 @@ fn anticipated_zone_change_delivery(
         *controller_override = request.mods.controller_override;
         *enter_with_counters = request.mods.enter_with_counters.clone();
         *face_down_profile = request.mods.face_down_profile.clone().map(Box::new);
+        *chain_referent = request.mods.chain_referent;
         *attach_to = request.mods.attach_to;
         *applied = request.replacement_applied.clone();
     }
@@ -3323,6 +3353,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_counters,
         controller_override: ctrl_override,
         face_down_profile,
+        chain_referent,
         enter_as_copy,
         discard_frame,
         applied,
@@ -3691,6 +3722,24 @@ pub(crate) fn deliver_replaced_zone_change(
         if entered_battlefield {
             if let Some(profile) = &face_down_profile {
                 apply_face_down_entry_profile(state, object_id, profile);
+            }
+            // CR 608.2c: a permanent the instruction just produced is the
+            // chain's most-recent created referent, so a following "it" / "that
+            // creature" anaphor (`TargetFilter::LastCreated`) binds to it —
+            // "manifest dread, then attach this Equipment to that creature"
+            // (#7531).
+            //
+            // Keyed on the intent the REQUEST carried, not on any property of
+            // the entrant: two effects can deliver an identical face-down
+            // permanent and only one of them be the producer the sentence
+            // refers back to. Published here rather than at the producing
+            // effect so the synchronous arm, the manifest-dread continuation
+            // and the CR 616.1 parked-entry resume all reach it — the intent
+            // rides the parked event with the rest of the request — and only
+            // once the entry has actually settled (`entered_battlefield`), so a
+            // `CantEnterBattlefieldFrom` rejection publishes nothing.
+            if chain_referent.publishes() {
+                crate::game::morph::publish_face_down_entry_referent(state, object_id);
             }
         }
         // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
@@ -4087,6 +4136,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         controller_override,
         effect_enter_with_counters,
         face_down_profile,
+        crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4110,6 +4160,11 @@ fn execute_zone_move_with_applied_terminal(
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    // CR 608.2c: whether this entry is the producer a following demonstrative
+    // anaphor binds to. Only `move_object_with_terminal` forwards a request's
+    // intent; the four public `execute_zone_move*` wrappers are raw movers with
+    // no originating instruction to speak for, and pass `Silent`.
+    chain_referent: crate::types::zones::ChainReferentIntent,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4137,8 +4192,14 @@ fn execute_zone_move_with_applied_terminal(
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
-    if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+    if let ProposedEvent::ZoneChange {
+        applied,
+        chain_referent: ref mut intent,
+        ..
+    } = &mut proposed
+    {
         *applied = replacement_applied;
+        *intent = chain_referent;
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
@@ -6254,5 +6315,46 @@ mod effect_driven_transformed_entry_tests {
             obj.transformed,
             "CR 712.14a: the DFC must be transformed (back face) after this entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod face_down_entry_referent_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::FaceDownProfile;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+
+    /// CR 608.2c: the shared CR 708.3 helper installs characteristics and
+    /// NOTHING else. It is reached by every face-down path, including the
+    /// face-down CAST in `casting.rs` (where the object is on the stack and has
+    /// produced no permanent to name) and that module's two cast SIMULATIONS,
+    /// so a publish here would be a write no instruction asked for.
+    ///
+    /// The referent is published at the delivery instead, from the intent the
+    /// REQUEST carried — see `ChainReferentIntent`. What this row nails down is
+    /// the negative: no caller of this helper can publish by reaching it.
+    ///
+    /// It does NOT prove the positive. That is the integration suite's job
+    /// (`manifest_dread_that_creature_anaphor`), which drives the synchronous
+    /// manifest, the two-card continuation and the accept/decline resume through
+    /// the production pipeline.
+    #[test]
+    fn the_shared_face_down_helper_publishes_no_referent_from_any_zone() {
+        for zone in [Zone::Battlefield, Zone::Stack] {
+            let mut state = GameState::new_two_player(7);
+            let player = PlayerId(0);
+            let id = create_object(&mut state, CardId(1), player, "Entrant".to_string(), zone);
+            let before = vec![ObjectId(999)];
+            state.last_created_token_ids = before.clone();
+
+            apply_face_down_entry_profile(&mut state, id, &FaceDownProfile::vanilla_2_2());
+
+            assert_eq!(
+                state.last_created_token_ids, before,
+                "the characteristics helper must not touch the referent slot (zone {zone:?})"
+            );
+        }
     }
 }

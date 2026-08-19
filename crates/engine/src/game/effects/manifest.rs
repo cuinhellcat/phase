@@ -34,6 +34,10 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
+    // CR 608.2c: this instruction owns the chain's referent slot from here on,
+    // including the arms where it produces nothing.
+    crate::game::morph::begin_face_down_referent_production(state);
+
     // `player` is the LIBRARY OWNER (whose top cards are manifested), resolved
     // from `target`. `controller` is the optional CR 110.2a override for which
     // player the cards enter the battlefield under ("under your control").
