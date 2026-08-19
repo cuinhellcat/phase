@@ -195,3 +195,154 @@ fn a_permanent_without_a_stored_face_keeps_the_plain_flag_write() {
     assert!(!obj.face_down);
     assert_eq!(obj.name, "Ordinary Bear");
 }
+
+// ── Review round 2: the direct-turn authority, not the entry profile ─────────
+
+/// CR 708.2a + CR 613: the snapshot must come from the BASE face. The
+/// battlefield-entry profile snapshots the LIVE face, so a permanent carrying a
+/// continuous modification (here: a +1/+1 counter, live 5/5 on a printed 4/4)
+/// came back from the round trip with the modification baked into its base —
+/// and the still-present counter then inflated it AGAIN.
+#[test]
+fn a_modified_permanent_round_trips_to_its_base_face() {
+    use engine::types::counter::CounterType;
+
+    let mut scenario = GameScenario::new();
+    let id = scenario
+        .add_creature(P0, "Open Bear", 4, 4)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&id)
+        .unwrap()
+        .counters
+        .insert(CounterType::Plus1Plus1, 1);
+
+    let down = runner
+        .act(GameAction::Debug(DebugAction::SetFaceState {
+            object_id: id,
+            face_down: Some(true),
+            transformed: None,
+            flipped: None,
+        }))
+        .expect("the debug face-down write runs");
+    assert!(
+        down.events.iter().any(
+            |event| matches!(event, GameEvent::TurnedFaceDown { object_id } if *object_id == id)
+        ),
+        "CR 603.2: the direct turn emits the event the turned-face-down triggers \
+         observe (its own game action, distinct from transforming — CR 701.27b)"
+    );
+    assert_eq!(
+        runner.state().objects[&id]
+            .back_face
+            .as_ref()
+            .map(|face| face.power),
+        Some(Some(4)),
+        "the stash holds the PRINTED 4/4, not the counter-inflated live 5/5"
+    );
+
+    runner
+        .act(GameAction::Debug(DebugAction::SetFaceState {
+            object_id: id,
+            face_down: Some(false),
+            transformed: None,
+            flipped: None,
+        }))
+        .expect("the debug face-up write runs");
+    let obj = &runner.state().objects[&id];
+    assert_eq!(
+        (obj.base_power, obj.base_toughness),
+        (Some(4), Some(4)),
+        "CR 708.8: the restored base is the printed face"
+    );
+    assert_eq!(
+        obj.power,
+        Some(5),
+        "the surviving counter applies ON TOP of the printed base — exactly once"
+    );
+}
+
+/// CR 710.4 + CR 710.2: a flipped permanent's `back_face` slot already holds
+/// its stashed NORMAL half. The direct turn must keep that stash (it is what
+/// leaves the battlefield later), not overwrite it with a snapshot of the
+/// flipped half.
+#[test]
+fn a_flipped_permanents_normal_half_survives_the_turn_face_down() {
+    let mut scenario = GameScenario::new();
+    let id = scenario
+        .add_creature(P0, "Alternative Half", 4, 4)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    let normal = scenario.add_creature(P0, "Normal Half", 1, 1).id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+
+    let stash =
+        engine::game::printed_cards::snapshot_object_base_face(&runner.state().objects[&normal]);
+    {
+        let obj = runner.state_mut().objects.get_mut(&id).unwrap();
+        obj.flipped = true;
+        obj.back_face = Some(stash.clone());
+    }
+
+    runner
+        .act(GameAction::Debug(DebugAction::SetFaceState {
+            object_id: id,
+            face_down: Some(true),
+            transformed: None,
+            flipped: None,
+        }))
+        .expect("the debug face-down write runs");
+    assert_eq!(
+        runner.state().objects[&id]
+            .back_face
+            .as_ref()
+            .map(|face| face.name.as_str()),
+        Some("Normal Half"),
+        "the flip stash is the face that must reappear off the battlefield"
+    );
+}
+
+/// CR 712.16 + CR 730.2j: double-faced and melded permanents can't be turned
+/// face down. The sandbox reports the refusal instead of silently corrupting
+/// the permanent, mirroring the face-up arm's error stance.
+#[test]
+fn a_melded_permanent_refuses_the_debug_turn_face_down() {
+    let mut scenario = GameScenario::new();
+    let id = scenario
+        .add_creature(P0, "Melded Horror", 9, 10)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    runner.state_mut().objects.get_mut(&id).unwrap().merge_kind =
+        Some(engine::game::game_object::MergeKind::Meld);
+
+    let refused = runner.act(GameAction::Debug(DebugAction::SetFaceState {
+        object_id: id,
+        face_down: Some(true),
+        transformed: None,
+        flipped: None,
+    }));
+    assert!(
+        refused.is_err(),
+        "CR 730.2j: the tool must refuse, not corrupt"
+    );
+    let obj = &runner.state().objects[&id];
+    assert!(!obj.face_down, "nothing happened");
+    assert_eq!(obj.name, "Melded Horror", "characteristics unchanged");
+}
