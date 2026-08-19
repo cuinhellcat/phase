@@ -17669,7 +17669,6 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
-        migrate_legacy_turn_face_up_resume(&mut value)?;
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;

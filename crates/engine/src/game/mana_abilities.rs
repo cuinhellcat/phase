@@ -3414,6 +3414,8 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             object_id,
             announced_x,
             ..
+        // CR 702.37e + CR 107.3d: payment has completed, so commit the
+        // turn-face-up action with its already-announced X value.
         } => super::morph::finish_paid_turn_face_up(state, player, object_id, announced_x, events),
         ManaAbilityResume::EndContinuousEffect { player, group, .. } => Ok(
             super::end_continuous_effect::finish_paid_end_continuous_effect(
