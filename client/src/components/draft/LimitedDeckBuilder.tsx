@@ -363,7 +363,13 @@ export function LimitedDeckBuilder({
                 className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
               />
               <PoolFilterChips
-                kinds={axisKinds(poolGroups.type_groups)}
+                kinds={
+                  // Engine-owned multi-type option list; a legacy (pre-v11)
+                  // view carries none, so fall back to its exclusive buckets.
+                  poolGroups.type_filter_options.length > 0
+                    ? poolGroups.type_filter_options
+                    : axisKinds(poolGroups.type_groups)
+                }
                 selected={poolFilter.types}
                 onToggle={(kind) =>
                   setPoolFilter((prev) => ({ ...prev, types: toggleKind(prev.types, kind) }))
@@ -592,9 +598,10 @@ function PoolFilterChips({
           type="button"
           aria-pressed={selected.includes(kind)}
           onClick={() => onToggle(kind)}
-          // 44pt coarse-pointer floor (index.css), relaxed on desktop like
-          // the CubeSetupPanel inputs alongside this screen.
-          className={`min-h-[44px] rounded-full px-3 py-1 text-xs transition-colors sm:min-h-0 sm:px-2.5 ${
+          // 44pt coarse-pointer floor in BOTH dimensions (index.css),
+          // relaxed only for fine pointers — a wide touch device keeps the
+          // full target (review round 4).
+          className={`min-h-[44px] min-w-[44px] rounded-full px-3 py-1 text-xs transition-colors pointer-fine:min-h-0 pointer-fine:min-w-0 pointer-fine:px-2.5 ${
             selected.includes(kind)
               ? "bg-white/10 text-white"
               : "text-white/40 hover:bg-white/5 hover:text-white/70"

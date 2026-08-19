@@ -127,6 +127,12 @@ pub struct DraftPoolGroups {
     /// `default` keeps pre-v11 serialized views (no rarity axis) deserializable.
     #[serde(default)]
     pub rarity_groups: Vec<DraftPoolGroup>,
+    /// Engine-owned option list for a type-filter control: every type bucket
+    /// any pool member belongs to (CR 205.2a: multi-valued), in engine order.
+    /// The exclusive `type_groups` axis stays a presentation/sorting shape.
+    /// `default` keeps pre-v11 serialized views deserializable.
+    #[serde(default)]
+    pub type_filter_options: Vec<DraftPoolGroupKind>,
     pub color_counts: DraftPoolColorCounts,
 }
 
@@ -139,6 +145,7 @@ impl DraftPoolGroups {
             type_groups: groups_for(pool, &TYPE_GROUP_ORDER, type_group, true),
             cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
             rarity_groups: groups_for(pool, &RARITY_GROUP_ORDER, rarity_group, true),
+            type_filter_options: type_filter_options(pool),
             color_counts: color_counts(pool),
         }
     }
@@ -199,7 +206,10 @@ pub fn filter_pool_listing(listing: &[DraftCardInstance], filter: &PoolFilter) -
         .iter()
         .filter(|card| {
             (query.is_empty() || card.name.to_lowercase().contains(&query))
-                && axis_matches(&filter.types, type_group(card))
+                && (filter.types.is_empty()
+                    || type_memberships(card)
+                        .iter()
+                        .any(|kind| filter.types.contains(kind)))
                 && axis_matches(&filter.colors, color_group(card))
                 && axis_matches(&filter.rarities, rarity_group(card))
         })
@@ -613,25 +623,62 @@ fn color_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
     }
 }
 
+/// The EXCLUSIVE presentation bucket for the sorted pool display — a card
+/// appears in exactly one group, so the priority chain picks its most salient
+/// type. Filtering must NOT use this: see [`type_memberships`].
 fn type_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
+    *type_memberships(card)
+        .first()
+        .expect("type membership is total — the Other bucket catches the rest")
+}
+
+/// EVERY type bucket `card` belongs to, in `TYPE_GROUP_ORDER` — CR 205.2a
+/// card types are multi-valued, so an Artifact Creature is a member of BOTH
+/// the Artifact and the Creature bucket. This is the FILTERING membership
+/// (review round 4: the exclusive bucket silently excluded multi-type cards
+/// from every non-primary type selection); the exclusive presentation bucket
+/// is its first element, keeping the two views of the same card consistent
+/// by construction.
+fn type_memberships(card: &DraftCardInstance) -> Vec<DraftPoolGroupKind> {
     let type_line = card.type_line.to_ascii_lowercase();
-    if type_line.contains("creature") {
-        DraftPoolGroupKind::Creature
-    } else if type_line.contains("instant") {
-        DraftPoolGroupKind::Instant
-    } else if type_line.contains("sorcery") {
-        DraftPoolGroupKind::Sorcery
-    } else if type_line.contains("enchantment") {
-        DraftPoolGroupKind::Enchantment
-    } else if type_line.contains("artifact") {
-        DraftPoolGroupKind::Artifact
-    } else if type_line.contains("planeswalker") {
-        DraftPoolGroupKind::Planeswalker
-    } else if type_line.contains("land") {
-        DraftPoolGroupKind::Land
+    let memberships: Vec<DraftPoolGroupKind> = [
+        (DraftPoolGroupKind::Creature, "creature"),
+        (DraftPoolGroupKind::Instant, "instant"),
+        (DraftPoolGroupKind::Sorcery, "sorcery"),
+        (DraftPoolGroupKind::Enchantment, "enchantment"),
+        (DraftPoolGroupKind::Artifact, "artifact"),
+        (DraftPoolGroupKind::Planeswalker, "planeswalker"),
+        (DraftPoolGroupKind::Land, "land"),
+    ]
+    .into_iter()
+    .filter(|(_, needle)| type_line.contains(needle))
+    .map(|(kind, _)| kind)
+    .collect();
+    if memberships.is_empty() {
+        vec![DraftPoolGroupKind::Other]
     } else {
-        DraftPoolGroupKind::Other
+        memberships
     }
+}
+
+/// Every type bucket ANY pool member belongs to, in `TYPE_GROUP_ORDER` — the
+/// engine-owned option list a type-filter control offers. Distinct from the
+/// exclusive `type_groups` axis: a pool of Artifact Creatures offers BOTH
+/// chips even though its sorted display has only a Creature group.
+fn type_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    let mut present: Vec<DraftPoolGroupKind> = Vec::new();
+    for card in pool {
+        for kind in type_memberships(card) {
+            if !present.contains(&kind) {
+                present.push(kind);
+            }
+        }
+    }
+    TYPE_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| present.contains(kind))
+        .collect()
 }
 
 /// Buckets the instance's raw rarity string into the standard four, with
@@ -1089,6 +1136,74 @@ mod tests {
         assert_eq!(
             filter_pool_listing(&pool, &creatures),
             vec!["adept-common", "adept-rare"]
+        );
+    }
+
+    #[test]
+    fn multi_type_cards_match_every_type_they_carry() {
+        // CR 205.2a: card types are multi-valued. Review round 4: the
+        // exclusive presentation bucket (Creature-first priority) must not be
+        // the filtering membership — an Artifact Creature belongs to BOTH
+        // selections, and the option list offers both chips.
+        let artifact_creature = draft_card("Golem", &[], 3, "Artifact Creature — Golem");
+        let enchantment_creature = draft_card("Nymph", &["G"], 2, "Enchantment Creature — Nymph");
+        let artifact_land = draft_card("Tomb", &[], 0, "Artifact Land");
+        let plain_instant = draft_card("Bolt", &["R"], 1, "Instant");
+        let pool = vec![
+            artifact_creature,
+            enchantment_creature,
+            artifact_land,
+            plain_instant,
+        ];
+
+        let by = |kind: DraftPoolGroupKind| {
+            filter_pool_listing(
+                &pool,
+                &PoolFilter {
+                    types: vec![kind],
+                    ..PoolFilter::default()
+                },
+            )
+        };
+        assert_eq!(
+            by(DraftPoolGroupKind::Artifact),
+            vec!["Golem", "Tomb"],
+            "the Artifact selection reaches the Artifact Creature AND the Artifact Land"
+        );
+        assert_eq!(
+            by(DraftPoolGroupKind::Creature),
+            vec!["Golem", "Nymph"],
+            "both multi-type creatures stay reachable through Creature"
+        );
+        assert_eq!(by(DraftPoolGroupKind::Enchantment), vec!["Nymph"]);
+        assert_eq!(by(DraftPoolGroupKind::Land), vec!["Tomb"]);
+
+        // The engine-owned option list offers every membership, in engine
+        // order — while the exclusive presentation axis keeps one bucket per
+        // card (the Artifact Land sorts under Artifact, not Land).
+        let groups = DraftPoolGroups::from_pool(&pool);
+        assert_eq!(
+            groups.type_filter_options,
+            vec![
+                DraftPoolGroupKind::Creature,
+                DraftPoolGroupKind::Instant,
+                DraftPoolGroupKind::Enchantment,
+                DraftPoolGroupKind::Artifact,
+                DraftPoolGroupKind::Land,
+            ]
+        );
+        assert_eq!(
+            groups
+                .type_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::Creature,
+                DraftPoolGroupKind::Instant,
+                DraftPoolGroupKind::Artifact,
+            ],
+            "the sorted display keeps its exclusive one-bucket-per-card shape"
         );
     }
 

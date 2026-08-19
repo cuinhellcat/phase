@@ -82,6 +82,10 @@ export interface DraftPoolGroups {
   type_groups: DraftPoolGroup[];
   cmc_groups: DraftPoolGroup[];
   rarity_groups: DraftPoolGroup[];
+  /** Engine-owned option list for a type-filter control: every type bucket
+   * any pool member belongs to (multi-valued), in engine order. The exclusive
+   * `type_groups` axis stays a presentation/sorting shape. */
+  type_filter_options: DraftPoolGroupKind[];
   color_counts: DraftPoolColorCounts;
 }
 
@@ -91,6 +95,7 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
   type_groups: [],
   cmc_groups: [],
   rarity_groups: [],
+  type_filter_options: [],
   color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
 };
 

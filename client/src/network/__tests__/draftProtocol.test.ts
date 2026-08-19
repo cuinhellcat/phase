@@ -46,6 +46,10 @@ describe("draftProtocol", () => {
       }) as { view: { pool_groups: { rarity_groups: unknown[]; type_groups: Array<{ cards: Array<{ instance_ids: string[] }> }> } } };
 
       expect(msg.view.pool_groups.rarity_groups).toEqual([]);
+      expect(
+        (msg.view.pool_groups as unknown as { type_filter_options: unknown[] })
+          .type_filter_options,
+      ).toEqual([]);
       expect(msg.view.pool_groups.type_groups[0].cards[0].instance_ids).toEqual(["adept-1"]);
     });
 
@@ -379,6 +383,7 @@ describe("draftProtocol", () => {
               type_line: "Instant",
             }, count: 1, instance_ids: ["pack-2-card-1"] }] },
           ],
+          type_filter_options: ["creature", "instant"],
           color_counts: { white: 1, blue: 1, black: 0, red: 0, green: 0 },
         },
         sealed_packs: [

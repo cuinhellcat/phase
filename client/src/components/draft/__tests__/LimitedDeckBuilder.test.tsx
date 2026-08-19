@@ -107,6 +107,7 @@ const TEST_VIEW: BuilderView = {
     type_groups: [],
     cmc_groups: [],
     rarity_groups: [],
+    type_filter_options: [],
     color_counts: { white: 0, blue: 1, black: 0, red: 0, green: 0 },
   },
   seats: [],
@@ -283,6 +284,7 @@ const FILTER_VIEW: BuilderView = {
   ],
   pool_groups: {
     ...TEST_VIEW.pool_groups,
+    type_filter_options: ["creature", "instant"],
     type_groups: [
       {
         kind: "creature",
@@ -375,6 +377,29 @@ describe("LimitedDeckBuilder pool filters", () => {
     expect(
       screen.getByRole("button", { name: "Add Academy Ruins" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the 44px coarse-pointer floor on both chip dimensions", () => {
+    render(
+      <LimitedDeckBuilder
+        view={FILTER_VIEW}
+        mainDeck={[]}
+        landCounts={{}}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+        showSuggestions={false}
+      />,
+    );
+
+    const chip = screen.getByRole("button", { name: "Instant", pressed: false });
+    // Review round 4: the floor must hold in BOTH dimensions and be relaxed
+    // only for fine pointers — never at a viewport breakpoint.
+    expect(chip.className).toContain("min-h-[44px]");
+    expect(chip.className).toContain("min-w-[44px]");
+    expect(chip.className).toContain("pointer-fine:min-h-0");
+    expect(chip.className).not.toContain("sm:min-h-0");
   });
 
   it("announces a failed engine filter and shows the unfiltered listing", async () => {
