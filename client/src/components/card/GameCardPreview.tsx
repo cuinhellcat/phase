@@ -68,10 +68,13 @@ export function GameCardPreview() {
       // With no marker printing (unknown cause from an older save, or the
       // Ixidron class — an effect turned it face down, CR 708.2a) the hover
       // still answers: the generic label routes `CardPreview` onto the plain
-      // card back, which reveals nothing.
+      // card back, which reveals nothing. BATTLEFIELD only — a face-down card
+      // in a hidden zone (hideaway exile, issue #2889) keeps rendering no
+      // preview at all: it has no public characteristics the back could stand
+      // in for, and that row pins exactly this.
       (inspectedObj
         ? faceDownMarkerName(true, inspectedObj.face_down_cause)
-          ?? t("card.faceDownName")
+          ?? (inspectedObj.zone === "Battlefield" ? t("card.faceDownName") : null)
         : null);
   // The "other" face: when viewing front, this is back_face; when viewing back,
   // this is the front. A face-down permanent has no OTHER printed face — its

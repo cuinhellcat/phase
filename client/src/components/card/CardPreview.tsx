@@ -327,13 +327,18 @@ function CardPreviewInner({
   );
   const markerIsPrimary =
     previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
-  // A hidden face-down permanent whose cause has NO marker printing (unknown
+  // A hidden face-down PERMANENT whose cause has NO marker printing (unknown
   // cause from an older save, or the Ixidron class) still gets a preview: the
   // plain card back. It reveals nothing (CR 708.2a — the public face is a
   // blank 2/2), and every art lookup below is suppressed so neither the
   // generic label nor a blanked ref can leak into a network search.
+  // Battlefield only: a face-down card in a hidden zone (hideaway exile,
+  // issue #2889) has no public characteristics at all and keeps no preview.
   const genericFaceDownBack =
-    obj != null && shouldRenderCardBack(obj) && previewMarkerRef == null;
+    obj != null
+    && obj.zone === "Battlefield"
+    && shouldRenderCardBack(obj)
+    && previewMarkerRef == null;
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
