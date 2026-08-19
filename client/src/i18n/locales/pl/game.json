@@ -1853,7 +1853,8 @@
         "card": "kartę",
         "treasure": "Skarb",
         "food": "Pożywienie",
-        "tappedFish": "zakręconą Rybę"
+        "tappedFish": "zakręconą Rybę",
+        "extraTurn": "dodatkową turę"
       }
     }
   },

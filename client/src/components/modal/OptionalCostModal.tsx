@@ -23,10 +23,9 @@ function giftKindLabel(
       return t("optionalCost.gift.kind.food");
     case "TappedFish":
       return t("optionalCost.gift.kind.tappedFish");
-    // CR 702.174g: the one promised gift that is not an object.
+    // CR 702.174g: the chosen player takes an extra turn after this one.
     case "ExtraTurn":
       return t("optionalCost.gift.kind.extraTurn");
-    // CR 702.174g: the one promised gift that is not an object.
     default:
       return t("optionalCost.gift.kind.card");
   }
