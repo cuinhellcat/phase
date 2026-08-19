@@ -16,6 +16,8 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { faceDownMarkerRef } from "./faceDownMarker.ts";
+import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -314,6 +316,16 @@ function CardPreviewInner({
   const backParseDetails = useCardParseDetails(backFaceName);
 
   const isToken = obj?.display_source === "Token";
+  // Face-down permanents (#7547): opponents preview the cause MARKER full
+  // size (it carries the mechanic's reminder text); the controller previews
+  // the real card alone — the marker would only cover its rules text, and the
+  // controller already knows the mechanic (playtest call, 2026-08-19).
+  const previewMarkerRef = faceDownMarkerRef(
+    obj?.face_down ?? false,
+    obj?.face_down_cause,
+  );
+  const markerIsPrimary =
+    previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
@@ -324,11 +336,15 @@ function CardPreviewInner({
   const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
     size: "normal",
     faceIndex: defaultFaceIndex,
-    isToken,
+    isToken: isToken || markerIsPrimary,
     tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: isToken && obj ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
+    tokenImageRef: markerIsPrimary
+      ? previewMarkerRef
+      : isToken && obj
+        ? obj.token_image_ref
+        : undefined,
+    oracleId: markerIsPrimary ? undefined : obj?.printed_ref?.oracle_id,
+    faceName: markerIsPrimary ? undefined : obj?.printed_ref?.face_name,
     scryfallId,
     sourcePrinting,
   });

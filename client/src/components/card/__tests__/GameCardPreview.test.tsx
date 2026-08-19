@@ -275,4 +275,38 @@ describe("GameCardPreview", () => {
 
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
   });
+
+  it("peeks the STORED face of the viewer's own face-down permanent (#7547)", () => {
+    // The live face is blanked per CR 708.2a; the preview is the CR 708.5
+    // peek, so it resolves the stored real face — on any hovered face index.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        display_visible_to_viewer: true,
+        name: "",
+        back_face: { name: "Hooded Hydra", layout_kind: null } as never,
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Hooded Hydra").length).toBeGreaterThan(0);
+  });
+
+  it("previews an OPPONENT's face-down permanent as its cause marker (#7547)", () => {
+    // The identity stays hidden; the marker carries the mechanic's reminder
+    // text, which is exactly what an opponent may know.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        face_down_cause: "Morph" as never,
+        name: "",
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Morph").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+  });
 });
