@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { LimitedDeckBuilder } from "../LimitedDeckBuilder";
 
@@ -45,6 +45,39 @@ vi.mock("framer-motion", () => ({
     } & Record<string, unknown>) => <div {...props}>{children}</div>,
   },
 }));
+
+// The engine (wasm) cannot load under vitest; stand in for its filtering
+// authority with a contract-faithful fake. Presentation exports stay real.
+vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../viewmodel/limitedPoolFilter")>();
+  return {
+    ...actual,
+    filterPoolListing: async (
+      listing: Array<{ instance_id: string; name: string }>,
+      groups: {
+        type_groups: Array<{
+          kind: string;
+          cards: Array<{ instance_ids: string[] }>;
+        }>;
+      },
+      filter: { query: string; types: string[] },
+    ) => {
+      const kindById = new Map<string, string>();
+      for (const g of groups.type_groups)
+        for (const e of g.cards) for (const id of e.instance_ids) kindById.set(id, g.kind);
+      const q = filter.query.trim().toLowerCase();
+      return listing
+        .filter(
+          (c) =>
+            (q === "" || c.name.toLowerCase().includes(q)) &&
+            (filter.types.length === 0 ||
+              filter.types.includes(kindById.get(c.instance_id) ?? "")),
+        )
+        .map((c) => c.instance_id);
+    },
+  };
+});
 
 vi.mock("../../card/HoverCardPreview", () => ({
   HoverCardPreview: ({ card }: { card: { name: string } | null }) => (
@@ -288,7 +321,7 @@ const FILTER_VIEW: BuilderView = {
 describe("LimitedDeckBuilder pool filters", () => {
   afterEach(cleanup);
 
-  it("narrows the pool grid through an engine type chip and restores on untoggle", () => {
+  it("narrows the pool grid through an engine type chip and restores on untoggle", async () => {
     render(
       <LimitedDeckBuilder
         view={FILTER_VIEW}
@@ -308,14 +341,20 @@ describe("LimitedDeckBuilder pool filters", () => {
     const chip = screen.getByRole("button", { name: "Instant", pressed: false });
     fireEvent.click(chip);
 
-    expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull(),
+    );
     expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Instant", pressed: true }));
-    expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /wind drake/i }),
+      ).toBeInTheDocument(),
+    );
   });
 
-  it("searches the pool by name, independent of the addable-cards box", () => {
+  it("searches the pool by name, independent of the addable-cards box", async () => {
     render(
       <LimitedDeckBuilder
         view={FILTER_VIEW}
@@ -333,7 +372,9 @@ describe("LimitedDeckBuilder pool filters", () => {
       target: { value: "shock" },
     });
 
-    expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /wind drake/i })).toBeNull(),
+    );
     expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
     // The addable-cards list is untouched by the pool query.
     expect(

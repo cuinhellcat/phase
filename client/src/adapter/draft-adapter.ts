@@ -67,6 +67,16 @@ export interface DraftPoolColorCounts {
   green: number;
 }
 
+/** Typed filter contract mirroring `draft_core::view::PoolFilter` (#7546):
+ * the display sends WHAT it asks for; the engine decides WHICH instances
+ * match. Empty axis = unconstrained. */
+export interface PoolFilter {
+  query: string;
+  types: DraftPoolGroupKind[];
+  colors: DraftPoolGroupKind[];
+  rarities: DraftPoolGroupKind[];
+}
+
 export interface DraftPoolGroups {
   color_groups: DraftPoolGroup[];
   type_groups: DraftPoolGroup[];
@@ -272,6 +282,24 @@ export class DraftAdapter {
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  /**
+   * Narrow a limited-pool listing through the ENGINE's filtering authority
+   * (#7546 review). Stateless — works for P2P guests whose views arrive over
+   * the network; no draft session is required.
+   */
+  async filterPoolListing(
+    listing: DraftCardInstance[],
+    groups: DraftPoolGroups,
+    filter: PoolFilter,
+  ): Promise<string[]> {
+    const wasm = await ensureDraftWasm();
+    return wasm.filter_pool_listing(
+      JSON.stringify(listing),
+      JSON.stringify(groups),
+      JSON.stringify(filter),
+    ) as string[];
   }
 
   async initializeSealed(

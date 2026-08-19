@@ -15,11 +15,11 @@ import { EMPTY_DRAFT_POOL_GROUPS } from "../../adapter/draft-adapter";
 import {
   axisKinds,
   EMPTY_POOL_FILTER,
-  filterPool,
+  filterPoolListing,
   poolFilterActive,
   toggleKind,
-  type PoolFilterState,
 } from "../../viewmodel/limitedPoolFilter";
+import type { PoolFilter } from "../../adapter/draft-adapter";
 import { POOL_GROUP_LABEL_KEYS } from "./poolGroupLabels";
 import type { CardHoverInfo } from "../card/CardPreview";
 import { HoverCardPreview } from "../card/HoverCardPreview";
@@ -247,7 +247,8 @@ export function LimitedDeckBuilder({
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [addableQuery, setAddableQuery] = useState("");
-  const [poolFilter, setPoolFilter] = useState<PoolFilterState>(EMPTY_POOL_FILTER);
+  const [poolFilter, setPoolFilter] = useState<PoolFilter>(EMPTY_POOL_FILTER);
+  const [keptInstanceIds, setKeptInstanceIds] = useState<string[] | null>(null);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
@@ -257,13 +258,35 @@ export function LimitedDeckBuilder({
     [pool, mainDeck],
   );
 
-  // #7507: every filter axis keys on the ENGINE's own pool classification
-  // (`view.pool_groups`); only the name query is display-layer work.
+  // #7507 + #7546 review: the ENGINE is the single filtering authority. The
+  // display sends the listing, the engine-delivered groups and the typed
+  // filter; it renders exactly the returned instance ids. React holds only
+  // the presentation state (which chips are pressed, the query text).
   const poolGroups = view?.pool_groups ?? EMPTY_DRAFT_POOL_GROUPS;
-  const displayedPool = useMemo(
-    () => filterPool(remainingPool, poolGroups, poolFilter),
-    [remainingPool, poolGroups, poolFilter],
-  );
+  useEffect(() => {
+    if (!poolFilterActive(poolFilter)) {
+      setKeptInstanceIds(null);
+      return;
+    }
+    let stale = false;
+    filterPoolListing(remainingPool, poolGroups, poolFilter)
+      .then((ids) => {
+        if (!stale) setKeptInstanceIds(ids);
+      })
+      .catch(() => {
+        // Engine unavailable: show the unfiltered listing rather than an
+        // empty grid — the display must not interpret the data itself.
+        if (!stale) setKeptInstanceIds(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [remainingPool, poolGroups, poolFilter]);
+  const displayedPool = useMemo(() => {
+    if (keptInstanceIds === null) return remainingPool;
+    const kept = new Set(keptInstanceIds);
+    return remainingPool.filter((card) => kept.has(card.instance_id));
+  }, [remainingPool, keptInstanceIds]);
 
   const deckGroups = useMemo(
     () => groupByName(pool, mainDeck),
