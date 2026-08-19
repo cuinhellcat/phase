@@ -309,6 +309,9 @@ export function LimitedDeckBuilder({
       setLegacyFilterOptions(null);
       return;
     }
+    // Do not display the prior legacy pool's engine-owned options while this
+    // pool's stateless request is pending.
+    setLegacyFilterOptions(null);
     let stale = false;
     fetchPoolFilterOptions(pool)
       .then((options) => {

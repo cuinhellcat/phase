@@ -50,6 +50,12 @@ vi.mock("framer-motion", () => ({
 // authority with a contract-faithful fake. Presentation exports stay real.
 let failFilterCalls = false;
 let failOptionsCalls = false;
+let deferredOptions:
+  | {
+      poolId: string;
+      promise: Promise<{ types: string[]; colors: string[]; rarities: string[] }>;
+    }
+  | null = null;
 vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../viewmodel/limitedPoolFilter")>();
@@ -58,9 +64,12 @@ vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
     // Contract-faithful fake of the engine's stateless option path: classify
     // each instance from its own fields, exactly as draft-core does.
     fetchPoolFilterOptions: async (
-      pool: Array<{ colors: string[]; type_line: string; rarity: string }>,
+      pool: Array<{ instance_id: string; colors: string[]; type_line: string; rarity: string }>,
     ) => {
       if (failOptionsCalls) throw new Error("engine unavailable");
+      if (deferredOptions?.poolId === pool[0]?.instance_id) {
+        return deferredOptions.promise;
+      }
       const typeOrder = [
         "creature",
         "instant",
@@ -532,6 +541,85 @@ describe("LimitedDeckBuilder pool filters", () => {
       ).toBeNull();
     } finally {
       failOptionsCalls = false;
+    }
+  });
+
+  it("clears prior legacy chips while the next legacy pool's options are pending", async () => {
+    const nextLegacyView: BuilderView = {
+      ...LEGACY_VIEW,
+      pool: [
+        {
+          instance_id: "seal-1",
+          name: "Seal of Cleansing",
+          set_code: "dmu",
+          collector_number: "3",
+          rarity: "common",
+          colors: ["W"],
+          cmc: 2,
+          type_line: "Enchantment",
+        },
+        {
+          instance_id: "field-1",
+          name: "Plains",
+          set_code: "dmu",
+          collector_number: "4",
+          rarity: "common",
+          colors: [],
+          cmc: 0,
+          type_line: "Land",
+        },
+      ],
+    };
+    let resolveOptions!: (value: { types: string[]; colors: string[]; rarities: string[] }) => void;
+    deferredOptions = {
+      poolId: "seal-1",
+      promise: new Promise((resolve) => {
+        resolveOptions = resolve;
+      }),
+    };
+    try {
+      const { rerender } = render(
+        <LimitedDeckBuilder
+          view={LEGACY_VIEW}
+          mainDeck={[]}
+          landCounts={{}}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />,
+      );
+
+      await screen.findByRole("button", { name: "Artifact", pressed: false });
+
+      rerender(
+        <LimitedDeckBuilder
+          view={nextLegacyView}
+          mainDeck={[]}
+          landCounts={{}}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />,
+      );
+
+      expect(screen.queryByRole("button", { name: "Artifact", pressed: false })).toBeNull();
+
+      await act(async () => {
+        resolveOptions({
+          types: ["enchantment", "land"],
+          colors: ["white", "colorless"],
+          rarities: ["common"],
+        });
+        await Promise.resolve();
+      });
+
+      expect(screen.getByRole("button", { name: "Enchantment", pressed: false })).toBeInTheDocument();
+    } finally {
+      deferredOptions = null;
     }
   });
 
