@@ -147,6 +147,7 @@
     "searchPool": "Search your pool...",
     "allAdded": "All cards added to deck.",
     "noFilterMatches": "No cards match the filters",
+    "filterUnavailable": "Filters are unavailable right now — showing all cards.",
     "mainDeck": "Main Deck",
     "emptyDeckHint": "Click cards from the pool to add them to your deck.",
     "addableCards": "Addable Cards",

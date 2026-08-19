@@ -48,31 +48,26 @@ vi.mock("framer-motion", () => ({
 
 // The engine (wasm) cannot load under vitest; stand in for its filtering
 // authority with a contract-faithful fake. Presentation exports stay real.
+let failFilterCalls = false;
 vi.mock("../../../viewmodel/limitedPoolFilter", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../../viewmodel/limitedPoolFilter")>();
   return {
     ...actual,
     filterPoolListing: async (
-      listing: Array<{ instance_id: string; name: string }>,
-      groups: {
-        type_groups: Array<{
-          kind: string;
-          cards: Array<{ instance_ids: string[] }>;
-        }>;
-      },
+      listing: Array<{ instance_id: string; name: string; type_line: string }>,
       filter: { query: string; types: string[] },
     ) => {
-      const kindById = new Map<string, string>();
-      for (const g of groups.type_groups)
-        for (const e of g.cards) for (const id of e.instance_ids) kindById.set(id, g.kind);
+      if (failFilterCalls) throw new Error("engine unavailable");
+      // Contract-faithful fake of the engine: classify each instance from
+      // its own fields (the real authority does the same in draft-core).
       const q = filter.query.trim().toLowerCase();
       return listing
         .filter(
           (c) =>
             (q === "" || c.name.toLowerCase().includes(q)) &&
             (filter.types.length === 0 ||
-              filter.types.includes(kindById.get(c.instance_id) ?? "")),
+              filter.types.some((t) => c.type_line.toLowerCase().includes(t))),
         )
         .map((c) => c.instance_id);
     },
@@ -380,5 +375,35 @@ describe("LimitedDeckBuilder pool filters", () => {
     expect(
       screen.getByRole("button", { name: "Add Academy Ruins" }),
     ).toBeInTheDocument();
+  });
+
+  it("announces a failed engine filter and shows the unfiltered listing", async () => {
+    failFilterCalls = true;
+    try {
+      render(
+        <LimitedDeckBuilder
+          view={FILTER_VIEW}
+          mainDeck={[]}
+          landCounts={{}}
+          onAddToDeck={() => {}}
+          onRemoveFromDeck={() => {}}
+          onSetLandCount={() => {}}
+          onSubmitDeck={() => {}}
+          showSuggestions={false}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Instant", pressed: false }));
+
+      // Review round 3: the grid must not silently contradict the active
+      // controls — the fallback shows everything AND says so.
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Filters are unavailable right now — showing all cards.",
+      );
+      expect(screen.getByRole("button", { name: /wind drake/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /shock/i })).toBeInTheDocument();
+    } finally {
+      failFilterCalls = false;
+    }
   });
 });

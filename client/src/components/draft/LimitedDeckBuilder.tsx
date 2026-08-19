@@ -249,6 +249,7 @@ export function LimitedDeckBuilder({
   const [addableQuery, setAddableQuery] = useState("");
   const [poolFilter, setPoolFilter] = useState<PoolFilter>(EMPTY_POOL_FILTER);
   const [keptInstanceIds, setKeptInstanceIds] = useState<string[] | null>(null);
+  const [poolFilterFailed, setPoolFilterFailed] = useState(false);
   const [localSubmissionError, setLocalSubmissionError] = useState<string | null>(null);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
@@ -266,22 +267,29 @@ export function LimitedDeckBuilder({
   useEffect(() => {
     if (!poolFilterActive(poolFilter)) {
       setKeptInstanceIds(null);
+      setPoolFilterFailed(false);
       return;
     }
     let stale = false;
-    filterPoolListing(remainingPool, poolGroups, poolFilter)
+    filterPoolListing(remainingPool, poolFilter)
       .then((ids) => {
-        if (!stale) setKeptInstanceIds(ids);
+        if (stale) return;
+        setKeptInstanceIds(ids);
+        setPoolFilterFailed(false);
       })
       .catch(() => {
+        if (stale) return;
         // Engine unavailable: show the unfiltered listing rather than an
-        // empty grid — the display must not interpret the data itself.
-        if (!stale) setKeptInstanceIds(null);
+        // empty grid — the display must not interpret the data itself — and
+        // SAY so, so the grid cannot silently contradict the active controls
+        // (review round 3).
+        setKeptInstanceIds(null);
+        setPoolFilterFailed(true);
       });
     return () => {
       stale = true;
     };
-  }, [remainingPool, poolGroups, poolFilter]);
+  }, [remainingPool, poolFilter]);
   const displayedPool = useMemo(() => {
     if (keptInstanceIds === null) return remainingPool;
     const kept = new Set(keptInstanceIds);
@@ -378,6 +386,11 @@ export function LimitedDeckBuilder({
                   }))
                 }
               />
+              {poolFilterFailed && (
+                <p role="alert" className="text-xs text-amber-300/80">
+                  {t("limitedDeck.filterUnavailable")}
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7">
               <AnimatePresence mode="popLayout" initial={false}>

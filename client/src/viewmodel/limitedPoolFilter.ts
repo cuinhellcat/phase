@@ -3,7 +3,6 @@ import {
   type DraftCardInstance,
   type DraftPoolGroup,
   type DraftPoolGroupKind,
-  type DraftPoolGroups,
   type PoolFilter,
 } from "../adapter/draft-adapter";
 
@@ -54,12 +53,12 @@ const adapter = new DraftAdapter();
 
 /**
  * Ask the engine which instances of `listing` the filter keeps, in listing
- * order. The display renders exactly this result.
+ * order. The display renders exactly this result. Classification happens
+ * inside draft-core, so no wire-delivered groups are involved.
  */
 export function filterPoolListing(
   listing: DraftCardInstance[],
-  groups: DraftPoolGroups,
   filter: PoolFilter,
 ): Promise<string[]> {
-  return adapter.filterPoolListing(listing, groups, filter);
+  return adapter.filterPoolListing(listing, filter);
 }

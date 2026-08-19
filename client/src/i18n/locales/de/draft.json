@@ -147,6 +147,7 @@
     "searchPool": "Pool durchsuchen...",
     "allAdded": "Alle Karten zum Deck hinzugefügt.",
     "noFilterMatches": "Keine Karten passen zu den Filtern",
+    "filterUnavailable": "Filter gerade nicht verfügbar — alle Karten werden gezeigt.",
     "mainDeck": "Hauptdeck",
     "emptyDeckHint": "Klicke Karten aus dem Pool an, um sie deinem Deck hinzuzufügen.",
     "addableCards": "Hinzufügbare Karten",

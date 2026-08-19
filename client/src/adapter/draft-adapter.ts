@@ -286,18 +286,18 @@ export class DraftAdapter {
 
   /**
    * Narrow a limited-pool listing through the ENGINE's filtering authority
-   * (#7546 review). Stateless — works for P2P guests whose views arrive over
-   * the network; no draft session is required.
+   * (#7546 review). Each instance is classified inside draft-core — the
+   * wire-delivered groups are not an input, so a legacy (pre-v11) view
+   * filters every collapsed copy correctly. Stateless — works for P2P
+   * guests; no draft session is required.
    */
   async filterPoolListing(
     listing: DraftCardInstance[],
-    groups: DraftPoolGroups,
     filter: PoolFilter,
   ): Promise<string[]> {
     const wasm = await ensureDraftWasm();
     return wasm.filter_pool_listing(
       JSON.stringify(listing),
-      JSON.stringify(groups),
       JSON.stringify(filter),
     ) as string[];
   }

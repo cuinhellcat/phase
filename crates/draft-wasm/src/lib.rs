@@ -533,23 +533,18 @@ pub fn get_view() -> Result<JsValue, JsValue> {
 }
 
 /// Narrow a limited-pool listing through the ENGINE's filtering authority
-/// (#7546 review): the display sends the listing, the engine-delivered groups
-/// and a typed `PoolFilter`; it renders exactly the returned instance ids.
-/// Stateless — usable by P2P guests whose views arrive over the network.
+/// (#7546 review): the display sends the listing and a typed `PoolFilter`;
+/// it renders exactly the returned instance ids. Each instance is classified
+/// inside draft-core, so wire-delivered groups (of any protocol vintage) are
+/// not an input. Stateless — usable by P2P guests.
 #[wasm_bindgen]
-pub fn filter_pool_listing(
-    listing_json: &str,
-    groups_json: &str,
-    filter_json: &str,
-) -> Result<JsValue, JsValue> {
+pub fn filter_pool_listing(listing_json: &str, filter_json: &str) -> Result<JsValue, JsValue> {
     let listing: Vec<draft_core::types::DraftCardInstance> = serde_json::from_str(listing_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse pool listing: {}", e)))?;
-    let groups: draft_core::view::DraftPoolGroups = serde_json::from_str(groups_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse pool groups: {}", e)))?;
     let filter: draft_core::view::PoolFilter = serde_json::from_str(filter_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse pool filter: {}", e)))?;
     Ok(to_js(&draft_core::view::filter_pool_listing(
-        &listing, &groups, &filter,
+        &listing, &filter,
     )))
 }
 

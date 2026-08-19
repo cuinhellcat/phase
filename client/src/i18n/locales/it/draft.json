@@ -147,6 +147,7 @@
     "searchPool": "Cerca nel pool...",
     "allAdded": "Tutte le carte aggiunte al mazzo.",
     "noFilterMatches": "Nessuna carta corrisponde ai filtri",
+    "filterUnavailable": "I filtri non sono al momento disponibili — vengono mostrate tutte le carte.",
     "mainDeck": "Mazzo principale",
     "emptyDeckHint": "Clicca le carte dal pool per aggiungerle al tuo mazzo.",
     "addableCards": "Carte aggiungibili",
