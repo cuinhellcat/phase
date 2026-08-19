@@ -29,14 +29,21 @@ function card(name: string, id?: string): DraftCardInstance {
   };
 }
 
+/** One collapsed entry: representative card plus the ids of every copy. */
+function entryOf(name: string, ids?: string[]): DraftPoolGroup["cards"][number] {
+  const instance_ids = ids ?? [name];
+  return { card: card(name), count: instance_ids.length, instance_ids };
+}
+
 function group(
   kind: DraftPoolGroupKind,
-  names: string[],
+  entries: Array<string | ReturnType<typeof entryOf>>,
 ): DraftPoolGroup {
+  const cards = entries.map((e) => (typeof e === "string" ? entryOf(e) : e));
   return {
     kind,
-    total: names.length,
-    cards: names.map((name) => ({ card: card(name), count: 1 })),
+    total: cards.reduce((sum, e) => sum + e.count, 0),
+    cards,
   };
 }
 
@@ -51,15 +58,17 @@ const POOL: DraftCardInstance[] = [
   card("Field"),
 ];
 
+const ADEPT_IDS = ["adept-1", "adept-2"];
+
 const GROUPS: DraftPoolGroups = {
   color_groups: [
-    group("white", ["Adept"]),
+    group("white", [entryOf("Adept", ADEPT_IDS)]),
     group("red", ["Bolt"]),
     group("multicolor", ["Charm"]),
     group("colorless", ["Field"]),
   ],
   type_groups: [
-    group("creature", ["Adept"]),
+    group("creature", [entryOf("Adept", ADEPT_IDS)]),
     group("instant", ["Bolt"]),
     group("sorcery", ["Charm"]),
     group("land", ["Field"]),
@@ -67,7 +76,7 @@ const GROUPS: DraftPoolGroups = {
   cmc_groups: [],
   rarity_groups: [
     group("rare", ["Charm"]),
-    group("common", ["Adept", "Bolt", "Field"]),
+    group("common", [entryOf("Adept", ADEPT_IDS), entryOf("Bolt"), entryOf("Field")]),
   ],
   color_counts: { white: 2, blue: 0, black: 0, red: 1, green: 0 },
 };
@@ -81,7 +90,7 @@ describe("filterPool", () => {
 
   it("narrows by an engine type group, covering every duplicate copy", () => {
     // The group entry collapses the two Adept copies to one representative
-    // instance; the name-keyed lookup must still keep BOTH instances.
+    // card; its `instance_ids` must keep BOTH instances addressable.
     const result = filterPool(POOL, GROUPS, {
       ...EMPTY_POOL_FILTER,
       types: ["creature"],
@@ -129,6 +138,46 @@ describe("filterPool", () => {
       rarities: ["common"],
     });
     expect(names(result)).toEqual(["adept-1", "adept-2", "Bolt", "Field"]);
+  });
+});
+
+describe("filterPool with same-name instances at different rarities", () => {
+  // A reprint at a different rarity: the two copies share a NAME but sit in
+  // different rarity groups. A name-keyed lookup lets one copy's
+  // classification overwrite the other's and hides the wrong card
+  // (#7546 review); the instance-keyed lookup keeps each copy its own.
+  const pool = [card("Adept", "adept-common"), card("Adept", "adept-rare")];
+  const groups: DraftPoolGroups = {
+    color_groups: [],
+    type_groups: [group("creature", [entryOf("Adept", ["adept-common", "adept-rare"])])],
+    cmc_groups: [],
+    rarity_groups: [
+      group("rare", [entryOf("Adept", ["adept-rare"])]),
+      group("common", [entryOf("Adept", ["adept-common"])]),
+    ],
+    color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+  };
+
+  it("keeps exactly the copy whose OWN rarity is selected", () => {
+    const rare = filterPool(pool, groups, {
+      ...EMPTY_POOL_FILTER,
+      rarities: ["rare"],
+    });
+    expect(names(rare)).toEqual(["adept-rare"]);
+
+    const common = filterPool(pool, groups, {
+      ...EMPTY_POOL_FILTER,
+      rarities: ["common"],
+    });
+    expect(names(common)).toEqual(["adept-common"]);
+  });
+
+  it("still covers both copies on their shared axis", () => {
+    const result = filterPool(pool, groups, {
+      ...EMPTY_POOL_FILTER,
+      types: ["creature"],
+    });
+    expect(names(result)).toEqual(["adept-common", "adept-rare"]);
   });
 });
 

@@ -50,7 +50,7 @@ const VIEW: DraftPlayerView = {
         colors: ["W"],
         cmc: 2,
         type_line: "Creature — Cat",
-      }, count: 1 }] },
+      }, count: 1, instance_ids: ["creature"] }] },
       { kind: "instant", total: 1, cards: [{ card: {
         instance_id: "instant",
         name: "Shock",
@@ -60,7 +60,7 @@ const VIEW: DraftPlayerView = {
         colors: ["R"],
         cmc: 1,
         type_line: "Instant",
-      }, count: 1 }] },
+      }, count: 1, instance_ids: ["instant"] }] },
     ],
     cmc_groups: [],
     rarity_groups: [],

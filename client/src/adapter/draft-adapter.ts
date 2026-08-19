@@ -47,6 +47,10 @@ export type DraftPoolGroupKind =
 export interface DraftPoolEntry {
   card: DraftCardInstance;
   count: number;
+  /** Every collapsed copy's instance id — the collapse keys on the name, so
+   * same-name instances (a reprint at a different rarity) are only
+   * addressable through these. */
+  instance_ids: string[];
 }
 
 export interface DraftPoolGroup {

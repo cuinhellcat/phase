@@ -259,7 +259,7 @@ const FILTER_VIEW: BuilderView = {
       {
         kind: "creature",
         total: 1,
-        cards: [{ card: TEST_VIEW.pool[0], count: 1 }],
+        cards: [{ card: TEST_VIEW.pool[0], count: 1, instance_ids: ["card-1"] }],
       },
       {
         kind: "instant",
@@ -277,6 +277,7 @@ const FILTER_VIEW: BuilderView = {
               type_line: "Instant",
             },
             count: 1,
+            instance_ids: ["card-2"],
           },
         ],
       },

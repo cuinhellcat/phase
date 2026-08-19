@@ -85,6 +85,12 @@ pub enum DraftPoolGroupKind {
 pub struct DraftPoolEntry {
     pub card: DraftCardInstance,
     pub count: usize,
+    /// Every collapsed copy's instance id, in entry order. The collapse keys on
+    /// the NAME, but same-name instances can differ in classification on
+    /// another axis (a reprint at a different rarity), so a consumer that
+    /// filters or addresses copies must key on these ids — the representative
+    /// `card.instance_id` speaks for only one of them (#7546 review).
+    pub instance_ids: Vec<String>,
 }
 
 /// One ordered display group in a limited pool.
@@ -511,8 +517,14 @@ fn sorted_entries(mut cards: Vec<DraftCardInstance>, sort_by_cmc: bool) -> Vec<D
             .filter(|entry| entry.card.name == card.name)
         {
             entry.count += 1;
+            entry.instance_ids.push(card.instance_id.clone());
         } else {
-            entries.push(DraftPoolEntry { card, count: 1 });
+            let instance_ids = vec![card.instance_id.clone()];
+            entries.push(DraftPoolEntry {
+                card,
+                count: 1,
+                instance_ids,
+            });
         }
     }
     entries
@@ -910,6 +922,40 @@ mod tests {
         );
         assert_eq!(groups.rarity_groups[2].cards[0].count, 2);
         assert_eq!(groups.rarity_groups[2].total, 2);
+    }
+
+    #[test]
+    fn same_name_instances_keep_their_own_rarity_group() {
+        // A reprint at a different rarity: same NAME, distinct instances. The
+        // name-keyed collapse must not merge them across groups, and each
+        // group's entry must carry ITS copies' instance ids (#7546 review).
+        let mut common = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        common.instance_id = "adept-common".to_string();
+        let mut rare = draft_card("Adept", &["W"], 2, "Creature — Wizard");
+        rare.instance_id = "adept-rare".to_string();
+        rare.rarity = "rare".to_string();
+
+        let groups = DraftPoolGroups::from_pool(&[common, rare]);
+
+        assert_eq!(
+            groups
+                .rarity_groups
+                .iter()
+                .map(|group| (group.kind, group.cards[0].instance_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (DraftPoolGroupKind::Rare, vec!["adept-rare".to_string()]),
+                (DraftPoolGroupKind::Common, vec!["adept-common".to_string()]),
+            ],
+            "each rarity group addresses exactly its own copy"
+        );
+        // The shared-classification axis still collapses both copies into one
+        // entry — and that entry addresses BOTH instances.
+        assert_eq!(
+            groups.type_groups[0].cards[0].instance_ids,
+            vec!["adept-common".to_string(), "adept-rare".to_string()]
+        );
+        assert_eq!(groups.type_groups[0].cards[0].count, 2);
     }
 
     #[test]

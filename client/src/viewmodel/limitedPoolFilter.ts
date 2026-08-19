@@ -48,20 +48,22 @@ export function toggleKind(
 }
 
 /**
- * Engine classification lookup: group member NAME → group kind.
+ * Engine classification lookup: group member INSTANCE id → group kind.
  *
- * Group entries collapse duplicates by name (`sorted_entries` in
- * `draft-core/src/view.rs`), so the entry's single representative
- * `instance_id` cannot address every copy — the name is the engine's own
- * collapse key and therefore the faithful lookup for all of them.
+ * Keyed on the per-copy `instance_ids` the engine carries on every collapsed
+ * entry — NOT on the name: same-name instances can sit in different groups on
+ * one axis (a reprint at a different rarity), and a name-keyed map would let
+ * one copy's classification overwrite the other's (#7546 review).
  */
-function kindByName(
+function kindByInstanceId(
   groups: DraftPoolGroup[],
 ): Map<string, DraftPoolGroupKind> {
   const index = new Map<string, DraftPoolGroupKind>();
   for (const group of groups) {
     for (const entry of group.cards) {
-      index.set(entry.card.name, group.kind);
+      for (const id of entry.instance_ids) {
+        index.set(id, group.kind);
+      }
     }
   }
   return index;
@@ -70,10 +72,10 @@ function kindByName(
 function axisMatches(
   selected: DraftPoolGroupKind[],
   index: Map<string, DraftPoolGroupKind>,
-  name: string,
+  instanceId: string,
 ): boolean {
   if (selected.length === 0) return true;
-  const kind = index.get(name);
+  const kind = index.get(instanceId);
   return kind !== undefined && selected.includes(kind);
 }
 
@@ -91,16 +93,16 @@ export function filterPool(
   if (!poolFilterActive(filter)) return pool;
 
   const query = filter.query.trim().toLowerCase();
-  const typeIndex = kindByName(groups.type_groups);
-  const colorIndex = kindByName(groups.color_groups);
-  const rarityIndex = kindByName(groups.rarity_groups);
+  const typeIndex = kindByInstanceId(groups.type_groups);
+  const colorIndex = kindByInstanceId(groups.color_groups);
+  const rarityIndex = kindByInstanceId(groups.rarity_groups);
 
   return pool.filter(
     (card) =>
       (query === "" || card.name.toLowerCase().includes(query)) &&
-      axisMatches(filter.types, typeIndex, card.name) &&
-      axisMatches(filter.colors, colorIndex, card.name) &&
-      axisMatches(filter.rarities, rarityIndex, card.name),
+      axisMatches(filter.types, typeIndex, card.instance_id) &&
+      axisMatches(filter.colors, colorIndex, card.instance_id) &&
+      axisMatches(filter.rarities, rarityIndex, card.instance_id),
   );
 }
 

@@ -556,7 +556,9 @@ function PoolFilterChips({
           type="button"
           aria-pressed={selected.includes(kind)}
           onClick={() => onToggle(kind)}
-          className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
+          // 44pt coarse-pointer floor (index.css), relaxed on desktop like
+          // the CubeSetupPanel inputs alongside this screen.
+          className={`min-h-[44px] rounded-full px-3 py-1 text-xs transition-colors sm:min-h-0 sm:px-2.5 ${
             selected.includes(kind)
               ? "bg-white/10 text-white"
               : "text-white/40 hover:bg-white/5 hover:text-white/70"
