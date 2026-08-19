@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, alphanumeric1, space0, space1};
 use nom::combinator::{all_consuming, eof, not, opt, peek, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
