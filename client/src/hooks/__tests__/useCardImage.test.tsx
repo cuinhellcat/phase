@@ -201,4 +201,43 @@ describe("useCardImage", () => {
     });
     expect(result.current.src).toBe("second.png");
   });
+  it("resolves a face-down marker from tokenImageRef alone — no name, no oracle id (#7549)", async () => {
+    // The #7535 marker request shape: cardName "" and only the ref naming the
+    // printing. The hook must NOT short-circuit on the empty name — that
+    // short-circuit is exactly what kept the merged marker feature from ever
+    // loading in the live client (the component tests stubbed this hook, so
+    // only a REAL-hook regression can hold the line).
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url === "/scryfall-token-images.json") {
+        return Promise.resolve(jsonResponse({
+          "oracle:8f92f8d7-ec89-426f-86dc-fbc259eb5559:morph": {
+            scryfall_id: "morph-token-dtk",
+            oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
+            face_names: ["morph"],
+            faces: [{ normal: "https://img.example/morph.jpg", art_crop: "https://img.example/morph-art.jpg" }],
+            name: "Morph",
+            layout: "token",
+          },
+        }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    }));
+
+    const { useCardImage } = await import("../useCardImage");
+    const { result } = renderHook(() =>
+      useCardImage("", {
+        size: "normal",
+        isToken: true,
+        tokenImageRef: {
+          scryfall_id: "",
+          scryfall_oracle_id: "8f92f8d7-ec89-426f-86dc-fbc259eb5559",
+          face_name: "morph",
+          preset_id: "face-down-morph",
+        },
+      }),
+    );
+
+    await waitFor(() => expect(result.current.src).toBe("https://img.example/morph.jpg"));
+  });
+
 });

@@ -572,7 +572,11 @@ export function useCardImage(
       return;
     }
 
-    if (!cardName && !oracleId) {
+    // A face-down marker request carries NO name and NO oracle id — only the
+    // `tokenImageRef` names the printing. Bailing on the empty name here was
+    // what kept the #7535 markers from ever loading at runtime (#7549): the
+    // ref-driven fetch below never ran.
+    if (!cardName && !oracleId && !stableTokenImageRef) {
       setStateRequestKey(requestKey);
       setSrc(null);
       setIsRotated(false);
@@ -666,7 +670,7 @@ export function useCardImage(
         isFlip: isCardImageFlipLayoutSync(resolvedOracleId, cardName),
       };
     }
-    if (!cardName && !oracleId) {
+    if (!cardName && !oracleId && !stableTokenImageRef) {
       return { src: null, isLoading: false, isRotated: false, isFlip: false };
     }
     const cachedEntry = imageRequestCache.get(requestKey);
