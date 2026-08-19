@@ -376,7 +376,14 @@ export function LimitedDeckBuilder({
                 }
               />
               <PoolFilterChips
-                kinds={axisKinds(poolGroups.color_groups)}
+                kinds={
+                  // Engine-owned per-color membership options (CR 105.2); a
+                  // legacy (pre-v11) view carries none — fall back to its
+                  // exclusive buckets.
+                  poolGroups.color_filter_options.length > 0
+                    ? poolGroups.color_filter_options
+                    : axisKinds(poolGroups.color_groups)
+                }
                 selected={poolFilter.colors}
                 onToggle={(kind) =>
                   setPoolFilter((prev) => ({ ...prev, colors: toggleKind(prev.colors, kind) }))

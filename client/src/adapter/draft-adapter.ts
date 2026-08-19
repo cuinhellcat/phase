@@ -86,6 +86,10 @@ export interface DraftPoolGroups {
    * any pool member belongs to (multi-valued), in engine order. The exclusive
    * `type_groups` axis stays a presentation/sorting shape. */
   type_filter_options: DraftPoolGroupKind[];
+  /** Engine-owned option list for a color-filter control (CR 105.2: a card
+   * can be one or more colors). The exclusive `color_groups` axis stays a
+   * presentation shape. */
+  color_filter_options: DraftPoolGroupKind[];
   color_counts: DraftPoolColorCounts;
 }
 
@@ -96,6 +100,7 @@ export const EMPTY_DRAFT_POOL_GROUPS: DraftPoolGroups = {
   cmc_groups: [],
   rarity_groups: [],
   type_filter_options: [],
+  color_filter_options: [],
   color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
 };
 

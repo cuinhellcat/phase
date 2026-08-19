@@ -128,11 +128,17 @@ pub struct DraftPoolGroups {
     #[serde(default)]
     pub rarity_groups: Vec<DraftPoolGroup>,
     /// Engine-owned option list for a type-filter control: every type bucket
-    /// any pool member belongs to (CR 205.2a: multi-valued), in engine order.
+    /// any pool member belongs to (CR 205.2b: multi-valued), in engine order.
     /// The exclusive `type_groups` axis stays a presentation/sorting shape.
     /// `default` keeps pre-v11 serialized views deserializable.
     #[serde(default)]
     pub type_filter_options: Vec<DraftPoolGroupKind>,
+    /// Engine-owned option list for a color-filter control: every color bucket
+    /// any pool member belongs to (CR 105.2: one or more colors), in engine
+    /// order. The exclusive `color_groups` axis stays a presentation shape.
+    /// `default` keeps pre-v11 serialized views deserializable.
+    #[serde(default)]
+    pub color_filter_options: Vec<DraftPoolGroupKind>,
     pub color_counts: DraftPoolColorCounts,
 }
 
@@ -146,6 +152,7 @@ impl DraftPoolGroups {
             cmc_groups: groups_for(pool, &CMC_GROUP_ORDER, mana_value_group, false),
             rarity_groups: groups_for(pool, &RARITY_GROUP_ORDER, rarity_group, true),
             type_filter_options: type_filter_options(pool),
+            color_filter_options: color_filter_options(pool),
             color_counts: color_counts(pool),
         }
     }
@@ -210,7 +217,10 @@ pub fn filter_pool_listing(listing: &[DraftCardInstance], filter: &PoolFilter) -
                     || type_memberships(card)
                         .iter()
                         .any(|kind| filter.types.contains(kind)))
-                && axis_matches(&filter.colors, color_group(card))
+                && (filter.colors.is_empty()
+                    || color_memberships(card)
+                        .iter()
+                        .any(|kind| filter.colors.contains(kind)))
                 && axis_matches(&filter.rarities, rarity_group(card))
         })
         .map(|card| card.instance_id.clone())
@@ -623,6 +633,58 @@ fn color_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
     }
 }
 
+/// EVERY color bucket `card` belongs to, in `COLOR_GROUP_ORDER` — CR 105.2:
+/// "an object can be one or more of the five colors", so a white-blue card is
+/// a member of White AND Blue AND (CR 105.2b) Multicolor; a colorless card is
+/// a member of Colorless (CR 105.2c). This is the FILTERING membership; the
+/// exclusive `color_group` stays the sorted display's one-bucket-per-card
+/// shape (a multicolor card sorts under Multicolor alone).
+fn color_memberships(card: &DraftCardInstance) -> Vec<DraftPoolGroupKind> {
+    if card.colors.is_empty() {
+        return vec![DraftPoolGroupKind::Colorless];
+    }
+    let mut memberships: Vec<DraftPoolGroupKind> = [
+        (DraftPoolGroupKind::White, "W"),
+        (DraftPoolGroupKind::Blue, "U"),
+        (DraftPoolGroupKind::Black, "B"),
+        (DraftPoolGroupKind::Red, "R"),
+        (DraftPoolGroupKind::Green, "G"),
+    ]
+    .into_iter()
+    .filter(|(_, symbol)| card.colors.iter().any(|color| color == symbol))
+    .map(|(kind, _)| kind)
+    .collect();
+    if card.colors.len() >= 2 {
+        memberships.push(DraftPoolGroupKind::Multicolor);
+    }
+    if memberships.is_empty() {
+        // Colors outside WUBRG cannot occur in real data; classify totally
+        // rather than silently dropping the card from the axis.
+        memberships.push(DraftPoolGroupKind::Colorless);
+    }
+    memberships
+}
+
+/// Every color bucket ANY pool member belongs to, in `COLOR_GROUP_ORDER` —
+/// the engine-owned option list a color-filter control offers. A pool of
+/// white-blue cards offers White, Blue AND Multicolor chips even though its
+/// sorted display has only a Multicolor group.
+fn color_filter_options(pool: &[DraftCardInstance]) -> Vec<DraftPoolGroupKind> {
+    let mut present: Vec<DraftPoolGroupKind> = Vec::new();
+    for card in pool {
+        for kind in color_memberships(card) {
+            if !present.contains(&kind) {
+                present.push(kind);
+            }
+        }
+    }
+    COLOR_GROUP_ORDER
+        .iter()
+        .copied()
+        .filter(|kind| present.contains(kind))
+        .collect()
+}
+
 /// The EXCLUSIVE presentation bucket for the sorted pool display — a card
 /// appears in exactly one group, so the priority chain picks its most salient
 /// type. Filtering must NOT use this: see [`type_memberships`].
@@ -632,9 +694,10 @@ fn type_group(card: &DraftCardInstance) -> DraftPoolGroupKind {
         .expect("type membership is total — the Other bucket catches the rest")
 }
 
-/// EVERY type bucket `card` belongs to, in `TYPE_GROUP_ORDER` — CR 205.2a
-/// card types are multi-valued, so an Artifact Creature is a member of BOTH
-/// the Artifact and the Creature bucket. This is the FILTERING membership
+/// EVERY type bucket `card` belongs to, in `TYPE_GROUP_ORDER` — CR 205.2b:
+/// an object with more than one card type "satisfies the criteria for any
+/// effect that applies to any of their card types", so an Artifact Creature
+/// is a member of BOTH the Artifact and the Creature bucket. This is the FILTERING membership
 /// (review round 4: the exclusive bucket silently excluded multi-type cards
 /// from every non-primary type selection); the exclusive presentation bucket
 /// is its first element, keeping the two views of the same card consistent
@@ -1204,6 +1267,61 @@ mod tests {
                 DraftPoolGroupKind::Artifact,
             ],
             "the sorted display keeps its exclusive one-bucket-per-card shape"
+        );
+    }
+
+    #[test]
+    fn multi_color_cards_match_every_color_they_carry() {
+        // CR 105.2 + CR 105.2b + CR 105.2c: a white-blue card IS white and IS
+        // blue (and multicolored); a colorless card is colorless. The filter
+        // membership must say so — the exclusive Multicolor display bucket is
+        // a sorting shape, not the card's colors.
+        let azorius = draft_card("Charm", &["W", "U"], 2, "Instant");
+        let mono = draft_card("Pacifism", &["W"], 2, "Enchantment — Aura");
+        let artifact = draft_card("Sphere", &[], 1, "Artifact");
+        let pool = vec![azorius, mono, artifact];
+
+        let by = |kind: DraftPoolGroupKind| {
+            filter_pool_listing(
+                &pool,
+                &PoolFilter {
+                    colors: vec![kind],
+                    ..PoolFilter::default()
+                },
+            )
+        };
+        assert_eq!(
+            by(DraftPoolGroupKind::White),
+            vec!["Charm", "Pacifism"],
+            "the White selection reaches the white-blue card too"
+        );
+        assert_eq!(by(DraftPoolGroupKind::Blue), vec!["Charm"]);
+        assert_eq!(by(DraftPoolGroupKind::Multicolor), vec!["Charm"]);
+        assert_eq!(by(DraftPoolGroupKind::Colorless), vec!["Sphere"]);
+
+        // The option list offers every membership; the sorted display keeps
+        // its exclusive shape (Charm sorts under Multicolor alone).
+        let groups = DraftPoolGroups::from_pool(&pool);
+        assert_eq!(
+            groups.color_filter_options,
+            vec![
+                DraftPoolGroupKind::White,
+                DraftPoolGroupKind::Blue,
+                DraftPoolGroupKind::Multicolor,
+                DraftPoolGroupKind::Colorless,
+            ]
+        );
+        assert_eq!(
+            groups
+                .color_groups
+                .iter()
+                .map(|group| group.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                DraftPoolGroupKind::White,
+                DraftPoolGroupKind::Multicolor,
+                DraftPoolGroupKind::Colorless,
+            ]
         );
     }
 

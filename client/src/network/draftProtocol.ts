@@ -492,6 +492,7 @@ function normalizePoolGroups(raw: unknown): Record<string, unknown> | undefined 
     cmc_groups: normalizeArrayField(groups, "cmc_groups").map(normalizePoolGroup),
     rarity_groups: normalizeArrayField(groups, "rarity_groups").map(normalizePoolGroup),
     type_filter_options: normalizeArrayField(groups, "type_filter_options"),
+    color_filter_options: normalizeArrayField(groups, "color_filter_options"),
   };
 }
 

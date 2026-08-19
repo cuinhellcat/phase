@@ -47,6 +47,7 @@ const view: DraftPlayerView = {
     cmc_groups: [],
     rarity_groups: [],
     type_filter_options: [],
+    color_filter_options: [],
     color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
   },
   seats: [],
