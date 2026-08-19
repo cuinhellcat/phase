@@ -16,6 +16,7 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
@@ -326,6 +327,13 @@ function CardPreviewInner({
   );
   const markerIsPrimary =
     previewMarkerRef != null && obj != null && shouldRenderCardBack(obj);
+  // A hidden face-down permanent whose cause has NO marker printing (unknown
+  // cause from an older save, or the Ixidron class) still gets a preview: the
+  // plain card back. It reveals nothing (CR 708.2a — the public face is a
+  // blank 2/2), and every art lookup below is suppressed so neither the
+  // generic label nor a blanked ref can leak into a network search.
+  const genericFaceDownBack =
+    obj != null && shouldRenderCardBack(obj) && previewMarkerRef == null;
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.
@@ -333,21 +341,27 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex: defaultFaceIndex,
-    isToken: isToken || markerIsPrimary,
-    tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: markerIsPrimary
-      ? previewMarkerRef
-      : isToken && obj
-        ? obj.token_image_ref
+  const suppressArtLookup = markerIsPrimary || genericFaceDownBack;
+  const { src, isLoading, isRotated, isFlip } = useCardImage(
+    genericFaceDownBack ? "" : cardName,
+    {
+      size: "normal",
+      faceIndex: defaultFaceIndex,
+      isToken: isToken || markerIsPrimary,
+      tokenFilters: isToken && obj && !genericFaceDownBack
+        ? tokenFiltersForObject(obj)
         : undefined,
-    oracleId: markerIsPrimary ? undefined : obj?.printed_ref?.oracle_id,
-    faceName: markerIsPrimary ? undefined : obj?.printed_ref?.face_name,
-    scryfallId,
-    sourcePrinting,
-  });
+      tokenImageRef: markerIsPrimary
+        ? previewMarkerRef
+        : isToken && obj && !genericFaceDownBack
+          ? obj.token_image_ref
+          : undefined,
+      oracleId: suppressArtLookup ? undefined : obj?.printed_ref?.oracle_id,
+      faceName: suppressArtLookup ? undefined : obj?.printed_ref?.face_name,
+      scryfallId,
+      sourcePrinting,
+    },
+  );
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -399,8 +413,16 @@ function CardPreviewInner({
     faceName: showOtherFace ? otherFaceName : undefined,
   });
 
-  const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
-  const activeLoading = showOtherFace ? otherFaceImgResult.isLoading : isLoading;
+  const activeSrc = genericFaceDownBack
+    ? CARD_BACK_URL
+    : showOtherFace
+      ? otherFaceImgResult.src
+      : src;
+  const activeLoading = genericFaceDownBack
+    ? false
+    : showOtherFace
+      ? otherFaceImgResult.isLoading
+      : isLoading;
   const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";

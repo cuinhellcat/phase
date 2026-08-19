@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { usePreviewDismiss } from "../../hooks/usePreviewDismiss.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -19,6 +21,7 @@ import { CardPreview } from "./CardPreview.tsx";
  * it from the inspected game object, which is what this component does.
  */
 export function GameCardPreview() {
+  const { t } = useTranslation("game");
   // Lives here (not in GamePageContent) so its inspectedObjectId/previewSticky
   // subscriptions don't re-render the whole page on every hover. This component
   // is always mounted, so the dismiss listeners run for the game's full life.
@@ -62,8 +65,13 @@ export function GameCardPreview() {
     : // An OPPONENT's face-down permanent previews as its cause MARKER (full
       // size, reminder text included) — the identity stays hidden; the image
       // itself resolves inside `CardPreview` from the object's cause (#7547).
+      // With no marker printing (unknown cause from an older save, or the
+      // Ixidron class — an effect turned it face down, CR 708.2a) the hover
+      // still answers: the generic label routes `CardPreview` onto the plain
+      // card back, which reveals nothing.
       (inspectedObj
         ? faceDownMarkerName(true, inspectedObj.face_down_cause)
+          ?? t("card.faceDownName")
         : null);
   // The "other" face: when viewing front, this is back_face; when viewing back,
   // this is the front. A face-down permanent has no OTHER printed face — its

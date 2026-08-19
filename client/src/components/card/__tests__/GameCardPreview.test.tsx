@@ -260,12 +260,33 @@ describe("GameCardPreview", () => {
     expect(screen.getAllByAltText("Insectile Aberration").length).toBeGreaterThan(0);
   });
 
-  it("never previews a face-down permanent (hidden information)", () => {
+  it("previews a markerless face-down permanent as the generic back — identity stays hidden (#7551 review)", () => {
+    // No recorded cause (older saves): there is no marker printing, but the
+    // hover must still answer — with the generic card back, which reveals
+    // nothing (CR 708.2a: the public face is a blank 2/2).
     inspect(battlefieldObject({ face_down: true }));
 
-    const { container } = render(<GameCardPreview />);
+    render(<GameCardPreview />);
 
-    expect(container.firstChild).toBeNull();
+    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
+  });
+
+  it("previews the Ixidron class (TurnedFaceDown) as the generic back (#7551 review)", () => {
+    // `TurnedFaceDown` (an effect turned it face down, CR 708.2a) has no
+    // printed marker token — same generic-back path as the unknown cause.
+    inspect(
+      battlefieldObject({
+        face_down: true,
+        face_down_cause: "TurnedFaceDown" as never,
+        name: "",
+      }),
+    );
+
+    render(<GameCardPreview />);
+
+    expect(screen.getAllByAltText("Face-down card").length).toBeGreaterThan(0);
+    expect(screen.queryByAltText("Pithing Needle")).toBeNull();
   });
 
   it("previews a face-down permanent when the engine projects its identity", () => {
