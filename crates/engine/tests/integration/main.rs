@@ -1217,6 +1217,7 @@ mod issue_4945_zada_hedron_grinder;
 mod issue_4948_samwise_gamgee_sacrifice_target_order;
 mod issue_5263_chaos_warp;
 mod issue_6367_thassas_oracle;
+mod issue_7552_role_token_image_ref;
 mod kang_dynasty_until_next_turn_rider;
 mod karplusan_yeti_fight_back;
 mod kav_landseeker_delayed_sacrifice;
