@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, space0, space1};
+use nom::character::complete::{alpha1, alphanumeric1, space0, space1};
 use nom::combinator::{all_consuming, eof, not, opt, peek, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -1753,8 +1753,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // a different wrong answer, in a card this change has no business touching.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("gift an ").parse(text) {
         use crate::types::keywords::GiftKind;
-        if rest.trim() == "extra turn" {
-            return Some((Keyword::Gift(GiftKind::ExtraTurn), ""));
+        if let Ok((remainder, _)) = terminated(
+            tag::<_, _, OracleError<'_>>("extra turn"),
+            not(alphanumeric1),
+        )
+        .parse(rest)
+        {
+            return Some((Keyword::Gift(GiftKind::ExtraTurn), remainder));
         }
     }
 
@@ -3664,6 +3669,20 @@ mod tests {
         use crate::types::keywords::GiftKind;
         let kw = parse_granted_keyword_fragment("gift an extra turn").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::ExtraTurn));
+    }
+
+    #[test]
+    fn router_gift_an_extra_turn_preserves_the_tail() {
+        use crate::types::keywords::GiftKind;
+
+        assert!(matches!(
+            parse_router_keyword_line("Gift an extra turn.").and_then(|routed| routed.keyword),
+            Some(Keyword::Gift(GiftKind::ExtraTurn))
+        ));
+        assert!(
+            parse_router_keyword_line("Gift an extra turn if you control a Bird").is_none(),
+            "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
     }
 
     /// The other "an" form, CR 702.174i's Octopus, has no `GiftKind` yet
