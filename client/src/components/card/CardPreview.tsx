@@ -730,10 +730,8 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         backFaceName={backFaceName}
-        faceIndex={defaultFaceIndex}
-        obj={obj}
+        art={{ src: activeSrc, isLoading: activeLoading, isRotated: activeRotated, isFlip }}
         onDismiss={onDismiss ?? dismissPreview}
-        sourcePrinting={sourcePrinting}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
       />
@@ -835,35 +833,26 @@ function CardPreviewInner({
 /** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
-  faceIndex,
-  obj,
+  art,
   onDismiss,
-  sourcePrinting,
   layout = "modal",
   report,
 }: {
   cardName: string;
   backFaceName: string | null;
-  faceIndex?: number;
-  obj: GameObject | null;
+  /** The parent's RESOLVED art state (marker / generic back / peek already
+   *  applied). The overlay must never run its own lookup: a second
+   *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
+   *  hidden-information bypass the PR 7551 review flagged. */
+  art: { src: string | null; isLoading: boolean; isRotated: boolean; isFlip: boolean };
   onDismiss: () => void;
-  sourcePrinting?: SourcePrinting;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
    *  layout hosts the button — the compact peek dismisses on any tap. */
   report?: CardReportContext;
 }) {
   const { t } = useTranslation("game");
-  const { src, isLoading, isRotated, isFlip } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex,
-    isToken: obj?.display_source === "Token",
-    tokenFilters: obj?.display_source === "Token" ? tokenFiltersForObject(obj) : undefined,
-    tokenImageRef: obj?.display_source === "Token" ? obj.token_image_ref : undefined,
-    oracleId: obj?.printed_ref?.oracle_id,
-    faceName: obj?.printed_ref?.face_name,
-    sourcePrinting,
-  });
+  const { src, isLoading, isRotated, isFlip } = art;
 
   // Issue #6156 on the mobile path: both arms below used to gate the art on
   // `src &&`, so an artless token (no official paper printing) opened an
