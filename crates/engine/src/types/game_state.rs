@@ -5074,9 +5074,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub enter_with_counters: Vec<(CounterType, u32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_down_profile: Option<FaceDownProfile>,
-    /// CR 608.2c: whether this parked entry is the producer a following
-    /// demonstrative anaphor refers back to. Parked with the rest of the
-    /// request so a CR 616.1 pause cannot lose it.
+    /// Whether this parked entry is the producer a following demonstrative
+    /// anaphor refers back to. It remains with the request across a pause.
     #[serde(default, skip_serializing_if = "ChainReferentIntent::is_silent")]
     pub chain_referent: ChainReferentIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
