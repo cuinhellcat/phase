@@ -2518,11 +2518,7 @@ impl GameObject {
     /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
     /// once, and the other half is merged only while absent.
     fn install_room_door_text(&mut self) {
-        let live_door = if self.modal_back_face {
-            RoomDoor::Right
-        } else {
-            RoomDoor::Left
-        };
+        let live_door = crate::game::room::live_face_door(self);
         let other_door = match live_door {
             RoomDoor::Left => RoomDoor::Right,
             RoomDoor::Right => RoomDoor::Left,
