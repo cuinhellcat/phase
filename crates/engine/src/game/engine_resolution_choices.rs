@@ -1856,6 +1856,10 @@ pub(super) fn handle_resolution_choice(
                             clear_markers: cards.clone(),
                             publish_tracked_set: None,
                             emit_reveal_until_resolved: None,
+                            // #7467 review round 2: the entry paused, so the
+                            // publish below never runs — the completion drain
+                            // publishes instead, once the entry completed.
+                            manifested_for_continuation: Some(manifest_id),
                         },
                     );
                     return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -1871,18 +1875,7 @@ pub(super) fn handle_resolution_choice(
             // consumer ("Manifest dread X times, then put X +1/+1 counters on
             // each of those creatures" — Valgavoth's Onslaught) binds the
             // creature, the same seam as the search-choice publish above.
-            // Gated identically (only a tracked-set-reading continuation), and
-            // on actual battlefield arrival, mirroring the harvest's
-            // destination filter: an entry replacement that redirected the
-            // card elsewhere manifested nothing.
-            let continuation_consumes_tracked_set = state
-                .active_ability_continuation()
-                .is_some_and(|continuation| {
-                    effects::chain_references_tracked_set(&continuation.chain)
-                });
-            if continuation_consumes_tracked_set && state.battlefield.contains(&manifest_id) {
-                effects::publish_fresh_tracked_set(state, vec![manifest_id]);
-            }
+            effects::publish_battlefield_object_for_pending_continuation(state, manifest_id);
 
             // CR 614.6 + CR 701.62a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own
@@ -2116,6 +2109,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers,
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -2180,6 +2174,7 @@ pub(super) fn handle_resolution_choice(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
                 }),
                 events,
             ) {
@@ -3539,6 +3534,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3666,6 +3662,7 @@ pub(super) fn handle_resolution_choice(
                                     clear_markers: Vec::new(),
                                     publish_tracked_set: Some(kept.clone()),
                                     emit_reveal_until_resolved: None,
+                                    manifested_for_continuation: None,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3728,6 +3725,7 @@ pub(super) fn handle_resolution_choice(
                                 clear_markers: Vec::new(),
                                 publish_tracked_set: Some(publish_set),
                                 emit_reveal_until_resolved: None,
+                                manifested_for_continuation: None,
                             },
                         );
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -7347,6 +7345,7 @@ fn route_kept_card_or_defer(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: None,
+                    manifested_for_continuation: None,
                 },
             );
             Some(ResolutionChoiceOutcome::WaitingFor(
@@ -8019,6 +8018,7 @@ pub(crate) fn run_batch_completion(
             clear_markers,
             publish_tracked_set,
             emit_reveal_until_resolved,
+            manifested_for_continuation,
         } => {
             // The dig path (`publish_tracked_set.is_some()`) routes the rest pile
             // through `route_rest_partition` (ordered library bottom); the
@@ -8047,6 +8047,7 @@ pub(crate) fn run_batch_completion(
                                 clear_markers,
                                 publish_tracked_set,
                                 emit_reveal_until_resolved,
+                                manifested_for_continuation,
                             },
                         );
                         return crate::game::zone_pipeline::BatchMoveResult::NeedsChoice;
@@ -8067,6 +8068,7 @@ pub(crate) fn run_batch_completion(
                     clear_markers,
                     publish_tracked_set: None,
                     emit_reveal_until_resolved,
+                    manifested_for_continuation,
                 };
                 return effects::reveal_until::move_rest_then(
                     state,
@@ -8098,6 +8100,13 @@ pub(crate) fn run_batch_completion(
                     source_id,
                     subject: None,
                 });
+            }
+            // CR 608.2c + CR 701.62a (#7467): the paused manifest entry has
+            // completed by now — publish its object for the parked consumer,
+            // the deferred mirror of the synchronous `ManifestDreadChoice`
+            // publish (same gate, same battlefield filter).
+            if let Some(manifested) = manifested_for_continuation {
+                effects::publish_battlefield_object_for_pending_continuation(state, manifested);
             }
             finish_with_continuation(state, player, events);
             crate::game::zone_pipeline::BatchMoveResult::Done
