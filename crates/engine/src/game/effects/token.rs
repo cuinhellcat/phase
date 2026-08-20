@@ -3861,6 +3861,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         // no parse to have gone wrong.
         parse_warnings: vec![],
         layout_kind: None,
+        is_swap_snapshot: false,
     }
 }
 

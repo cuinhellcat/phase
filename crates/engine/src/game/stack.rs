@@ -726,11 +726,8 @@ pub(crate) fn effective_stack_ability<'a>(
 
 pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        if let Some(normal_face) = obj.back_face.take() {
-            let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
-            super::printed_cards::apply_back_face_to_object(obj, normal_face);
-            obj.back_face = Some(alternative_snapshot);
-        }
+        // #7565: the shared swap preserves the stored slot's layout_kind.
+        super::printed_cards::swap_object_faces(obj);
     }
 }
 
@@ -5081,6 +5078,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(core_type);
         BackFaceData {
+            is_swap_snapshot: false,
             name: name.to_string(),
             power: None,
             toughness: None,

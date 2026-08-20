@@ -358,6 +358,24 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.parse_warnings = back_face.parse_warnings;
 }
 
+/// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored
+/// back face, preserving the stored slot's `layout_kind`. The layout is a
+/// printed property of the CARD PAIR, not of whichever half happens to be
+/// stashed — `snapshot_object_face` hardcodes `None`, so every bare
+/// snapshot/apply/store dance silently erased the marker after one back-face
+/// round trip, muting the split/MDFC cast-face prompt and every other
+/// `layout_kind` consumer. Single authority for all symmetric face swaps.
+pub fn swap_object_faces(obj: &mut GameObject) {
+    let Some(stored) = obj.back_face.take() else {
+        return;
+    };
+    let layout_kind = stored.layout_kind;
+    let mut snapshot = snapshot_object_face(obj);
+    snapshot.layout_kind = layout_kind;
+    apply_back_face_to_object(obj, stored);
+    obj.back_face = Some(snapshot);
+}
+
 /// CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N
 /// counters" replacement for planeswalkers (loyalty counters equal to printed
 /// loyalty) and battles (defense counters equal to printed defense).
@@ -826,6 +844,7 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         // restores them rather than inheriting whatever the other face had.
         parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
+        is_swap_snapshot: true,
     }
 }
 
@@ -875,6 +894,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         // face's diagnostics and the layer system never touches it.
         parse_warnings: obj.parse_warnings.clone(),
         layout_kind: None,
+        is_swap_snapshot: true,
     }
 }
 
@@ -1129,6 +1149,7 @@ fn back_face_for_card_face_with_printed_ref(
         // Empty seed; `apply_card_face_to_back_face` below fills it from the face.
         parse_warnings: Vec::new(),
         layout_kind: None,
+        is_swap_snapshot: false,
     };
     apply_card_face_to_back_face(&mut back, face);
     if layout_kind != LayoutKind::Single {
@@ -1969,6 +1990,7 @@ mod tests {
         object.color = vec![ManaColor::White];
         object.base_color = vec![ManaColor::White];
         object.back_face = Some(BackFaceData {
+            is_swap_snapshot: false,
             name: normal_half.name.clone(),
             power: None,
             toughness: None,

@@ -2597,6 +2597,170 @@ fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
     );
 }
 
+/// CR 601.2b + CR 709.3 (#7565): the cast-time face choice belongs to ONE
+/// cast. Casting a split Room, resolving it, and returning it to hand must
+/// offer the face choice AGAIN on the next cast. Before the fix the
+/// `ChooseModalFace` handler erased `back_face.layout_kind`, so every later
+/// cast silently auto-picked the front face — and every other layout_kind
+/// consumer (MDFC land playability, split handling) went blind with it.
+#[test]
+fn a_recast_split_room_offers_the_face_choice_again() {
+    use crate::game::stack;
+
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(903),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.mana_cost = ManaCost::generic(0);
+        let mut back = room_back_face("Weight Room");
+        back.card_types.core_types.push(CoreType::Enchantment);
+        back.card_types.subtypes.push("Room".to_string());
+        obj.back_face = Some(back);
+    }
+
+    let first = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(903),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "first cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    let after_choice =
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: false }).unwrap();
+    assert!(
+        !matches!(after_choice.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SAME cast must not re-prompt after the choice"
+    );
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the chosen face must be on the stack"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+    assert_eq!(
+        state.objects[&room].zone,
+        Zone::Battlefield,
+        "the Room must resolve onto the battlefield"
+    );
+
+    // Bounce it (Rescue class) and cast again.
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Hand, &mut events);
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(903),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
+/// #7565 round 2 (live playtest): the BACK-half round trip. Casting the back
+/// half swaps the faces; leaving the battlefield swaps them back via
+/// snapshots — and `snapshot_object_face` hardcodes `layout_kind: None`, so
+/// the Split marker died in the swap chain and the next cast silently
+/// auto-picked the front face. `swap_object_faces` preserves the marker.
+#[test]
+fn a_room_recast_after_a_back_half_round_trip_offers_the_choice_again() {
+    use crate::game::stack;
+
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(904),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.mana_cost = ManaCost::generic(0);
+        let mut back = room_back_face("Weight Room");
+        back.card_types.core_types.push(CoreType::Enchantment);
+        back.card_types.subtypes.push("Room".to_string());
+        back.mana_cost = ManaCost::generic(0);
+        obj.back_face = Some(back);
+    }
+
+    let first = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(904),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "first cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    // Cast the BACK half — this swaps the faces.
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the back half must be on the stack"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(&mut state, &mut events);
+    assert_eq!(state.objects[&room].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "the back half resolved onto the battlefield"
+    );
+
+    // Bounce — the zone-exit revert swaps the faces back via snapshots.
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Hand, &mut events);
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym",
+        "in hand the front face shows again"
+    );
+
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(904),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "after a BACK-half round trip the next cast must offer the choice again \\
+         (#7565 round 2), got {:?}",
+        second.waiting_for
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes

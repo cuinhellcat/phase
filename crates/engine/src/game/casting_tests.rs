@@ -10818,6 +10818,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
         obj.card_types.core_types.push(ty);
         if i == 2 {
             obj.back_face = Some(crate::game::game_object::BackFaceData {
+                is_swap_snapshot: false,
                 name: "Adventure".to_string(),
                 power: None,
                 toughness: None,
@@ -26922,6 +26923,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
 
     // Adventure face stored in back_face (Stomp - instant, {1}{R})
     obj.back_face = Some(crate::game::game_object::BackFaceData {
+        is_swap_snapshot: false,
         name: "Stomp".to_string(),
         power: None,
         toughness: None,
@@ -27014,6 +27016,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
     };
 
     obj.back_face = Some(crate::game::game_object::BackFaceData {
+        is_swap_snapshot: false,
         name: "Embereth Blaze".to_string(),
         power: None,
         toughness: None,
@@ -27102,6 +27105,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
     obj.mana_cost = ManaCost::generic(5);
 
     obj.back_face = Some(crate::game::game_object::BackFaceData {
+        is_swap_snapshot: false,
         name: "Good Omen".to_string(),
         power: None,
         toughness: None,
@@ -30927,6 +30931,7 @@ fn add_disturb_creature_to_graveyard(
         .push(Keyword::Disturb(disturb_cost.clone()));
     obj.keywords = obj.base_keywords.clone();
     obj.back_face = Some(crate::game::game_object::BackFaceData {
+        is_swap_snapshot: false,
         name: "Luminous Phantom".to_string(),
         power: Some(1),
         toughness: Some(1),
@@ -37219,6 +37224,7 @@ mod mtmte_cast_flow {
         let mut card_types = CardType::default();
         card_types.core_types.push(CoreType::Creature);
         BackFaceData {
+            is_swap_snapshot: false,
             name: "Streetwise Operative".to_string(),
             power: Some(7),
             toughness: Some(7),
@@ -51436,6 +51442,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::zero();
         obj.back_face = Some(crate::game::game_object::BackFaceData {
+            is_swap_snapshot: false,
             name: "Back Face".to_string(),
             power: Some(3),
             toughness: Some(3),
