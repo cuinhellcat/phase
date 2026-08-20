@@ -17,12 +17,18 @@
 //! measure.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, EffectScope, ReplacementDefinition, TapStateChange,
+    TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::Zone;
 
 const ONSLAUGHT: &str =
     "Manifest dread X times, then put X +1/+1 counters on each of those creatures.";
@@ -130,12 +136,6 @@ fn a_one_card_library_manifests_synchronously_with_exactly_x_counters() {
 /// ordering is answered.
 #[test]
 fn a_paused_manifest_entry_still_feeds_the_counter_continuation() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TapStateChange, TargetFilter,
-    };
-    use engine::types::replacements::ReplacementEvent;
-    use engine::types::zones::Zone;
-
     fn enter_tap_state_battlefield_replacement(
         description: &str,
         state: TapStateChange,
@@ -146,7 +146,7 @@ fn a_paused_manifest_entry_still_feeds_the_counter_continuation() {
                 AbilityKind::Spell,
                 Effect::SetTapState {
                     target: TargetFilter::SelfRef,
-                    scope: engine::types::ability::EffectScope::Single,
+                    scope: EffectScope::Single,
                     state,
                 },
             ))
