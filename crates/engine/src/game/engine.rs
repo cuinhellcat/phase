@@ -19347,9 +19347,9 @@ mod stage2_injector_tests {
                 // resume/finalization helpers are above this existing producer;
                 // they do not mint an optional-effect prompt. The census above
                 // still finds exactly the same five production producers.
-                "game/effects/mod.rs:7325".to_string(),
-                "game/effects/mod.rs:7402".to_string(),
-                "game/effects/mod.rs:11229".to_string(),
+                "game/effects/mod.rs:7344".to_string(),
+                "game/effects/mod.rs:7421".to_string(),
+                "game/effects/mod.rs:11248".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.
