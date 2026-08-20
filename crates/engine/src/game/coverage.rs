@@ -13782,6 +13782,7 @@ mod tests {
                     source_object: None,
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
+                    room_door: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -13831,6 +13832,7 @@ mod tests {
                     source_object: None,
                     bypass_beneficiary: None,
                     protection_does_not_remove: None,
+                    room_door: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -15217,6 +15219,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -15252,6 +15255,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -15285,6 +15289,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -15651,6 +15656,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(
@@ -15684,6 +15690,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(
@@ -15727,6 +15734,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15761,6 +15769,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15797,6 +15806,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -15839,6 +15849,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             });
         }
 
@@ -16008,6 +16019,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         });
 
         assert!(

@@ -2504,12 +2504,14 @@ impl GameObject {
         }
     }
 
-    /// CR 709.5 + CR 709.5h: stamp each Room half's trigger definitions with
-    /// its door and install the OTHER half's triggers alongside the live
-    /// face's — into the BASE set, so layer recomputation and base
+    /// CR 709.5 + CR 709.5h: stamp each Room half's trigger and static
+    /// definitions with its door and install the OTHER half's alongside the
+    /// live face's — into the BASE sets, so layer recomputation and base
     /// re-materialization preserve them. Which half's text currently
     /// *functions* is then decided by the unlock designations
-    /// (`functioning_abilities::active_trigger_definitions`), not by face
+    /// (`room::door_text_functions`, applied by
+    /// `functioning_abilities::active_trigger_definitions`, the statics
+    /// gathers, and the layers continuous-effect gather), not by face
     /// residency; the unlock trigger matcher additionally fires a stamped
     /// trigger only for its own door's event.
     ///
@@ -2542,6 +2544,29 @@ impl GameObject {
             }
         }
         self.materialize_base_trigger_definitions();
+
+        // CR 709.5: same install for the halves' static abilities — a locked
+        // half doesn't have its rules text, so both halves' statics live
+        // door-stamped in the base set and the functioning gathers decide.
+        let base_statics = Arc::make_mut(&mut self.base_static_definitions);
+        for definition in base_statics.iter_mut() {
+            if definition.room_door.is_none() {
+                definition.room_door = Some(live_door);
+            }
+        }
+        if let Some(back) = &self.back_face {
+            if !base_statics
+                .iter()
+                .any(|definition| definition.room_door == Some(other_door))
+            {
+                base_statics.extend(back.static_definitions.iter_all().map(|printed| {
+                    let mut definition = printed.clone();
+                    definition.room_door = Some(other_door);
+                    definition
+                }));
+            }
+        }
+        self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 
     /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's

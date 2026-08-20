@@ -1880,6 +1880,121 @@ fn after_casting_the_back_half_the_left_door_uses_the_front_halfs_cost_and_trigg
     );
 }
 
+/// CR 709.5 + CR 709.5c: a locked half doesn't have its rules text, so the
+/// right half's static ability must not function until the right door is
+/// unlocked — and must stop again when that door is re-locked (CR 709.5g,
+/// Marina Vendrell class). The locked right half carries an
+/// AdditionalLandDrop static as a countable marker; the front (cast) half
+/// carries none.
+#[test]
+fn unlocking_the_right_door_turns_on_that_halfs_static() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(903),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let mut back = room_back_face("Weight Room");
+        back.static_definitions
+            .push(StaticDefinition::new(StaticMode::AdditionalLandDrop {
+                count: 2,
+            }));
+        obj.back_face = Some(back);
+        // The real ETB pipeline stamps and installs both halves' door text.
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: the locked right half's static must not function"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: the unlocked right half's static must function"
+    );
+
+    // CR 709.5g: locking the half removes the designation — its text is gone again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Right
+    ));
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5g: a re-locked half's static must stop functioning"
+    );
+}
+
+/// CR 709.5d: a Room entering the battlefield without being cast enters with
+/// NEITHER unlocked designation — so even the live face's static (its printed
+/// rules text) must not function until a door is unlocked (CR 709.5).
+#[test]
+fn a_room_entering_uncast_has_no_functioning_static_until_unlocked() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(904),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+        obj.static_definitions.push(front_static.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5d + CR 709.5: with neither door unlocked, no half's static functions"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5c: unlocking the left door turns its half's static on"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes

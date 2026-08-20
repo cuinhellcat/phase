@@ -5638,9 +5638,20 @@ fn active_continuous_effects_from_static_definitions(
     // cycle: "as long as this card is in your graveyard, ..."). If the source
     // is currently outside every declared zone, the static contributes no
     // effects.
-    let source_zone = state.objects.get(&source_id).map(|o| o.zone);
+    let source_obj = state.objects.get(&source_id);
+    let source_zone = source_obj.map(|o| o.zone);
     for (def_idx, def) in static_definitions.iter().enumerate() {
         if def.mode != StaticMode::Continuous {
+            continue;
+        }
+
+        // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
+        // have its rules text — a door-stamped static contributes no
+        // continuous effects while its half is locked. This gather bypasses
+        // `functioning_abilities::static_functions_in_zone` (see the module
+        // doc there), so the shared door authority is applied here too.
+        if source_obj.is_some_and(|obj| !crate::game::room::door_text_functions(obj, def.room_door))
+        {
             continue;
         }
 
@@ -17776,6 +17787,70 @@ mod tests {
         assert!(
             !bear_obj.has_keyword(&Keyword::Haste),
             "Without a Mountain, the compound condition fails and Haste is not granted"
+        );
+    }
+
+    /// CR 709.5 + CR 709.5c: the layers gather applies the Room door
+    /// authority itself (it bypasses `static_functions_in_zone`, see the
+    /// `functioning_abilities` module doc) — a locked half's Continuous
+    /// anthem contributes nothing, unlocking the half turns it on, and
+    /// re-locking (CR 709.5g) turns it back off on the next recompute.
+    #[test]
+    fn a_door_stamped_anthem_applies_only_while_its_half_is_unlocked() {
+        use crate::game::game_object::{RoomDoor, RoomUnlockState};
+
+        let mut state = setup();
+        let room = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Weight Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Room".to_string());
+            let anthem = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ])
+                .room_door(RoomDoor::Right);
+            obj.static_definitions.push(anthem.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(anthem);
+            // Uncast entry (CR 709.5d): neither door unlocked.
+            obj.room_unlocks = Some(RoomUnlockState::default());
+        }
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(2),
+            "CR 709.5: the locked half's anthem must not apply"
+        );
+
+        state.objects.get_mut(&room).unwrap().room_unlocks = Some(RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(3),
+            "CR 709.5c: the unlocked half's anthem applies"
+        );
+
+        state.objects.get_mut(&room).unwrap().room_unlocks = Some(RoomUnlockState::default());
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&bear].power,
+            Some(2),
+            "CR 709.5g: the re-locked half's anthem stops applying"
         );
     }
 
