@@ -1864,6 +1864,26 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 608.2c + CR 701.62a (#7467): the manifested creature enters
+            // from THIS continuation, so its `ZoneChanged` never reaches the
+            // resolver-side harvest — the chain's tracked set was published
+            // EMPTY when the head parked. Re-publish it here so a chained
+            // consumer ("Manifest dread X times, then put X +1/+1 counters on
+            // each of those creatures" — Valgavoth's Onslaught) binds the
+            // creature, the same seam as the search-choice publish above.
+            // Gated identically (only a tracked-set-reading continuation), and
+            // on actual battlefield arrival, mirroring the harvest's
+            // destination filter: an entry replacement that redirected the
+            // card elsewhere manifested nothing.
+            let continuation_consumes_tracked_set = state
+                .active_ability_continuation()
+                .is_some_and(|continuation| {
+                    effects::chain_references_tracked_set(&continuation.chain)
+                });
+            if continuation_consumes_tracked_set && state.battlefield.contains(&manifest_id) {
+                effects::publish_fresh_tracked_set(state, vec![manifest_id]);
+            }
+
             // CR 614.6 + CR 701.62a class: route the non-manifested cards to the
             // graveyard through the simultaneous-move batch so each card's own
             // `Moved` redirects (Rest in Peace / Leyline of the Void: "would be
