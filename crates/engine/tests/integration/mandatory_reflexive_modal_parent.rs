@@ -179,23 +179,25 @@ fn the_mode_list_still_resolves_after_the_instruction() {
     );
 }
 
-/// With nothing to exile, the instruction runs and moves no card.
+/// With nothing to exile, the instruction runs, moves no card — and the
+/// reflexive is never created.
 ///
-/// This row does NOT assert that the resolution asks nothing. It still asks for
-/// a mode: CR 603.12 says the reflexive should never have been created, but the
-/// engine has no record that a mandatory instruction did nothing. That gap is
-/// issue #7511's remaining half and is not addressed here.
+/// CR 603.12: a reflexive triggered ability triggers "based on whether the
+/// trigger event or events occurred earlier during the resolution". With every
+/// graveyard empty the mandatory "exile another card from a graveyard" exiles
+/// nothing, so "when you do" never happened: no mode choice may be offered.
+/// This closes issue #7511's remaining half (the optional-parent side landed
+/// in #7414).
 #[test]
-fn an_impossible_exile_moves_no_card() {
+fn an_impossible_exile_creates_no_reflexive() {
     let resolved = resolve_enters(false);
-    // Reach-guard: no object named "Fodder Card" exists in this game, so the
-    // census below would read (0, 0) even if the card failed to parse or the
-    // trigger never fired. The mode choice proves the enters trigger resolved
-    // its instruction and created the reflexive.
     assert!(
-        resolved.prompts.iter().any(|p| p == "AbilityModeChoice"),
-        "the enters trigger must have run its instruction and created the \
-         reflexive mode choice — {:?}",
+        !resolved
+            .prompts
+            .iter()
+            .any(|p| p == "AbilityModeChoice" || p == "TargetSelection"),
+        "CR 603.12: the mandatory exile did nothing, so the reflexive mode \
+         choice must never be offered — prompts seen: {:?}",
         resolved.prompts
     );
     assert_eq!(
