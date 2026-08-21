@@ -24,11 +24,11 @@
 //! - CR 700.2b: a modal triggered ability chooses its mode(s) as it is put on
 //!   the stack.
 //!
-//! What this file does NOT prove: it does not measure the CR 603.12 gate. With
-//! every graveyard empty the instruction now runs and exiles nothing, but the
-//! reflexive is still created and still asks for a mode. Suppressing it needs
-//! the engine to record that a mandatory instruction did nothing — issue #7511's
-//! remaining half, deliberately out of scope here.
+//! The third test measures the CR 603.12 gate itself: with every graveyard
+//! empty the mandatory instruction runs, moves nothing, and the reflexive is
+//! never created — issue #7511's remaining half, answered from the parent's
+//! own event slice at the sub-walk site in `resolve_ability_chain`
+//! (`when_you_do_mandatory_parent_did_nothing`).
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
