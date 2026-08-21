@@ -29,6 +29,11 @@
 //! never created — issue #7511's remaining half, answered from the parent's
 //! own event slice at the sub-walk site in `resolve_ability_chain`
 //! (`when_you_do_mandatory_parent_did_nothing`).
+//!
+//! The `RemoveCounter` pair at the end walks the same gate over the
+//! event-witness branch (`GameEvent::CounterRemoved`) through the production
+//! resolver — review round 1 asked for exactly this runtime pin, in both
+//! directions.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -205,5 +210,126 @@ fn an_impossible_exile_creates_no_reflexive() {
         (0, 0),
         "no graveyard held a card, so nothing may be exiled — prompts seen: {:?}",
         resolved.prompts
+    );
+}
+
+/// Oracle text for the `RemoveCounter` pair below: a MANDATORY
+/// self-referential counter removal ahead of a reflexive draw — Vhal, Scholar
+/// of Mortality's "remove all study counters from it. When you do, …" shape
+/// reduced to its building blocks. No mode list and no targets, so the whole
+/// chain resolves without a single player choice and the only observable is
+/// the outcome itself.
+const COUNTER_SCHOLAR: &str =
+    "When this creature enters, remove a +1/+1 counter from it. When you do, draw a card.";
+
+/// As above, plus the counter the mandatory removal needs — the one-variable
+/// positive twin.
+const COUNTER_SCHOLAR_STOCKED: &str = "This creature enters with a +1/+1 counter on it.\nWhen this creature enters, remove a +1/+1 counter from it. When you do, draw a card.";
+
+struct CounterOutcome {
+    prompts: Vec<String>,
+    plains_in_hand: usize,
+    counters_on_scholar: Option<u32>,
+}
+
+/// Cast the scholar and let its enters chain resolve with no interaction.
+///
+/// The census reads only what the chain can move: Plains stay in the library
+/// unless the reflexive draws one, and the +1/+1 counter count on the scholar
+/// is the mandatory instruction's own footprint.
+fn resolve_counter_scholar(oracle_text: &str) -> CounterOutcome {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scholar = scenario
+        .add_spell_to_hand_from_oracle(P0, "Counter Scholar", false, oracle_text)
+        .as_creature()
+        .id();
+    for _ in 0..10 {
+        scenario.add_card_to_library_top(P0, "Plains");
+    }
+
+    let mut runner = scenario.build();
+    runner.cast(scholar).commit();
+
+    let mut prompts = Vec::new();
+    let mut settled = false;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                settled = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            other => {
+                prompts.push(format!("PROMPT: {}", other.variant_name()));
+                break;
+            }
+        }
+    }
+    assert!(
+        settled,
+        "the chain must resolve without interaction — prompts seen: {prompts:?}"
+    );
+
+    let state = runner.state();
+    CounterOutcome {
+        prompts,
+        plains_in_hand: state
+            .objects
+            .values()
+            .filter(|o| o.name == "Plains" && o.zone == Zone::Hand)
+            .count(),
+        counters_on_scholar: state
+            .objects
+            .values()
+            .find(|o| o.name == "Counter Scholar" && o.zone == Zone::Battlefield)
+            .map(|o| {
+                o.counters
+                    .get(&engine::types::counter::CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0)
+            }),
+    }
+}
+
+/// The witness side of the runtime pair from review round 1: the counter is
+/// there, the mandatory removal happens, and the reflexive must survive the
+/// event-witness gate.
+///
+/// This half fails if the `GameEvent::CounterRemoved` witness is not threaded
+/// into the parent's event slice at the sub-walk site — silencing the working
+/// chain is the failure mode the gate must not have.
+#[test]
+fn a_performed_counter_removal_keeps_its_reflexive() {
+    let outcome = resolve_counter_scholar(COUNTER_SCHOLAR_STOCKED);
+    assert_eq!(
+        (outcome.plains_in_hand, outcome.counters_on_scholar),
+        (1, Some(0)),
+        "the counter came off, so the reflexive must draw — prompts seen: {:?}",
+        outcome.prompts
+    );
+}
+
+/// The suppression side: no counter to remove, the mandatory instruction runs
+/// and moves nothing — CR 603.12: "when you do" never happened, so the
+/// reflexive draw must not resolve.
+///
+/// Counter-probe: with the sub-walk gate
+/// (`when_you_do_mandatory_parent_did_nothing`) reverted, this line reads
+/// `left: (1, Some(0))` against `right: (0, Some(0))` — exactly the shipped
+/// behavior this PR fixes, now pinned through the production resolver.
+#[test]
+fn an_impossible_counter_removal_creates_no_reflexive() {
+    let outcome = resolve_counter_scholar(COUNTER_SCHOLAR);
+    assert_eq!(
+        (outcome.plains_in_hand, outcome.counters_on_scholar),
+        (0, Some(0)),
+        "nothing was removed, so nothing may be drawn (CR 603.12) — prompts \
+         seen: {:?}",
+        outcome.prompts
     );
 }

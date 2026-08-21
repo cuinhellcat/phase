@@ -20684,6 +20684,22 @@ mod tests {
             !when_you_do_mandatory_parent_did_nothing(&when_you_do, &become_copy, &no_events),
             "an effect kind without an event witness must stay unconditional"
         );
+        // The condition guard: the call site hands EVERY sub-effect condition
+        // to this stage, so a non-WhenYouDo condition must pass through even
+        // when all the parent-side conjuncts would otherwise suppress it.
+        let quantity_check = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Fixed { value: 0 },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        };
+        assert!(
+            !when_you_do_mandatory_parent_did_nothing(
+                &quantity_check,
+                &parent(false, false),
+                &no_events
+            ),
+            "only AbilityCondition::WhenYouDo is this stage's business"
+        );
     }
 
     #[test]
