@@ -116,8 +116,9 @@ pub(crate) fn door_gated_battlefield_name(
         return None;
     }
     let unlocks = obj.room_unlocks.unwrap_or_default();
-    // CR 709.5j: the other printed half lives on `back_face` — absent on a
-    // Room printed without a second half, whose only door is the left one.
+    // Engine representation: the other printed half lives in the `back_face`
+    // slot — absent on a Room printed without a second half, whose only door
+    // is the left one (see `existing_doors`).
     let back_name = obj.back_face.as_ref().map(|back| back.name.as_str());
     let (left_name, right_name) = match live_face_door(obj) {
         RoomDoor::Left => (Some(obj.base_name.as_str()), back_name),
