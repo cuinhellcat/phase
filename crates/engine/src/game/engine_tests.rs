@@ -1995,6 +1995,122 @@ fn a_room_entering_uncast_has_no_functioning_static_until_unlocked() {
     );
 }
 
+/// CR 709.5: a locked half doesn't have its NAME. On the battlefield a Room's
+/// name is therefore the printed-order combination of its unlocked halves:
+/// neither → no name at all (CR 709.5d uncast entry), one → that half alone,
+/// both → "Left // Right". Re-locking (CR 709.5g) takes the name away again.
+#[test]
+fn a_rooms_battlefield_name_follows_its_unlock_designations() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(905),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.back_face = Some(room_back_face("Weight Room"));
+        // Entering uncast: `reset_for_battlefield_entry` leaves both doors
+        // locked (CR 709.5d — neither half was cast as a spell).
+        obj.reset_for_battlefield_entry(1, 1);
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "",
+        "CR 709.5d + CR 709.5: with both doors locked the permanent has neither half's name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym",
+        "CR 709.5c: one unlocked half contributes exactly its own name"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: a fully unlocked Room has both halves' names, in printed order"
+    );
+
+    // CR 709.5g: re-locking the left door takes its half's name away again.
+    assert!(crate::game::room::lock_door_designation(
+        &mut state,
+        room,
+        RoomDoor::Left
+    ));
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5g: a re-locked half's name is gone; the right half's remains"
+    );
+}
+
+/// CR 709.5d: the same name rule with the RIGHT half cast — `modal_back_face`
+/// swaps the faces, so the live face is the right door and the back face slot
+/// holds the FIRST printed half. The combined name must keep printed order,
+/// not face residency ("Moldering Gym // Weight Room", never the reverse).
+#[test]
+fn a_room_cast_from_its_right_half_keeps_printed_name_order() {
+    let mut state = setup_game_at_main_phase();
+    let room = create_object(
+        &mut state,
+        CardId(906),
+        PlayerId(0),
+        "Weight Room".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.modal_back_face = true;
+        obj.back_face = Some(room_back_face("Moldering Gym"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The right (live) half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        });
+    }
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Weight Room",
+        "CR 709.5d: only the cast (right) half's name exists"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "CR 709.5: printed order wins — the left-printed half leads even though \
+         it lives in the back-face slot"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes

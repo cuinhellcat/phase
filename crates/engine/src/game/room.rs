@@ -99,6 +99,39 @@ pub(crate) fn door_text_functions(
     obj.room_unlocks.unwrap_or_default().is_unlocked(door)
 }
 
+/// CR 709.5: on the battlefield a locked half doesn't have its NAME. A Room
+/// permanent's name is therefore the printed-order combination of its
+/// unlocked halves — both → "Left // Right", one → that half alone, neither →
+/// no name at all (CR 709.5d: an uncast Room enters fully locked). `None` for
+/// every object the rule doesn't reach (not a Room, not on the battlefield):
+/// callers keep their ordinary base-name seed.
+///
+/// Printed order comes from `live_face_door`, not face residency: after a
+/// right-half cast the back-face slot holds the FIRST printed half, and that
+/// name still leads the combination.
+pub(crate) fn door_gated_battlefield_name(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<String> {
+    if obj.zone != Zone::Battlefield || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
+        return None;
+    }
+    let unlocks = obj.room_unlocks.unwrap_or_default();
+    // CR 709.5j: the other printed half lives on `back_face` — absent on a
+    // Room printed without a second half, whose only door is the left one.
+    let back_name = obj.back_face.as_ref().map(|back| back.name.as_str());
+    let (left_name, right_name) = match live_face_door(obj) {
+        RoomDoor::Left => (Some(obj.base_name.as_str()), back_name),
+        RoomDoor::Right => (back_name, Some(obj.base_name.as_str())),
+    };
+    let left = left_name.filter(|_| unlocks.is_unlocked(RoomDoor::Left));
+    let right = right_name.filter(|_| unlocks.is_unlocked(RoomDoor::Right));
+    Some(match (left, right) {
+        (Some(left), Some(right)) => format!("{left} // {right}"),
+        (Some(half), None) | (None, Some(half)) => half.to_string(),
+        (None, None) => String::new(),
+    })
+}
+
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door
 /// always and a right door only if it has a back face (the second half of the
 /// split card). Returns the doors that actually exist for `object_id`.
@@ -189,6 +222,9 @@ pub fn unlock_door_designation(
             door,
             fully_unlocked: outcome.fully_unlocked,
         });
+        // CR 709.5 + CR 613: a gained designation changes the door-gated name,
+        // a layer-derived characteristic — re-derive (mirror of transform.rs).
+        crate::game::layers::mark_layers_full(state);
     }
     outcome.changed
 }
@@ -207,5 +243,11 @@ pub fn lock_door_designation(state: &mut GameState, object_id: ObjectId, door: R
     }
 
     let room_state = obj.room_unlocks.get_or_insert_with(Default::default);
-    room_state.lock(door)
+    let changed = room_state.lock(door);
+    if changed {
+        // CR 709.5g + CR 613: a lost designation changes the door-gated name —
+        // re-derive layered characteristics (mirror of `unlock_door_designation`).
+        crate::game::layers::mark_layers_full(state);
+    }
+    changed
 }

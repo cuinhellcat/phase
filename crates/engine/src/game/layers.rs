@@ -2096,6 +2096,12 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
     obj.name = obj.base_name.clone();
+    // CR 709.5: a Room permanent's name is door-gated — a locked half doesn't
+    // have its name. Overrides the base seed on the battlefield only; the
+    // CR 708.2 face-down blanking below still wins where it applies.
+    if let Some(room_name) = crate::game::room::door_gated_battlefield_name(obj) {
+        obj.name = room_name;
+    }
     obj.power = obj.base_power;
     obj.toughness = obj.base_toughness;
     // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
