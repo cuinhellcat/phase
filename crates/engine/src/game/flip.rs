@@ -248,7 +248,9 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
                 .collect(),
         ),
         static_definitions: Arc::new(normal_face.static_definitions.iter_all().cloned().collect()),
-        // CR 710.1: flip cards are single-faced permanents — no Room halves.
+        // CR 710.1 + CR 710.2: a flip card is a single card whose normal and
+        // alternative characteristics share one face — never one of CR 709.5's
+        // shared-type-line Room permanents, so there is no half data to carry.
         room_halves: None,
     })
 }

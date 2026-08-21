@@ -2132,6 +2132,13 @@ fn uncast_room_with_front_marker(
     // The copiable snapshot reads BASE characteristics — mirror the types
     // there so the source is a Room in its copiable form too.
     obj.base_card_types = obj.card_types.clone();
+    // CR 709.5e: give the LEFT half a real unlock cost ({1}) so a copy's
+    // unlock exercises the COPIED cost instead of succeeding for free.
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![],
+        generic: 1,
+    };
+    obj.base_mana_cost = obj.mana_cost.clone();
     let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
     obj.static_definitions.push(front_static.clone());
     Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
@@ -2191,8 +2198,18 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
         "CR 709.5: both the source's and the copy's halves are locked — no text functions"
     );
 
-    // CR 709.5e: the copy is a Room permanent; its controller may pay the
-    // locked LEFT half's (copied) cost to unlock it.
+    // CR 709.5e + CR 707.2: the copy is a Room permanent; its controller pays
+    // the locked LEFT half's COPIED cost ({1}) — fund exactly that much and
+    // assert the unlock consumes it, so a copy path that drops the half cost
+    // or defaults it to free fails here.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
     apply_as_current(
         &mut state,
         GameAction::UnlockRoomDoor {
@@ -2201,6 +2218,11 @@ fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
         },
     )
     .unwrap();
+    assert_eq!(
+        state.players[0].mana_pool.mana.len(),
+        0,
+        "CR 709.5e: the copied left half's {{1}} unlock cost must consume the mana"
+    );
     crate::game::layers::evaluate_layers(&mut state);
     assert_eq!(
         state.objects[&bear].name, "Moldering Gym",
@@ -2303,6 +2325,91 @@ fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
     assert_eq!(
         state.objects[&room].name, "Moldering Gym // Weight Room",
         "copy expiry restores the object's own halves under its surviving designations"
+    );
+}
+
+/// CR 707.3: an object copying an ALREADY-COPIED Room uses the new copiable
+/// values — the snapshot a later copy takes must carry the COPIED halves, not
+/// the recipient's printed ones.
+#[test]
+fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 911, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(912),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    // CR 707.3: the bear's CURRENT copiable values are the Room's — including
+    // the halves. `compute_current_copiable_values` is the snapshot every
+    // become-copy / conjure-duplicate resolution takes.
+    let snapshot = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the bear exists");
+    let halves = snapshot
+        .room_halves
+        .expect("CR 707.3: the copied Room halves are part of the new copiable values");
+    assert_eq!(halves.left.name, "Bright Hall");
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar")
+    );
+}
+
+/// CR 709.5b: a materialized duplicate of a Room (conjure — Endless Corridor
+/// conjures a duplicate of ITSELF) keeps both printed halves: the base slots
+/// hold the left half, a synthesized back face the right one, so
+/// `own_room_halves` round-trips identity, unlock costs, and door existence.
+#[test]
+fn a_materialized_duplicate_of_a_room_keeps_both_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 913, "Bright Hall", "Dim Cellar");
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(914),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&duplicate).unwrap();
+    crate::game::printed_cards::install_copiable_values_as_base(obj, &values);
+
+    let halves = crate::game::room::own_room_halves(obj);
+    assert_eq!(
+        halves.left.name, "Bright Hall",
+        "CR 709.5b: the duplicate's base slots hold the left half"
+    );
+    assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 709.5e: the left door's unlock cost survives materialization"
+    );
+    assert_eq!(
+        halves.right.as_ref().map(|half| half.name.as_str()),
+        Some("Dim Cellar"),
+        "CR 709.5b: the right half survives as the synthesized back face"
     );
 }
 
