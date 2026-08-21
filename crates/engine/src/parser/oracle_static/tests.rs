@@ -2343,11 +2343,11 @@ fn self_untap_during_each_other_untap_step_bender_waterskin() {
     }
 }
 
-/// CR 502.3 + CR 113.6: "Untap EACH <type> you control during each other
-/// player's untap step" — the "each" subject word must lower through the same
-/// Seedborn authority as "all". Before the fix the line fell through and the
-/// half's text did nothing in any game state (#7574: Prop Room; Ivorytusk
-/// Fortress additionally exercises the property-filter path of the subject).
+/// "Untap EACH <type> you control during each other player's untap step" —
+/// the "each" subject word must lower through the same Seedborn authority as
+/// "all". Before the fix the line fell through and the half's text did
+/// nothing in any game state (#7574: Prop Room; Ivorytusk Fortress
+/// additionally exercises the property-filter path of the subject).
 #[test]
 fn untap_each_during_each_other_untap_step_prop_room_and_ivorytusk() {
     // Prop Room — plain typed subject.

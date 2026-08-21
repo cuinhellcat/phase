@@ -297,10 +297,10 @@ fn parse_untaps_during_each_other_players_untap_step(
     description: &str,
 ) -> Option<StaticDefinition> {
     // "Untap all/each <type> you control during each other player's untap
-    // step." — CR 502.3: "all" (Seedborn Muse) and "each" (Prop Room,
-    // Ivorytusk Fortress) quantify the same class in this position. Delegate
-    // the subject to `parse_type_phrase`, which handles the full range of
-    // type + controller + property phrases.
+    // step." — Seedborn Muse prints "all"; Prop Room and Ivorytusk Fortress
+    // print "each" for the same subject shape, so both tags share this arm.
+    // Delegate the subject to `parse_type_phrase`, which handles the full
+    // range of type + controller + property phrases.
     if let Some(rest) = nom_tag_tp(tp, "untap all ").or_else(|| nom_tag_tp(tp, "untap each ")) {
         let (filter, remainder) = parse_type_phrase(rest.original);
         let remainder_lower = remainder.to_lowercase();
