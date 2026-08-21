@@ -232,6 +232,8 @@ pub fn apply_face_down_creature_characteristics(
     obj.toughness = toughness;
     obj.base_power = power;
     obj.base_toughness = toughness;
+    obj.layer_base_power = power;
+    obj.layer_base_toughness = toughness;
     obj.card_types = CardType {
         supertypes: vec![],
         core_types,

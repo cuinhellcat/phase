@@ -6779,6 +6779,11 @@ pub enum QuantityRef {
     /// `EventContextSourcePower` (CR 608.2k: cost OR trigger-condition
     /// referent).
     Power { scope: ObjectScope },
+    /// CR 208.4b + CR 613.4b: Base power of an object, scoped via
+    /// `ObjectScope`. This reads the value after characteristic-defining and
+    /// set effects (layers 7a–7b), before counters and other modifiers (layer
+    /// 7c), rather than the current post-layer power read by `Power`.
+    BasePower { scope: ObjectScope },
     /// Digital-only Alchemy (no CR entry): the current `intensity` of an object,
     /// scoped via `ObjectScope`. Reads "X is [card]'s intensity" /
     /// "this spell's intensity" / "equal to its intensity".
@@ -7547,6 +7552,7 @@ impl QuantityRef {
             | QuantityRef::TargetControllerCounter { .. }
             | QuantityRef::Variable { .. }
             | QuantityRef::Power { .. }
+            | QuantityRef::BasePower { .. }
             | QuantityRef::Intensity { .. }
             | QuantityRef::Toughness { .. }
             | QuantityRef::ObjectManaValue { .. }
@@ -24408,6 +24414,13 @@ pub struct StaticDefinition {
     /// pre-existing card-data round-trips unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection_does_not_remove: Option<ProtectionDoesNotRemove>,
+    /// CR 709.5 + CR 709.5c: The Room half (door) this static's printed text
+    /// lives on. Stamped when a split Room's two halves are wired onto a game
+    /// object; a locked half doesn't have its rules text, so a door's static
+    /// functions only while that half is unlocked. `None` for every non-Room
+    /// static: no door gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_door: Option<crate::game::game_object::RoomDoor>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -24549,11 +24562,19 @@ impl StaticDefinition {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         }
     }
 
     pub fn continuous() -> Self {
         Self::new(StaticMode::Continuous)
+    }
+
+    /// CR 709.5 + CR 709.5c: Stamp the Room half this static's text lives on
+    /// (see the `room_door` field doc). Mirrors `TriggerDefinition::room_door`.
+    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+        self.room_door = Some(door);
+        self
     }
 
     pub fn affected(mut self, filter: TargetFilter) -> Self {
@@ -29562,6 +29583,7 @@ mod tests {
             source_object: None,
             bypass_beneficiary: None,
             protection_does_not_remove: None,
+            room_door: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -29880,6 +29902,7 @@ mod tests {
                 source_object: None,
                 bypass_beneficiary: None,
                 protection_does_not_remove: None,
+                room_door: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

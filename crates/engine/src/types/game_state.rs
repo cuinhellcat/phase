@@ -20370,8 +20370,11 @@ impl GameState {
                 keywords: object.keywords.clone(),
                 power: object.power,
                 toughness: object.toughness,
-                base_power: object.base_power,
-                base_toughness: object.base_toughness,
+                // CR 208.4b + CR 613.4a-b: preserve current base P/T after
+                // characteristic-defining and setting effects for this event
+                // snapshot; counters and later modifiers are excluded.
+                base_power: object.layer_base_power.or(object.base_power),
+                base_toughness: object.layer_base_toughness.or(object.base_toughness),
                 mana_value: object.effective_mana_value(),
                 counters: object.counters.clone(),
                 is_token: object.is_token,

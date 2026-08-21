@@ -3398,6 +3398,7 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::TargetControllerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
         | QuantityRef::Intensity { .. }
         | QuantityRef::Toughness { .. }
         | QuantityRef::ObjectManaValue { .. }
@@ -4266,6 +4267,7 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
     use crate::types::ability::ObjectScope;
     let scope = match qty {
         QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::BasePower { scope }
         | QuantityRef::Power { scope }
         | QuantityRef::Toughness { scope }
         | QuantityRef::CountersOn { scope, .. }
