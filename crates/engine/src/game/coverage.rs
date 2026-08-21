@@ -4215,9 +4215,13 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::FirstCombatPhaseOfTurn => "first combat phase of the turn".into(),
         AbilityCondition::FirstEndStepOfTurn => "first end step of the turn".into(),
         AbilityCondition::CurrentPhaseIs { .. } => "current phase matches".into(),
-        AbilityCondition::ZoneChangedThisWay { filter } => {
-            format!("{} changed zones this way", fmt_target(filter))
-        }
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination,
+        } => match destination {
+            Some(zone) => format!("{} was put into {zone:?} this way", fmt_target(filter)),
+            None => format!("{} changed zones this way", fmt_target(filter)),
+        },
         AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
             format!("cost-paid object is {}", fmt_target(filter))
         }
@@ -15500,6 +15504,7 @@ mod tests {
             (
                 AbilityCondition::ZoneChangedThisWay {
                     filter: TargetFilter::Any,
+                    destination: None,
                 },
                 "ZoneChangedThisWay",
             ),

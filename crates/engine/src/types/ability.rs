@@ -21774,7 +21774,23 @@ pub enum AbilityCondition {
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
-    ZoneChangedThisWay { filter: TargetFilter },
+    ///
+    /// `destination`: destination-bound wordings ("is put into a graveyard this
+    /// way"; "dies this way", CR 700.4) additionally require the moved object to
+    /// have ARRIVED in this zone — a replacement that redirects the arrival
+    /// (CR 122.1h finality counters: exile instead of the graveyard) defeats the
+    /// clause, because the replaced event never happened (CR 614.6).
+    /// Cause-bound wordings ("destroyed/sacrificed/exiled … this way") keep
+    /// `None`: the cause survives a redirect, the destination does not. The
+    /// check reads the object's CURRENT zone — the condition is evaluated in
+    /// the same resolution step as the parent instruction (CR 608.2c), before
+    /// any state-based action or trigger could move the object again, so the
+    /// current zone IS the arrival zone.
+    ZoneChangedThisWay {
+        filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<crate::types::zones::Zone>,
+    },
     /// CR 117.1 + CR 400.7j + CR 608.2k: "if you sacrificed/exiled/discarded a
     /// [filter] this way" checks the object paid as a cost for this resolving
     /// ability using its cost-payment-time public characteristics.

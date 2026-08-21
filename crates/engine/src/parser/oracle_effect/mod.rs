@@ -722,7 +722,8 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
             if matches!(
                 condition.as_ref(),
                 AbilityCondition::ZoneChangedThisWay {
-                    filter: TargetFilter::Any
+                    filter: TargetFilter::Any,
+                    destination: None,
                 }
             )
     );
@@ -791,6 +792,7 @@ fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
     if prev_is_effect_exile {
         return Some(AbilityCondition::ZoneChangedThisWay {
             filter: filter.clone(),
+            destination: None,
         });
     }
     condition
@@ -28109,7 +28111,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             | AbilityCondition::SourceMatchesFilter { filter }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
             | AbilityCondition::ControllerControlsMatching { filter }
-            | AbilityCondition::ZoneChangedThisWay { filter }
+            | AbilityCondition::ZoneChangedThisWay {
+                filter,
+                destination: _,
+            }
             | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
                 rewrite_filter_controller_to_scoped(filter);
             }
@@ -32694,7 +32699,10 @@ pub(crate) fn parse_effect_chain_ir(
                 let condition = AbilityCondition::And {
                     conditions: vec![
                         AbilityCondition::Not {
-                            condition: Box::new(AbilityCondition::ZoneChangedThisWay { filter }),
+                            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                                filter,
+                                destination: None,
+                            }),
                         },
                         AbilityCondition::ScopedPlayerMatches { filter: scope },
                     ],

@@ -106,6 +106,7 @@ mod combat_damage_order_triggers_no_hang;
 mod combat_lifelink_replacement_ordering;
 mod combat_target_support;
 mod combo_infinite_pile;
+mod come_back_wrong_finality_counter;
 mod comeuppance;
 mod companion_special_action;
 mod consuming_vapors_life_gain_5925;

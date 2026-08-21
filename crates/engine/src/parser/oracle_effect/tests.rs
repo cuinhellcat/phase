@@ -47089,7 +47089,10 @@ fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -47149,7 +47152,10 @@ fn attach_just_moved_iron_man_put_from_hand_attach_equipment_to_source() {
     // Condition gates on the MOVED card's type (ZoneChangedThisWay), not the
     // ability's first target slot (the pre-fix TargetMatchesFilter bug).
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -47205,7 +47211,10 @@ fn invincible_iron_man_trigger_parses_equipment_attach_via_parse_oracle_text() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(t.type_filters.iter().any(
                 |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
             )),
@@ -47285,7 +47294,10 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         other => panic!("expected Attach sub_ability, got {other:?}"),
     }
     match &attach.condition {
-        Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))
@@ -48456,7 +48468,8 @@ fn reflexive_sacrifice_this_way_taps_and_draws_that_many() {
     assert!(matches!(
         def.condition,
         Some(AbilityCondition::ZoneChangedThisWay {
-            filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+            filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. }),
+            destination: None,
         }) if type_filters.iter().any(|f| matches!(f, TypeFilter::Artifact))
     ));
 

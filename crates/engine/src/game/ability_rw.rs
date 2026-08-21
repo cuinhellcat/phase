@@ -6445,7 +6445,12 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         AbilityCondition::ScopedPlayerMatches { filter } => rw_player_filter(filter),
         AbilityCondition::TriggeringSpellTargetsFilter { filter: _ }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
-        | AbilityCondition::ZoneChangedThisWay { filter: _ }
+        // `destination` reads the moved object's CURRENT zone — the same
+        // event-live read bucket as the ledger lookup itself.
+        | AbilityCondition::ZoneChangedThisWay {
+            filter: _,
+            destination: _,
+        }
         // CR 615.5: reads the prevented event's live damage-source object.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: _ }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter: _ } => reads_event_live(),

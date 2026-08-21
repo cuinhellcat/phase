@@ -2000,7 +2000,13 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
         return;
     };
 
-    let Some(AbilityCondition::ZoneChangedThisWay { filter }) = sub.condition.clone() else {
+    // Entry-rider folding is destination-blind by construction: a
+    // destination-bound clause is never an ETB rider, so it passes through.
+    let Some(AbilityCondition::ZoneChangedThisWay {
+        filter,
+        destination: None,
+    }) = sub.condition.clone()
+    else {
         def.sub_ability = Some(sub);
         fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
         return;

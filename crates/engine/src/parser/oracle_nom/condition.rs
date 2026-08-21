@@ -9171,7 +9171,9 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// the consumed " this way" suffix (caller is responsible for stripping any
 /// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
 /// is exposed via `negated`.
-pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+pub fn parse_zone_changed_this_way_clause(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
     parse_zone_changed_this_way_clause_scoped(input, ThisWayVerbScope::AnyZoneChange)
 }
 
@@ -9197,7 +9199,7 @@ pub enum ThisWayVerbScope {
 pub fn parse_zone_changed_this_way_clause_scoped(
     input: &str,
     scope: ThisWayVerbScope,
-) -> OracleResult<'_, (TargetFilter, bool)> {
+) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
     // CR 608.2c: A "this way" conditional may be quantified. "at least one" /
     // "one or more" both mean "≥ 1", which the existential `.any()` semantics
     // of `ZoneChangedThisWay` already encode — they value-discard to unit. The
@@ -9210,6 +9212,11 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         // "another "; `parse_type_phrase` maps it to `FilterProp::Another` so the
         // returned-this-way subject excludes the source.
         value((), nom::combinator::peek(tag("another "))),
+        // CR 608.2c: "that <type> … this way" (Saw in Half, Tuktuk Scrapper) —
+        // the anaphor names the parent's own moved object; the ledger holds
+        // exactly the parent's moves, so the existential over it is the same
+        // condition the article forms produce.
+        value((), tag("that ")),
         parse_article,
     ))
     .parse(input)?;
@@ -9245,7 +9252,23 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(after_filter)
     {
         let (rest, _) = tag(" this way").parse(rest)?;
-        return Ok((rest, (filter, false)));
+        return Ok((rest, (filter, false, None)));
+    }
+
+    // CR 700.4: "dies this way" — present-tense and DESTINATION-BOUND: dying
+    // IS being put into a graveyard from the battlefield, so a CR 614.1
+    // replacement that redirects the arrival (CR 122.1h finality counters)
+    // defeats the clause. Non-entry verb, so only the general scope offers it.
+    if scope == ThisWayVerbScope::AnyZoneChange {
+        if let Ok((rest, _)) =
+            alt((tag::<_, _, OracleError<'_>>("dies"), tag("die"))).parse(after_filter)
+        {
+            let (rest, _) = tag(" this way").parse(rest)?;
+            return Ok((
+                rest,
+                (filter, false, Some(crate::types::zones::Zone::Graveyard)),
+            ));
+        }
     }
 
     // tense: singular "is"/"was" + plural "are"/"were". Verb number is
@@ -9269,25 +9292,41 @@ pub fn parse_zone_changed_this_way_clause_scoped(
     // " this way" suffix is the discriminator. Under
     // `ThisWayVerbScope::BattlefieldEntry` only the battlefield-entry verb is
     // offered; the non-entry zone-change verbs are withheld.
-    let (rest, _) = match scope {
+    let (rest, destination) = match scope {
         ThisWayVerbScope::AnyZoneChange => alt((
-            tag::<_, _, OracleError<'_>>("put onto the battlefield"),
-            tag("destroyed"),
-            tag("exiled"),
-            tag("sacrificed"),
-            tag("returned"),
-            tag("discarded"),
-            tag("milled"),
-            tag("countered"),
+            // CR 400.7: cause-bound zone-change verbs — the CAUSE names them,
+            // so a CR 614.6 redirect does not defeat the clause. No
+            // destination binding.
+            value(
+                None,
+                tag::<_, _, OracleError<'_>>("put onto the battlefield"),
+            ),
+            value(None, tag("destroyed")),
+            value(None, tag("exiled")),
+            value(None, tag("sacrificed")),
+            value(None, tag("returned")),
+            value(None, tag("discarded")),
+            value(None, tag("milled")),
+            value(None, tag("countered")),
+            // CR 608.2c + CR 122.1h + CR 614.6: destination-bound wording —
+            // the clause names the ARRIVAL zone, so a replacement that
+            // redirects the object elsewhere (finality counters: exile
+            // instead of the graveyard) defeats it.
+            value(
+                Some(crate::types::zones::Zone::Graveyard),
+                tag("put into a graveyard"),
+            ),
         ))
         .parse(rest)?,
-        ThisWayVerbScope::BattlefieldEntry => {
-            tag::<_, _, OracleError<'_>>("put onto the battlefield").parse(rest)?
-        }
+        ThisWayVerbScope::BattlefieldEntry => value(
+            None,
+            tag::<_, _, OracleError<'_>>("put onto the battlefield"),
+        )
+        .parse(rest)?,
     };
 
     let (rest, _) = tag(" this way").parse(rest)?;
-    Ok((rest, (filter, negated)))
+    Ok((rest, (filter, negated, destination)))
 }
 
 /// CR 120.3 + CR 608.2c: the recipient axis of a "… is dealt damage this way"
@@ -9452,7 +9491,7 @@ pub fn parse_entry_this_way_clause(input: &str) -> OracleResult<'_, (Option<Targ
     let (rest, subject) = alt((
         map(
             |i| parse_zone_changed_this_way_clause_scoped(i, ThisWayVerbScope::BattlefieldEntry),
-            |(filter, negated)| (Some(filter), negated),
+            |(filter, negated, _destination)| (Some(filter), negated),
         ),
         map(
             parse_you_put_onto_battlefield_this_way_clause,
@@ -9779,7 +9818,13 @@ pub fn parse_you_put_into_hand_this_way_condition(
         )));
     }
     let (rest, _) = tag("into your hand this way").parse(after_filter.trim_start())?;
-    Ok((rest, AbilityCondition::ZoneChangedThisWay { filter }))
+    Ok((
+        rest,
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: None,
+        },
+    ))
 }
 
 /// CR 608.2c + CR 122.1: Parse "you put [counter type] counters on [N] [type]
@@ -9889,6 +9934,7 @@ pub fn parse_you_control_or_returned_this_way_condition(
                 },
                 AbilityCondition::ZoneChangedThisWay {
                     filter: returned_filter,
+                    destination: None,
                 },
             ],
         },
@@ -18763,7 +18809,7 @@ mod tests {
     /// baseline before extending to present tense / multi-word verbs.
     #[test]
     fn test_zone_changed_this_way_was_destroyed_top_level_type() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "an enchantment was destroyed this way, you lose 2 life",
         )
         .unwrap();
@@ -18781,7 +18827,7 @@ mod tests {
     /// Reborn Avenger's Hero rider after graveyard reanimation.
     #[test]
     fn test_zone_changed_this_way_hero_enters() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "a hero enters this way, it enters with an additional +1/+1 counter on it",
         )
         .unwrap();
@@ -18802,7 +18848,7 @@ mod tests {
     /// the Holy Relic / Stonehewer Giant case.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_equipment() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "an equipment is put onto the battlefield this way, you may attach it to a creature you control",
         )
         .unwrap();
@@ -18844,7 +18890,7 @@ mod tests {
     /// CR 303.4f: Aura subtype mirrors the Equipment branch — same combinator.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_aura() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "an aura is put onto the battlefield this way, do something",
         )
         .unwrap();
@@ -18867,7 +18913,7 @@ mod tests {
     /// "if a creature wasn't destroyed this way" patterns.
     #[test]
     fn test_zone_changed_this_way_wasnt_negated() {
-        let (rest, (_filter, negated)) =
+        let (rest, (_filter, negated, _destination)) =
             parse_zone_changed_this_way_clause("a creature wasn't destroyed this way, do x")
                 .unwrap();
         assert_eq!(rest, ", do x");
@@ -18888,8 +18934,8 @@ mod tests {
             "countered",
         ] {
             let input = format!("a creature was {verb} this way, x");
-            let (rest, (_filter, negated)) = parse_zone_changed_this_way_clause(&input)
-                .unwrap_or_else(|e| {
+            let (rest, (_filter, negated, _destination)) =
+                parse_zone_changed_this_way_clause(&input).unwrap_or_else(|e| {
                     panic!("verb {verb} failed to parse: {e:?}");
                 });
             assert_eq!(rest, ", x", "verb {verb} produced wrong remainder");
@@ -19003,7 +19049,7 @@ mod tests {
     /// existential `ZoneChangedThisWay` (≥ 1).
     #[test]
     fn test_zone_changed_this_way_at_least_one_subtype() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "at least one angel card is milled this way, you gain 4 life",
         )
         .unwrap();
@@ -19026,7 +19072,7 @@ mod tests {
     /// type + `nonland` negated-type prefix + **plural verb** "are".
     #[test]
     fn test_zone_changed_this_way_one_or_more_nonland_cards_plural() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "one or more nonland cards are exiled this way, you draw a card",
         )
         .unwrap();
@@ -19047,7 +19093,7 @@ mod tests {
     /// **plural verb** "are milled".
     #[test]
     fn test_zone_changed_this_way_one_or_more_cards_plural_milled() {
-        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
             "one or more cards are milled this way, you gain 1 life",
         )
         .unwrap();

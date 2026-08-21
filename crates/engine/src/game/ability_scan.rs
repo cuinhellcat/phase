@@ -2888,7 +2888,12 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes {
             sibling: false,
             projected: true,
         },
-        AbilityCondition::ZoneChangedThisWay { filter } => {
+        // `destination` refines the same event-ledger read (the moved object's
+        // current zone) — no new axis beyond the `event: true` already set.
+        AbilityCondition::ZoneChangedThisWay {
+            filter,
+            destination: _,
+        } => {
             let mut acc = Axes {
                 event: true,
                 sibling: false,
