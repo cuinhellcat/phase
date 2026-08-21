@@ -1151,6 +1151,14 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_unlocks: Option<RoomUnlockState>,
 
+    /// CR 707.2 + CR 709.5b + CR 613.1a: the Room half data the winning
+    /// Layer-1a copy effect carried (`CopiableValues::room_halves`).
+    /// Layer-derived: set by `apply_copiable_values`, cleared by the Step-1
+    /// seed — so it expires with the copy effect. `room::effective_room_halves`
+    /// prefers it over the object's own printed halves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_room_halves: Option<crate::types::ability::RoomCopiableHalves>,
+
     /// CR 716.3: Class enchantment level. Present only on Class permanents.
     /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1451,6 +1459,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         assigns_no_combat_damage: _,
         case_state: _,
         room_unlocks: _,
+        copied_room_halves: _,
         class_level: _,
         cast_from_zone: _,
         cast_controller: _,
@@ -2344,6 +2353,7 @@ impl GameObject {
             assigns_no_combat_damage: false,
             case_state: None,
             room_unlocks: None,
+            copied_room_halves: None,
             class_level: None,
             cast_from_zone: None,
             cast_controller: None,

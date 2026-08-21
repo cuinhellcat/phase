@@ -2111,6 +2111,201 @@ fn a_room_cast_from_its_right_half_keeps_printed_name_order() {
     );
 }
 
+/// Build a battlefield Room with a stamped front-half marker static, entered
+/// UNCAST (both doors locked, CR 709.5d) so its own text contributes nothing.
+fn uncast_room_with_front_marker(
+    state: &mut GameState,
+    card: u64,
+    front: &str,
+    back: &str,
+) -> ObjectId {
+    let room = create_object(
+        state,
+        CardId(card),
+        PlayerId(0),
+        front.to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&room).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Room".to_string());
+    // The copiable snapshot reads BASE characteristics — mirror the types
+    // there so the source is a Room in its copiable form too.
+    obj.base_card_types = obj.card_types.clone();
+    let front_static = StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 });
+    obj.static_definitions.push(front_static.clone());
+    Arc::make_mut(&mut obj.base_static_definitions).push(front_static);
+    obj.back_face = Some(room_back_face(back));
+    obj.reset_for_battlefield_entry(1, 1);
+    room
+}
+
+/// CR 707.2 + CR 709.5 + CR 613.1a: an ordinary permanent under a copy effect
+/// of a Room takes the Room's COPIABLE form — both halves, door-gated. It has
+/// no unlocked designations of its own (designations are status, CR 709.5c),
+/// so it sits fully locked: no name, no functioning half text. Unlocking a
+/// door turns exactly that half on; copy expiry reverts everything.
+#[test]
+fn an_ordinary_permanent_copying_a_room_gains_its_door_gated_form() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 907, "Moldering Gym", "Weight Room");
+    let bear = create_object(
+        &mut state,
+        CardId(908),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&bear)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert_eq!(
+        state.objects[&bear].name, "",
+        "CR 709.5c + CR 709.5: the copy has no unlocked designations, so it has \
+         neither half's name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "CR 709.5: both the source's and the copy's halves are locked — no text functions"
+    );
+
+    // CR 709.5e: the copy is a Room permanent; its controller may pay the
+    // locked LEFT half's (copied) cost to unlock it.
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Moldering Gym",
+        "CR 709.5c: the unlocked left half contributes exactly its own (copied) name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        2,
+        "CR 709.5 + CR 707.2: the copied, now-unlocked front half's static functions"
+    );
+
+    // Copy expiry: the bear reverts wholesale; the lingering designation is
+    // harmless on a non-Room.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Plain Bear",
+        "copy expiry restores the recipient's own name"
+    );
+    assert_eq!(
+        crate::game::static_abilities::additional_land_drops(&state, PlayerId(0)),
+        0,
+        "copy expiry takes the copied half text with it"
+    );
+}
+
+/// CR 707.2 + CR 709.5c: a Room under a copy effect of ANOTHER Room keeps its
+/// own designations (status) but shows the COPIED halves' names through them
+/// — and reverts to its own halves when the copy expires.
+#[test]
+fn a_room_under_a_copy_effect_shows_the_copied_rooms_halves() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 909, "Bright Hall", "Dim Cellar");
+    let room = create_object(
+        &mut state,
+        CardId(910),
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&room).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Room".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.back_face = Some(room_back_face("Weight Room"));
+        obj.reset_for_battlefield_entry(1, 1);
+        // The front half was the cast half: its door entered unlocked.
+        obj.room_unlocks = Some(crate::game::game_object::RoomUnlockState {
+            left_unlocked: true,
+            right_unlocked: false,
+        });
+    }
+
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    let effect_id = state.add_transient_continuous_effect(
+        room,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: room },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall",
+        "CR 707.2 + CR 709.5c: the surviving left designation now shows the \
+         COPIED left half's name"
+    );
+
+    // CR 709.5e: unlock the right door — the copied right half's name joins.
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Bright Hall // Dim Cellar",
+        "CR 709.5: both designations show the copied halves in printed order"
+    );
+
+    // Copy expiry: designations persist (status), the OWN halves return.
+    state
+        .transient_continuous_effects
+        .retain(|e| e.id != effect_id);
+    crate::game::layers::mark_layers_full(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&room].name, "Moldering Gym // Weight Room",
+        "copy expiry restores the object's own halves under its surviving designations"
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
@@ -2136,11 +2331,14 @@ fn unlock_door_restricted_mana_pays_room_unlock_cost() {
         let obj = state.objects.get_mut(&room).unwrap();
         obj.card_types.subtypes.push("Room".to_string());
         obj.room_unlocks = Some(Default::default());
-        // CR 709.5e: left door's unlock cost is the object's mana cost ({R}).
+        // CR 709.5e: left door's unlock cost is the half's printed mana cost
+        // ({R}) — the half projection reads the BASE fields, as the card
+        // pipeline fills them.
         obj.mana_cost = ManaCost::Cost {
             shards: vec![crate::types::mana::ManaCostShard::Red],
             generic: 0,
         };
+        obj.base_mana_cost = obj.mana_cost.clone();
     }
 
     // Smoky Lounge's restricted {R}: only for casting Room spells OR unlocking
@@ -2410,12 +2608,14 @@ fn inquisitive_glimmer_reduces_room_unlock_cost() {
             let obj = state.objects.get_mut(&room).unwrap();
             obj.card_types.subtypes.push("Room".to_string());
             obj.room_unlocks = Some(Default::default());
-            // CR 709.5e: the left door's unlock cost is the object's mana
-            // cost — a flat {3} generic here.
+            // CR 709.5e: the left door's unlock cost is the half's printed
+            // mana cost — a flat {3} generic here, mirrored to BASE as the
+            // card pipeline fills it (the half projection reads base fields).
             obj.mana_cost = ManaCost::Cost {
                 shards: vec![],
                 generic: 3,
             };
+            obj.base_mana_cost = obj.mana_cost.clone();
         }
         if with_glimmer {
             let glimmer = create_object(

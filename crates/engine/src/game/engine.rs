@@ -794,20 +794,21 @@ fn handle_unlock_room_door(
                 "That door is already unlocked".to_string(),
             ));
         }
-        // CR 709.5e: the unlock cost is the locked HALF's mana cost. Doors are
-        // printed halves, not live/back slots — after the back half was cast
-        // (`modal_back_face`), the LIVE face is the right door and the left
-        // door's cost lives on `back_face`. `room::live_face_door` is the
-        // single orientation authority (same mapping as CR 709.5d entry).
-        if door == super::room::live_face_door(obj) {
-            obj.mana_cost.clone()
-        } else {
-            obj.back_face
+        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
+        // read from the EFFECTIVE halves (printed order) — the copied snapshot
+        // when a copy effect applies, else the object's own printed halves
+        // (whose orientation `room::own_room_halves` resolves through
+        // `live_face_door`, the same CR 709.5d mapping as before).
+        let halves = super::room::effective_room_halves(obj);
+        match door {
+            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
+            crate::game::game_object::RoomDoor::Right => halves
+                .right
                 .as_ref()
-                .map(|face| face.mana_cost.clone())
+                .map(|half| half.mana_cost.clone())
                 .ok_or_else(|| {
                     EngineError::ActionNotAllowed("Room has no second door face".to_string())
-                })?
+                })?,
         }
     };
 
@@ -20141,7 +20142,7 @@ mod stage2_injector_tests {
                 //   repair a `ResolveAllReady` latch, which `acting_player()` reports as
                 //   having no actor at all. The PRODUCER half stays 5 and the partition
                 //   stays 5/8/28.
-                "game/engine.rs:13137".to_string(),
+                "game/engine.rs:13138".to_string(),
             ],
             "the five production producers, NAMED: the CR 603.5 gate in `resolve_chain_body` \
              plus the two repeated-optional-payment drivers, the per-player acceptance cursor \

@@ -25483,6 +25483,28 @@ impl ReplacementDefinition {
 
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
+/// CR 709.5b + CR 707.2: one printed Room half's copiable identity — the name
+/// and mana cost the half contributes while unlocked (CR 709.5) and the cost
+/// its door demands to unlock (CR 709.5e).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomHalfIdentity {
+    pub name: String,
+    pub mana_cost: ManaCost,
+}
+
+/// CR 709.5 + CR 709.5b + CR 707.2: a Room's half data as a copiable value —
+/// both printed halves in PRINTED order (the right half is absent on a Room
+/// printed without a second half). CR 709.5 makes the unlocked-half behavior
+/// and which half a characteristic is in part of the copiable values; this
+/// carries the per-half identities so a copy can derive its door-gated name
+/// and door costs from the COPIED form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomCopiableHalves {
+    pub left: RoomHalfIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<RoomHalfIdentity>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopiableValues {
     pub name: String,
@@ -25501,6 +25523,12 @@ pub struct CopiableValues {
     pub trigger_definitions: Arc<Vec<TriggerDefinition>>,
     pub replacement_definitions: Arc<Vec<ReplacementDefinition>>,
     pub static_definitions: Arc<Vec<StaticDefinition>>,
+    /// CR 709.5 + CR 709.5b: present iff the copied object is a Room — the
+    /// per-half identities a copy needs to derive its door-gated name and
+    /// door costs. `None` for every non-Room source (and in pre-existing
+    /// serialized snapshots, via the serde default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_halves: Option<RoomCopiableHalves>,
 }
 
 /// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an

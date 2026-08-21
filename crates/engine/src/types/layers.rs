@@ -302,6 +302,7 @@ mod tests {
                     trigger_definitions: Default::default(),
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
+                    room_halves: None,
                 }),
                 display_source: crate::game::game_object::DisplaySource::Card,
                 printed_ref: None,

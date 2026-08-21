@@ -523,6 +523,16 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
         replacement_definitions: copiable_replacement_definitions(obj),
         static_definitions: Arc::clone(&obj.base_static_definitions),
+        // CR 709.5 + CR 709.5b: a Room's per-half identities are copiable —
+        // the door-stamped defs above carry both halves' TEXT, this carries
+        // both halves' names and costs. `None` for every non-Room source
+        // (the base types are this snapshot's own Room gate).
+        room_halves: obj
+            .base_card_types
+            .subtypes
+            .iter()
+            .any(|s| s == "Room")
+            .then(|| crate::game::room::own_room_halves(obj)),
     }
 }
 
@@ -632,6 +642,8 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
         replacement_definitions: Arc::new(result_face.replacements.clone()),
+        // A format-pool face is never a Room half pair.
+        room_halves: None,
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
@@ -697,6 +709,9 @@ pub fn apply_copiable_values(
         .collect();
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
     obj.static_definitions = Arc::clone(&values.static_definitions).into();
+    // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
+    // the Step-1 seed clears it, so it expires with this copy effect.
+    obj.copied_room_halves = values.room_halves.clone();
 }
 
 /// Materialize copiable values onto a newly constructed object (for example a

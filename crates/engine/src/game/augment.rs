@@ -395,6 +395,8 @@ fn merged_copiable_values(
         trigger_definitions: Arc::new(triggers),
         replacement_definitions: Arc::new(replacements),
         static_definitions: Arc::new(statics),
+        // CR 702.140: an augment merge is a Host+Augment creature — no Room halves.
+        room_halves: None,
     };
 
     Some((

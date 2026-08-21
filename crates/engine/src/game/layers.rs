@@ -2096,12 +2096,11 @@ fn derive_suspected_abilities(obj: &mut crate::game::game_object::GameObject) {
 /// separable at all).
 fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameObject) {
     obj.name = obj.base_name.clone();
-    // CR 709.5: a Room permanent's name is door-gated — a locked half doesn't
-    // have its name. Overrides the base seed on the battlefield only; the
-    // CR 708.2 face-down blanking below still wins where it applies.
-    if let Some(room_name) = crate::game::room::door_gated_battlefield_name(obj) {
-        obj.name = room_name;
-    }
+    // CR 707.2 + CR 613.1a: the copied Room half data is layer-derived — it
+    // survives only as long as a Layer-1a copy effect keeps re-applying it.
+    // (The door-gated Room NAME is derived at layer-1 exit, in
+    // `derive_room_battlefield_names`, from the post-copy effective form.)
+    obj.copied_room_halves = None;
     obj.power = obj.base_power;
     obj.toughness = obj.base_toughness;
     // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
@@ -2378,6 +2377,12 @@ pub fn evaluate_layers(state: &mut GameState) {
             seed_live_characteristics_from_base(obj);
         }
     }
+
+    // CR 709.5 + CR 707.2 + CR 613.1a: derive each battlefield Room's
+    // door-gated NAME from its EFFECTIVE, post-layer-1 form — after copies, so
+    // a copy shows the COPIED halves through its own designations. Placed
+    // after the 1b reseed so the face-down profile (CR 708.2a, no name) wins.
+    derive_room_battlefield_names(state, &bf_ids);
 
     // Both producers say the same thing: layer 1 can turn a non-generator into a
     // continuous static source mid-pass, and the top-of-pass index was built from
@@ -5116,6 +5121,25 @@ fn copy_sublayer_effect_id(
 /// does not promise: the guarantee is "no DETECTED perturbation", not "no
 /// population read is live". The residual blind spots are enumerated on
 /// `population_probe_blinded_by_entrant_characteristic_change`.
+/// CR 709.5 + CR 707.2 + CR 613.1a: derive each battlefield Room's door-gated
+/// NAME from its effective (post-Layer-1) form. A locked half doesn't have its
+/// name; the halves come from the copied snapshot when a copy applied, else
+/// from the object's own printed form (`room::door_gated_battlefield_name`).
+/// Face-down objects keep their CR 708.2a profile — no name to derive.
+fn derive_room_battlefield_names(state: &mut GameState, ids: &[ObjectId]) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(id) else {
+            continue;
+        };
+        if obj.face_down {
+            continue;
+        }
+        if let Some(room_name) = crate::game::room::door_gated_battlefield_name(obj) {
+            obj.name = room_name;
+        }
+    }
+}
+
 fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncrementalFlush) {
     let PreparedIncrementalFlush {
         recipient_ids,
@@ -5155,6 +5179,9 @@ fn apply_layers_incremental(state: &mut GameState, prepared: PreparedIncremental
     }
 
     let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
+    // CR 709.5 + CR 613.1a: same layer-1 exit derivation as the full pass —
+    // an entrant that is (or copies) a Room gets its door-gated name here.
+    derive_room_battlefield_names(state, &recipient_vec);
     let stickers_changed =
         crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec);
     // CR 613.2a + CR 613.2c: deliberately no copy disjunct on this rebuild, unlike
@@ -20098,6 +20125,7 @@ mod tests {
             trigger_definitions: Default::default(),
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
+            room_halves: None,
         };
         let _ = state.add_transient_continuous_effect(
             source,
@@ -22595,6 +22623,7 @@ mod tests {
                     trigger_definitions: Arc::new(Vec::new()),
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
+                    room_halves: None,
                 }),
                 display_source: Default::default(),
                 printed_ref: None,
