@@ -14992,6 +14992,18 @@ pub enum Effect {
     Manifest {
         target: TargetFilter,
         count: QuantityExpr,
+        /// CR 701.40a: The objects to manifest. `None` (serde default) is the
+        /// library-top source — the resolver manifests the top `count` cards
+        /// of `target`'s library one at a time (CR 701.40e). `Some(filter)`
+        /// names explicit objects already chosen upstream (Scroll of Fate's
+        /// "manifest a card from your hand"): the objects are resolved from
+        /// the resolving ability's `targets` via `effect_object_targets`,
+        /// which a preceding `Effect::ChooseFromZone` populated. Kept off
+        /// `target_filter()` so manifest stays a non-targeted keyword action
+        /// (the object selection is the parent `ChooseFromZone`'s
+        /// responsibility). Mirrors `Cloak.object_source`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        object_source: Option<TargetFilter>,
         /// CR 708.2a: Effect-specified face-down characteristics override
         /// ("They're 2/2 Cyberman artifact creatures."). `None` = the vanilla
         /// 2/2 manifest default (CR 701.40a). The put-clause seeds
