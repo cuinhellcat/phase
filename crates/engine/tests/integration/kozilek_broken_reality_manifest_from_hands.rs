@@ -118,12 +118,16 @@ fn kozilek_cast_trigger_manifests_two_from_each_targeted_players_hand() {
     // cards, in APNAP order.
     let mut p0_chose = false;
     let mut p1_chose = false;
+    // CR 101.4: record the order the prompts arrive in — the active player
+    // (P0) must be asked first.
+    let mut prompt_order: Vec<engine::types::player::PlayerId> = Vec::new();
     for _ in 0..24 {
         if p0_chose && p1_chose {
             break;
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                prompt_order.push(player);
                 if player == P0 {
                     // DISCRIMINATOR — P0's prompt offers only P0's hand.
                     assert!(
@@ -170,6 +174,14 @@ fn kozilek_cast_trigger_manifests_two_from_each_targeted_players_hand() {
         p0_chose && p1_chose,
         "both targeted players must get their own hand choice, got {:?}",
         runner.state().waiting_for
+    );
+    // DISCRIMINATOR — CR 101.4: simultaneous choices are made in APNAP order,
+    // so the active player is prompted FIRST. Branching on `player` alone
+    // would accept either order; this pins it.
+    assert_eq!(
+        prompt_order,
+        vec![P0, P1],
+        "the per-player hand choices must arrive in APNAP order (active player first)"
     );
 
     // Let the manifest + draw tail finish.

@@ -11988,10 +11988,81 @@ fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
         .execute
         .as_ref()
         .expect("the cast trigger must carry a body");
-    let debug = format!("{execute:?}");
+
+    // CR 115.1 + CR 101.4 + CR 608.2c: the head is the per-player hand
+    // choose — two cards, from HAND, iterated over the chosen player TARGETS,
+    // each pick made by that player (not the caster).
     assert!(
-        !debug.contains("Unimplemented"),
-        "the per-player from-hand manifest must lower to a real chain, got: {debug}"
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChooseFromZone {
+                count: 2,
+                zone: Zone::Hand,
+                zone_owner: ZoneOwner::EachTargetedPlayer,
+                chooser: Chooser::OwningPlayer,
+                up_to: false,
+                ..
+            }
+        ),
+        "expected the per-player from-hand choose, got: {:?}",
+        execute.effect
+    );
+    // CR 115.1d: both "up to two target players" slots.
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        "the up-to-two player target slots must survive onto the clause"
+    );
+
+    // CR 701.40a: the sub-chain manifests the accumulated picks.
+    let manifest = execute
+        .sub_ability
+        .as_ref()
+        .expect("the choose must chain a Manifest sub-ability");
+    assert!(
+        matches!(
+            manifest.effect.as_ref(),
+            Effect::Manifest {
+                target: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 2 },
+                object_source: Some(TargetFilter::TrackedSet { .. }),
+                enters_under: None,
+                ..
+            }
+        ),
+        "the sub-ability must manifest the chain's tracked picks under their \
+         own owners' control, got: {:?}",
+        manifest.effect
+    );
+
+    // CR 608.2c: the pre-existing "for each card manifested this way, you
+    // draw a card" rider still rides behind the manifest, counting the
+    // chain's tracked set.
+    let draw = manifest
+        .sub_ability
+        .as_ref()
+        .expect("the draw rider must survive behind the manifest");
+    assert!(
+        matches!(
+            draw.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "expected the one-card draw rider, got: {:?}",
+        draw.effect
+    );
+    assert!(
+        matches!(
+            draw.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            })
+        ),
+        "the rider must repeat once per tracked (manifested) card, got: {:?}",
+        draw.repeat_for
     );
 }
 
