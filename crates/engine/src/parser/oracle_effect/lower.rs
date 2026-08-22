@@ -2000,6 +2000,8 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
         return;
     };
 
+    // CR 122.6: counters given as an object enters the battlefield use the
+    // same entry-counter representation as counters put on a battlefield object.
     // The parent is itself a battlefield-entry effect, so both legacy
     // destination-agnostic conditions and explicit battlefield-arrival
     // conditions describe this typed entry-counter slot. Other named
