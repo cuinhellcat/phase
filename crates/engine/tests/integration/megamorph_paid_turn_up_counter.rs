@@ -12,10 +12,18 @@
 //! alternative (CR 708.4) is the only castable route.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+    ReplacementDefinition, TargetFilter, TurnUpCostSource,
+};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ManaAbilityResume, PendingCostMoveResume};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::EtbTapState;
 use engine::types::zones::Zone;
 
 struct FlipOutcome {
@@ -269,5 +277,151 @@ fn an_effect_driven_turn_up_puts_no_counter() {
             .unwrap_or(0),
         0,
         "CR 702.37b: no megamorph cost was paid, so no counter — prompts: {prompts:?}"
+    );
+}
+
+/// CR 702.37b + CR 605.3b: the SELECTED cost source survives a PAUSED
+/// payment. A mana source whose own cost self-exiles, under two competing
+/// exile→graveyard replacements, pauses the auto-tap (CR 616.1); the typed
+/// continuation carries `cost_source: Megamorph` exactly like the locked
+/// cost, and the resumed flip still places the counter.
+#[test]
+fn a_paused_megamorph_payment_still_places_the_counter() {
+    fn redirect_exile_to_graveyard() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Exile)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Graveyard,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let id = scenario
+        .add_creature_to_hand_from_oracle(P0, "Hidden Test Creature", 3, 3, "Megamorph {R}")
+        .id();
+    let _source = scenario
+        .add_creature(P0, "Self-Exiling Mana Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            }),
+        )
+        .id();
+    for name in ["First Pause Replacement", "Second Pause Replacement"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_exile_to_graveyard());
+    }
+    let mut runner = scenario.build();
+
+    let mut events = Vec::new();
+    engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
+        .expect("the card is played face down");
+
+    let paused = runner
+        .act(GameAction::TurnFaceUp {
+            object_id: id,
+            x: 0,
+        })
+        .expect("the source's own cost pauses the payment rather than failing it");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the mana source's exile replacement owns the window, got {:?}",
+        paused.waiting_for
+    );
+    // The typed continuation carries the SELECTED source, locked at initiation.
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume.as_ref(),
+            Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. })
+                if matches!(
+                    &pending.resume,
+                    ManaAbilityResume::TurnFaceUp {
+                        cost_source: TurnUpCostSource::Megamorph,
+                        ..
+                    }
+                )
+        ),
+        "the paused continuation must carry the megamorph classification"
+    );
+    assert!(runner.state().objects[&id].face_down);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice is answered");
+    let mut prompts = Vec::new();
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                if runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            other => {
+                prompts.push(format!("PROMPT: {}", other.variant_name()));
+                break;
+            }
+        }
+    }
+
+    let obj = &runner.state().objects[&id];
+    assert!(
+        !obj.face_down,
+        "the resumed payment committed the flip — {prompts:?}"
+    );
+    assert_eq!(
+        obj.counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "CR 702.37b: the carried megamorph classification places the counter \
+         after the paused payment — prompts: {prompts:?}"
     );
 }
