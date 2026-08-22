@@ -148,7 +148,7 @@ fn scroll_of_fate_activated_ability_manifests_a_chosen_noncreature_hand_card() {
     );
     assert!(
         a.color.is_empty(),
-        "a manifested card is colorless (CR 708.2a), got {:?}",
+        "a manifested card is colorless (CR 701.40a + CR 202.2b), got {:?}",
         a.color
     );
     assert!(
