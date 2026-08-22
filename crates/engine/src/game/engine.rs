@@ -19360,7 +19360,7 @@ mod stage2_injector_tests {
                 // production producers, and each remains in its named function.
                 "game/effects/mod.rs:7356".to_string(),
                 "game/effects/mod.rs:7433".to_string(),
-                "game/effects/mod.rs:11260".to_string(),
+                "game/effects/mod.rs:11273".to_string(),
                 // UNMOVED across the rebase, and that is itself evidence the SET did not
                 // move: a census that had gained or lost a producer would not leave this
                 // entry both byte-identical AND at the same coordinate.

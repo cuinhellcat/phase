@@ -11965,6 +11965,37 @@ fn effect_manifest_a_card_from_your_hand_lowers_to_choose_from_zone_then_manifes
 }
 
 #[test]
+fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
+    // CR 701.40a: "up to two target players each manifest two cards from
+    // their hands" (Kozilek, the Broken Reality). The subject machinery
+    // already captures the up-to-two player multi-target and the
+    // "For each card manifested this way, you draw a card" rider
+    // (repeat_for: TrackedSetSize); only the per-player from-hand manifest
+    // predicate must lower to a real effect chain. Reverting the predicate
+    // arm drops it to Effect::Unimplemented → this fails.
+    let parsed = parse_oracle_text(
+        "When you cast this spell, up to two target players each manifest two cards from their hands. For each card manifested this way, you draw a card.",
+        "Kozilek, the Broken Reality",
+        &[],
+        &["Creature".to_string()],
+        &["Eldrazi".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("the cast trigger must parse");
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("the cast trigger must carry a body");
+    let debug = format!("{execute:?}");
+    assert!(
+        !debug.contains("Unimplemented"),
+        "the per-player from-hand manifest must lower to a real chain, got: {debug}"
+    );
+}
+
+#[test]
 fn turn_face_up_then_conditional_put_keeps_follow_up_clause() {
     // CR 406.3 + CR 701.20a: Clone Shell / Summoner's Egg dies-trigger effect. The
     // "turn the exiled card face up" clause must NOT swallow the trailing

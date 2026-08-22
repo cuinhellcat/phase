@@ -46,6 +46,12 @@ pub enum Chooser {
     /// An opponent of the controller makes the choice (CR 608.2e).
     /// In 2-player, the single opponent. In multiplayer, controller chooses which opponent.
     Opponent,
+    /// CR 608.2c + CR 101.4: The player whose zone is being scanned makes the
+    /// choice — the per-iteration owner under an `Each*` zone owner (each
+    /// targeted player picks from their OWN hand, hidden from everyone else:
+    /// Kozilek, the Broken Reality), or the single resolved zone owner
+    /// otherwise.
+    OwningPlayer,
 }
 
 #[cfg(test)]
@@ -208,6 +214,13 @@ pub enum ZoneOwner {
     /// Kaya, Spirits' Justice's −2 ("For each other player, exile up to one
     /// target creature that player controls").
     EachOpponent,
+    /// CR 101.4 + CR 115.1 + CR 608.2c: Every player chosen as a `Player`
+    /// TARGET of the resolving ability owns a referenced zone, iterated in
+    /// APNAP order — the targeted-set leaf of the per-player iteration axis,
+    /// same accumulate-into-tracked-set machinery as [`ZoneOwner::EachPlayer`].
+    /// Building block for "up to two target players each manifest two cards
+    /// from their hands" (Kozilek, the Broken Reality).
+    EachTargetedPlayer,
     /// CR 400.1 + CR 607.2a: The referenced zone is scanned across ALL owners —
     /// ownership imposes no restriction, and the effect's `TargetFilter`
     /// performs every bit of scoping. Used when the candidate pool's membership
@@ -16823,6 +16836,17 @@ impl Effect {
 
     pub fn target_filter(&self) -> Option<&TargetFilter> {
         match self {
+            // CR 115.1 + CR 601.2c: a `ChooseFromZone` is normally a resolution
+            // CHOICE with no stack-declared target — EXCEPT the
+            // `EachTargetedPlayer` iteration, whose iterated set IS the
+            // ability's chosen player targets ("up to two target players each
+            // manifest two cards from their hands"). That form must declare the
+            // player slots so the targets exist to iterate.
+            Effect::ChooseFromZone {
+                zone_owner: ZoneOwner::EachTargetedPlayer,
+                ..
+            } => Some(&TargetFilter::Player),
+            Effect::ChooseFromZone { .. } => None,
             // --- Effects with a `target: TargetFilter` field ---
             Effect::DealDamage { target, .. }
             // CR 115.1 + CR 725.1: "target opponent becomes the monarch". The
@@ -17221,7 +17245,6 @@ impl Effect {
             // enters, choose a creature" is an as-enters replacement CHOICE picked
             // via `WaitingFor::CopyTargetChoice`, never a stack-declared target.
             | Effect::ChoosePermanent { .. }
-            | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::EachPlayerCopyChosen { .. }
