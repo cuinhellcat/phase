@@ -1,127 +1,117 @@
-//! Discriminating runtime regression for **Scroll of Fate** —
+//! Card-level regression for **Scroll of Fate** —
 //! "{T}: Manifest a card from your hand."
 //!
-//! Unlike "manifest the top card of your library" (CR 701.40a library-top
-//! source), Scroll of Fate manifests a card the controller *chooses from
-//! hand* — the twin of Vannifar's supported "Cloak a card from your hand"
-//! (see `vannifar_cloak_from_hand.rs`). It lowers to a
-//! `ChooseFromZone { zone: Hand }` parent whose `Manifest` sub-ability turns
-//! the CHOSEN card face down — reading the pick the choose forwarded onto the
-//! resolving ability's `targets` (CR 608.2c), never the top of the library.
-//!
-//! This drives the SAME production path the runtime uses:
-//! `resolve_ability_chain` -> `WaitingFor::ChooseFromZoneChoice` ->
-//! `engine::game::apply(SelectCards)` -> `drain_pending_continuation` ->
-//! `manifest::resolve`.
+//! Drives the REAL registered ability end to end (maintainer round 1: no
+//! synthetic `parse_effect_chain` + generic resolver): the artifact is built
+//! from its printed Oracle text, its activated ability is activated through
+//! `GameAction::ActivateAbility`, the `{T}` cost is paid (CR 602.2b), the
+//! ability resolves off the stack, and the interactive
+//! `WaitingFor::ChooseFromZoneChoice` is answered through
+//! `GameAction::SelectCards` — the exact path the client takes.
 //!
 //! DISCRIMINATORS (anti-hollow-win):
-//! - hand card A is manifested (face-down 2/2, leaving the hand); the
-//!   distinguishable library-top card B is UNTOUCHED. A library-top "fix"
-//!   would manifest B and leave A in hand — the assertions flip.
-//! - the manifested card has NO ward: a lazy reuse of the cloak profile
-//!   (CR 701.58a grants ward {2}) instead of the manifest profile
-//!   (CR 701.40a: vanilla 2/2) fails the keyword assertion.
+//! - the chosen hand card is a NONCREATURE (a plain sorcery): CR 701.40a must
+//!   still convert it to a face-down vanilla 2/2 CREATURE. Omitting the
+//!   noncreature conversion fails the full-profile assertions below.
+//! - the complete manifest profile is pinned: empty name, exactly the
+//!   `[Creature]` core type (the printed Sorcery type is hidden), no
+//!   subtypes/supertypes, 2/2, `ManaCost::NoCost`, and NO keywords — a lazy
+//!   reuse of cloak's `cloaked_2_2` (ward {2}, CR 701.58a) fails here.
+//! - the distinguishable library-top card B is UNTOUCHED: a hollow
+//!   library-top fix would manifest B and leave A in hand.
 //!
-//! CR 701.40a: Manifest — face-down 2/2 creature, turn face up any time for
-//! its mana cost if it's a creature card.
+//! CR 701.40a: Manifest — face-down 2/2 creature with no text, no name, no
+//! subtypes, and no mana cost.
 //! CR 608.2c: the Manifest sub-ability reads the chosen card the choose
 //! forwarded.
 
-use engine::game::ability_utils::build_resolved_from_def;
-use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
-use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, Effect, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::keywords::Keyword;
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 #[test]
-fn scroll_of_fate_manifests_chosen_hand_card_leaving_library_top_untouched() {
+fn scroll_of_fate_activated_ability_manifests_a_chosen_noncreature_hand_card() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // The card the controller will choose from hand.
+    // NONCREATURE hand card: a plain sorcery with no creature side.
     let hand_a = scenario
-        .add_creature_to_hand(P0, "Hand Creature A", 3, 3)
+        .add_spell_to_hand_from_oracle(P0, "Plain Sorcery A", false, "Draw a card.")
         .id();
     // A distinguishable card sitting on top of P0's library — the library-top
     // source a hollow (library-top) fix would wrongly manifest instead.
     let library_b = scenario.add_card_to_library_top(P0, "Library Card B");
-    // The permanent that owns the ability (source of the manifest).
-    let source = scenario.add_creature(P0, "Manifest Source", 1, 1).id();
+    // The REAL card: battlefield artifact with its registered activated
+    // ability parsed from the printed Oracle text.
+    let scroll = scenario
+        .add_artifact_from_oracle(P0, "Scroll of Fate", "{T}: Manifest a card from your hand.")
+        .id();
 
     let mut runner = scenario.build();
 
-    // Parser path the real card uses: the ChooseFromZone{Hand} + Manifest
-    // sub-chain.
-    let def = parse_effect_chain("Manifest a card from your hand", AbilityKind::Spell);
+    // PRODUCTION STEP: activate the registered ability — index 0 is the
+    // card's only ability. A parse regression (Unimplemented) makes the
+    // activation illegal and this expect panics.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: scroll,
+            ability_index: 0,
+        })
+        .expect("Scroll of Fate's registered ability must be activatable");
+
+    // CR 602.2b: the {T} activation cost is paid on activation, before
+    // resolution.
     assert!(
-        matches!(
-            def.effect.as_ref(),
-            Effect::ChooseFromZone {
-                zone: Zone::Hand,
-                ..
-            }
-        ),
-        "from-hand manifest must lower to ChooseFromZone{{Hand}}, got {:?}",
-        def.effect
-    );
-    let sub = def
-        .sub_ability
-        .as_ref()
-        .expect("from-hand manifest chains a Manifest sub-ability");
-    assert!(
-        matches!(
-            sub.effect.as_ref(),
-            Effect::Manifest {
-                object_source: Some(TargetFilter::ParentTarget),
-                ..
-            }
-        ),
-        "sub-ability must manifest the chosen object (object_source: Some(ParentTarget)), got {:?}",
-        sub.effect
+        runner.state().objects[&scroll].tapped,
+        "activating {{T}}: … must tap Scroll of Fate"
     );
 
-    // Resolve through the production resolver — raises the interactive choose.
-    let ability = build_resolved_from_def(&def, source, P0);
-    let mut events = Vec::new();
-    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
-        .expect("ChooseFromZone-then-Manifest chain must resolve to a prompt");
-
-    // PRODUCTION STEP: the choose offers the hand card (A), never the library
-    // card (B). Reverting the parse yields Unimplemented — no prompt — and this
-    // WaitingFor match panics.
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
-            assert_eq!(*player, P0, "the controller makes the choose");
-            assert!(
-                cards.contains(&hand_a),
-                "the hand card must be offered, got {cards:?}"
-            );
-            assert!(
-                !cards.contains(&library_b),
-                "the library-top card must NOT be a from-hand candidate"
-            );
+    // Let the ability resolve off the stack (CR 608): pass priority until the
+    // resolution raises the interactive choose.
+    let mut reached_choice = false;
+    for _ in 0..16 {
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                // PRODUCTION STEP: the choose offers the hand card (A), never
+                // the library card (B).
+                assert_eq!(*player, P0, "the controller makes the choose");
+                assert!(
+                    cards.contains(&hand_a),
+                    "the hand card must be offered, got {cards:?}"
+                );
+                assert!(
+                    !cards.contains(&library_b),
+                    "the library-top card must NOT be a from-hand candidate"
+                );
+                reached_choice = true;
+                break;
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward the ability's resolution");
+            }
         }
-        other => panic!(
-            "\"Manifest a card from your hand\" must raise ChooseFromZoneChoice, got {other:?}"
-        ),
     }
+    assert!(
+        reached_choice,
+        "resolving Scroll of Fate's ability must raise ChooseFromZoneChoice, got {:?}",
+        runner.state().waiting_for
+    );
 
-    // PRODUCTION STEP: answer with A through the same handler GameRunner uses.
-    engine::game::apply(
-        runner.state_mut(),
-        P0,
-        GameAction::SelectCards {
+    // PRODUCTION STEP: answer with A through the same handler the client uses.
+    runner
+        .act(GameAction::SelectCards {
             cards: vec![hand_a],
-        },
-    )
-    .expect("selecting the offered hand card must be a legal answer");
+        })
+        .expect("selecting the offered hand card must be a legal answer");
 
-    // DISCRIMINATOR — the CHOSEN hand card A is manifested.
+    // DISCRIMINATOR — the CHOSEN noncreature hand card A is manifested with
+    // the COMPLETE CR 701.40a profile.
     let a = &runner.state().objects[&hand_a];
     assert_eq!(
         a.zone,
@@ -129,15 +119,30 @@ fn scroll_of_fate_manifests_chosen_hand_card_leaving_library_top_untouched() {
         "A must be manifested onto the battlefield"
     );
     assert!(a.face_down, "A must be face down");
+    assert_eq!(a.name, "", "a face-down card has no name (CR 701.40a)");
+    assert_eq!(
+        a.card_types.core_types,
+        vec![CoreType::Creature],
+        "the face-down body is exactly a Creature — the printed Sorcery type \
+         is hidden (CR 708.2a)"
+    );
+    assert!(
+        a.card_types.supertypes.is_empty() && a.card_types.subtypes.is_empty(),
+        "a face-down card has no super-/subtypes (CR 701.40a), got {:?}",
+        a.card_types
+    );
     assert_eq!(a.power, Some(2), "manifested A is a 2/2");
     assert_eq!(a.toughness, Some(2), "manifested A is a 2/2");
-    // DISCRIMINATOR — manifest is NOT cloak: the CR 701.40a profile grants no
-    // ward. A lazy reuse of `cloaked_2_2` (CR 701.58a) fails here.
+    assert_eq!(
+        a.mana_cost,
+        ManaCost::NoCost,
+        "a face-down card has no mana cost (CR 701.40a)"
+    );
+    // DISCRIMINATOR — manifest is NOT cloak: no keywords at all, in
+    // particular no ward {2} (CR 701.58a).
     assert!(
-        !a.keywords
-            .iter()
-            .any(|keyword| matches!(keyword, Keyword::Ward(_))),
-        "a manifested card must NOT have ward (that is cloak, CR 701.58a), got {:?}",
+        a.keywords.is_empty(),
+        "a manifested card has no abilities/keywords (CR 701.40a), got {:?}",
         a.keywords
     );
 
@@ -154,8 +159,7 @@ fn scroll_of_fate_manifests_chosen_hand_card_leaving_library_top_untouched() {
     );
 
     // DISCRIMINATOR — the library-top card B is UNTOUCHED (still face up,
-    // still on top of the library). A hollow library-top fix would have
-    // manifested B here.
+    // still on top of the library).
     let b = &runner.state().objects[&library_b];
     assert_eq!(b.zone, Zone::Library, "B must stay in the library");
     assert!(!b.face_down, "B must remain face up");

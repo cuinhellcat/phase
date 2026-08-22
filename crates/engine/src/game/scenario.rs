@@ -703,6 +703,41 @@ impl GameScenario {
         builder
     }
 
+    /// CR 301.1: Add an artifact to the battlefield with abilities parsed from
+    /// Oracle text. Mirrors [`Self::add_enchantment_from_oracle`]; needed when
+    /// an artifact's own registered activated ability (not a cast) is under
+    /// test — e.g. Scroll of Fate's "{T}: Manifest a card from your hand."
+    pub fn add_artifact_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let ts = self.state.next_timestamp();
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        obj.timestamp = ts;
+        // A pre-existing permanent (entered on a prior turn), matching the
+        // enchantment/land builders (CR 302.6 gates only creatures).
+        obj.summoning_sick = false;
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
     /// CR 306.1 + CR 306.5b: Add a planeswalker to the battlefield with its
     /// loyalty abilities parsed from Oracle text and `loyalty` loyalty counters
     /// already on it.
