@@ -926,7 +926,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             return (
                 Some(AbilityCondition::ZoneChangedThisWay {
                     filter,
-                    destination: None,
+                    destination: Some(Zone::Battlefield),
                 }),
                 text[offset..].to_string(),
             );
@@ -7178,7 +7178,7 @@ fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
     let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(lower)
         .or_else(|_| {
             parse_you_put_onto_battlefield_this_way_clause(lower)
-                .map(|(rest, (filter, negated))| (rest, (filter, negated, None)))
+                .map(|(rest, (filter, negated))| (rest, (filter, negated, Some(Zone::Battlefield))))
         })
         .ok()?;
     if !rest.trim().is_empty() {
@@ -7647,7 +7647,7 @@ mod tests {
         assert_eq!(body, "you gain 4 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Artifact, got {cond:?}");
@@ -7666,7 +7666,7 @@ mod tests {
         assert_eq!(body, "you gain 2 life");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
-            destination: None,
+            destination: Some(Zone::Hand),
         }) = cond
         else {
             panic!("expected ZoneChangedThisWay Town, got {cond:?}");

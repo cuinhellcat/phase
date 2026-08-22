@@ -9167,10 +9167,13 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// so adding a new tense or verb is a single `tag` arm, not an O(N!)
 /// permutation expansion.
 ///
-/// Returns `(remainder, type_filter)` where `remainder` is the input after
-/// the consumed " this way" suffix (caller is responsible for stripping any
-/// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
-/// is exposed via `negated`.
+/// Returns `(remainder, (type_filter, negated, destination))`, where
+/// `remainder` is the input after the consumed " this way" suffix (caller is
+/// responsible for stripping any trailing punctuation like ", " or ".").
+/// `destination` is `Some(zone)` for wording that names an arrival zone
+/// ("enters", "put onto the battlefield", "dies", or "put into a graveyard")
+/// and `None` for cause-bound verbs. On `wasn't`/`was not` the negation is
+/// exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
@@ -9252,7 +9255,7 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         alt((tag::<_, _, OracleError<'_>>("enters"), tag("enter"))).parse(after_filter)
     {
         let (rest, _) = tag(" this way").parse(rest)?;
-        return Ok((rest, (filter, false, None)));
+        return Ok((rest, (filter, false, Some(Zone::Battlefield))));
     }
 
     // CR 700.4: "dies this way" — present-tense and DESTINATION-BOUND: dying
@@ -9294,11 +9297,11 @@ pub fn parse_zone_changed_this_way_clause_scoped(
     // offered; the non-entry zone-change verbs are withheld.
     let (rest, destination) = match scope {
         ThisWayVerbScope::AnyZoneChange => alt((
-            // CR 400.7: cause-bound zone-change verbs — the CAUSE names them,
-            // so a CR 614.6 redirect does not defeat the clause. No
-            // destination binding.
+            // CR 608.2c + CR 614.6: "put onto the battlefield" names the
+            // arrival, so a replacement that redirects the object elsewhere
+            // defeats the clause.
             value(
-                None,
+                Some(Zone::Battlefield),
                 tag::<_, _, OracleError<'_>>("put onto the battlefield"),
             ),
             value(None, tag("destroyed")),
@@ -9319,7 +9322,7 @@ pub fn parse_zone_changed_this_way_clause_scoped(
         ))
         .parse(rest)?,
         ThisWayVerbScope::BattlefieldEntry => value(
-            None,
+            Some(Zone::Battlefield),
             tag::<_, _, OracleError<'_>>("put onto the battlefield"),
         )
         .parse(rest)?,
@@ -9822,7 +9825,7 @@ pub fn parse_you_put_into_hand_this_way_condition(
         rest,
         AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Hand),
         },
     ))
 }
@@ -18809,12 +18812,13 @@ mod tests {
     /// baseline before extending to present tense / multi-word verbs.
     #[test]
     fn test_zone_changed_this_way_was_destroyed_top_level_type() {
-        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an enchantment was destroyed this way, you lose 2 life",
         )
         .unwrap();
         assert_eq!(rest, ", you lose 2 life");
         assert!(!negated);
+        assert_eq!(destination, None);
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert_eq!(type_filters, vec![TypeFilter::Enchantment]);
@@ -18827,12 +18831,13 @@ mod tests {
     /// Reborn Avenger's Hero rider after graveyard reanimation.
     #[test]
     fn test_zone_changed_this_way_hero_enters() {
-        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "a hero enters this way, it enters with an additional +1/+1 counter on it",
         )
         .unwrap();
         assert_eq!(rest, ", it enters with an additional +1/+1 counter on it");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(type_filters.iter().any(
@@ -18848,12 +18853,13 @@ mod tests {
     /// the Holy Relic / Stonehewer Giant case.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_equipment() {
-        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an equipment is put onto the battlefield this way, you may attach it to a creature you control",
         )
         .unwrap();
         assert_eq!(rest, ", you may attach it to a creature you control");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(type_filters.iter().any(
@@ -18890,12 +18896,13 @@ mod tests {
     /// CR 303.4f: Aura subtype mirrors the Equipment branch — same combinator.
     #[test]
     fn test_zone_changed_this_way_is_put_onto_battlefield_aura() {
-        let (rest, (filter, negated, _destination)) = parse_zone_changed_this_way_clause(
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
             "an aura is put onto the battlefield this way, do something",
         )
         .unwrap();
         assert_eq!(rest, ", do something");
         assert!(!negated);
+        assert_eq!(destination, Some(Zone::Battlefield));
         match filter {
             TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
                 assert!(
@@ -18918,6 +18925,25 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, ", do x");
         assert!(negated);
+    }
+
+    /// CR 700.4 + CR 614.6: arrival words bind the rider to the resulting
+    /// zone, while cause verbs intentionally remain destination-agnostic.
+    #[test]
+    fn test_zone_changed_this_way_destination_bound_verbs_and_anaphor() {
+        let (rest, (_filter, negated, destination)) =
+            parse_zone_changed_this_way_clause("that creature dies this way, draw a card").unwrap();
+        assert_eq!(rest, ", draw a card");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Graveyard));
+
+        let (rest, (_filter, negated, destination)) = parse_zone_changed_this_way_clause(
+            "that artifact is put into a graveyard this way, draw a card",
+        )
+        .unwrap();
+        assert_eq!(rest, ", draw a card");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Graveyard));
     }
 
     /// Every imperative verb in the `alt` chain must round-trip; this guards

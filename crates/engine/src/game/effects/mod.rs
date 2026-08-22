@@ -14890,6 +14890,39 @@ mod tests {
         .condition(AbilityCondition::WhenYouDo)
     }
 
+    /// CR 608.2c + CR 614.6: a destination-bound "this way" rider must not
+    /// see an object whose move was redirected away from its named arrival.
+    #[test]
+    fn zone_changed_this_way_requires_named_destination() {
+        let mut state = GameState::new_two_player(42);
+        let object = reflexive_test_creature(&mut state, PlayerId(0), "Test Creature");
+        state.last_zone_changed_ids = vec![object];
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::ZoneChangedThisWay {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            destination: Some(Zone::Graveyard),
+        };
+
+        assert!(
+            !evaluate_condition(&condition, &state, &ability),
+            "a battlefield object does not satisfy a graveyard-bound rider"
+        );
+
+        state.objects.get_mut(&object).unwrap().zone = Zone::Graveyard;
+        assert!(
+            evaluate_condition(&condition, &state, &ability),
+            "the same tracked object satisfies the rider after arriving in the graveyard"
+        );
+    }
+
     #[test]
     fn targetless_reflexive_is_deferred_and_root_gate_is_consumed() {
         let mut state = GameState::new_two_player(42);
