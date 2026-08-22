@@ -2101,7 +2101,9 @@ fn seed_live_characteristics_from_base(obj: &mut crate::game::game_object::GameO
     // (The door-gated Room NAME is derived at layer-1 exit, in
     // `derive_room_battlefield_names`, from the post-copy effective form.)
     obj.copied_room_halves = None;
-    obj.layer1_name_exception = false;
+    // CR 707.9b: restore the persistent base origin (materialized exception
+    // names); a Layer-1 copy application overwrites it within the pass.
+    obj.layer1_name_origin = obj.base_name_origin;
     obj.power = obj.base_power;
     obj.toughness = obj.base_toughness;
     // CR 208.4b + CR 613.4b: layer 7b starts from the printed/copiable base;
@@ -5136,8 +5138,8 @@ fn derive_room_battlefield_names(state: &mut GameState, ids: &[ObjectId]) {
             continue;
         }
         // CR 707.9b: a Layer-1 name EXCEPTION is the copy's final name —
-        // CR 709.5 removes locked HALves' names, never a separate exception.
-        if obj.layer1_name_exception {
+        // CR 709.5 removes locked HALVES' names, never a separate exception.
+        if obj.layer1_name_origin == Some(crate::types::ability::CopiedNameOrigin::Exception) {
             continue;
         }
         if let Some(room_name) = crate::game::room::door_gated_battlefield_name(obj) {
@@ -7797,7 +7799,7 @@ fn apply_continuous_effect_filtered(
                 obj.name = name.clone();
                 // CR 707.9b: the exception is the copy's FINAL copiable name —
                 // `derive_room_battlefield_names` must leave it alone.
-                obj.layer1_name_exception = true;
+                obj.layer1_name_origin = Some(crate::types::ability::CopiedNameOrigin::Exception);
             }
             // CR 612.8 + CR 613.1c: Literal name changes from continuous
             // effects apply in Layer 3 and are not copiable values.
@@ -8675,7 +8677,7 @@ pub(crate) fn compute_current_copiable_values(
                 values.name = name.clone();
                 // CR 707.9b + CR 707.3: mark the fold so a later copy (and its
                 // Room name derivation) treats X as the final name.
-                values.name_exception = true;
+                values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
             }
             // CR 707.9b + CR 306.5b: Starting loyalty is a copy-effect
             // characteristic exception. A later copy of this copy must see
@@ -20138,7 +20140,7 @@ mod tests {
             replacement_definitions: Default::default(),
             static_definitions: Default::default(),
             room_halves: None,
-            name_exception: false,
+            name_origin: Default::default(),
         };
         let _ = state.add_transient_continuous_effect(
             source,
@@ -22637,7 +22639,7 @@ mod tests {
                     replacement_definitions: Arc::new(Vec::new()),
                     static_definitions: Arc::new(Vec::new()),
                     room_halves: None,
-                    name_exception: false,
+                    name_origin: Default::default(),
                 }),
                 display_source: Default::default(),
                 printed_ref: None,

@@ -2478,6 +2478,83 @@ fn a_set_name_exception_survives_the_room_name_derivation() {
         state.objects[&bear2].name, "Wrong Turn",
         "CR 707.3 + CR 707.9b: the chained copy keeps the exception name —          the door gate must not rename it to a half string"
     );
+
+    // CR 613.1a: a LATER ordinary copy replaces the exception wholesale — the
+    // marker must reset with it, so the door gate applies again. The bear's
+    // left door is still unlocked from above, so the copied left name shows.
+    let plain = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(plain),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Bright Hall",
+        "CR 613.1a: the later ordinary copy resets the exception marker"
+    );
+}
+
+/// CR 707.9b: a MATERIALIZED duplicate of an exception-named Room copy keeps
+/// the exception through every LATER layer pass — `base_name_origin` restores
+/// the runtime marker at each Step-1 seed, so the door gate never renames it.
+#[test]
+fn a_materialized_exception_name_survives_later_layer_passes() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 918, "Bright Hall", "Dim Cellar");
+    let mut values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    values.name = "Wrong Turn".to_string();
+    values.name_origin = crate::types::ability::CopiedNameOrigin::Exception;
+
+    let duplicate = create_object(
+        &mut state,
+        CardId(919),
+        PlayerId(0),
+        "Conjured".to_string(),
+        Zone::Battlefield,
+    );
+    crate::game::printed_cards::install_copiable_values_as_base(
+        state.objects.get_mut(&duplicate).unwrap(),
+        &values,
+    );
+
+    // A later full pass re-seeds from base — the exception must survive it.
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the materialized exception is base state and outlives the pass"
+    );
+
+    // CR 709.5e: unlocking a door changes half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: duplicate,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&duplicate].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
 }
 
 /// CR 709.5b: a materialized duplicate of a Room (conjure — Endless Corridor

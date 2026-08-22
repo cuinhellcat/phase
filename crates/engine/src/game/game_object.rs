@@ -1159,14 +1159,23 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copied_room_halves: Option<crate::types::ability::RoomCopiableHalves>,
 
-    /// CR 707.9b: a Layer-1 copy-effect name EXCEPTION ("except its name is
-    /// X") applied to this object this pass — the exception is the copy's
-    /// final copiable name, so the Room door gate must not replace it.
-    /// Layer-derived: set by the `SetName` application arm (and by
-    /// `apply_copiable_values` when the snapshot carries a folded exception),
-    /// cleared by the Step-1 seed.
-    #[serde(default)]
-    pub layer1_name_exception: bool,
+    /// CR 707.9b: where the LAST Layer-1 copy naming of this object came
+    /// from this pass — `None` when no copy effect named it. An `Exception`
+    /// ("except its name is X") is the copy's final copiable name, so the
+    /// Room door gate must not replace it. Layer-derived: assigned by every
+    /// applied copy (`apply_copiable_values`) and by the `SetName` arm,
+    /// cleared by the Step-1 seed — a LATER ordinary copy therefore resets
+    /// an earlier exception (CR 613.1a timestamp order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer1_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
+
+    /// CR 707.9b: the BASE name's origin for a MATERIALIZED object (duplicate
+    /// conjure / copy-token creation of an exception-named copy) — persistent,
+    /// unlike the layer-derived marker above. The Step-1 seed restores the
+    /// runtime marker from this, so the exception outlives every later layer
+    /// pass. `None` for every ordinarily printed object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_name_origin: Option<crate::types::ability::CopiedNameOrigin>,
 
     /// CR 716.3: Class enchantment level. Present only on Class permanents.
     /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
@@ -1469,7 +1478,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         case_state: _,
         room_unlocks: _,
         copied_room_halves: _,
-        layer1_name_exception: _,
+        layer1_name_origin: _,
+        base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
         cast_controller: _,
@@ -2364,7 +2374,8 @@ impl GameObject {
             case_state: None,
             room_unlocks: None,
             copied_room_halves: None,
-            layer1_name_exception: false,
+            layer1_name_origin: None,
+            base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
             cast_controller: None,

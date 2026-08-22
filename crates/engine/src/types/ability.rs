@@ -25529,11 +25529,22 @@ pub struct CopiableValues {
     /// serialized snapshots, via the serde default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_halves: Option<RoomCopiableHalves>,
-    /// CR 707.9b: true when `name` carries a folded copy-effect name
-    /// EXCEPTION ("except its name is X") — a later copy of this copy keeps
-    /// X as its final name, and the Room door gate must not replace it.
+    /// CR 707.9b: where `name` came from — a folded copy-effect name
+    /// EXCEPTION ("except its name is X") stays the copy's final name: a
+    /// later copy of this copy keeps X (CR 707.3), and the Room door gate
+    /// must not replace it.
     #[serde(default)]
-    pub name_exception: bool,
+    pub name_origin: CopiedNameOrigin,
+}
+
+/// CR 707.9b: where a copy's NAME characteristic came from — the copied
+/// source's copiable name, or an "except its name is X" exception rider.
+/// The exception is the copy's FINAL name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CopiedNameOrigin {
+    #[default]
+    Source,
+    Exception,
 }
 
 /// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an

@@ -252,7 +252,7 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
         // alternative characteristics share one face — never one of CR 709.5's
         // shared-type-line Room permanents, so there is no half data to carry.
         room_halves: None,
-        name_exception: false,
+        name_origin: Default::default(),
     })
 }
 

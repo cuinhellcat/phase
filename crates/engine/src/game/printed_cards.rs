@@ -535,7 +535,7 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
             .then(|| crate::game::room::own_room_halves(obj)),
         // CR 707.9b exceptions are folded in by `compute_current_copiable_values`,
         // never by the printed form.
-        name_exception: false,
+        name_origin: Default::default(),
     }
 }
 
@@ -647,7 +647,7 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         replacement_definitions: Arc::new(result_face.replacements.clone()),
         // A format-pool face is never a Room half pair.
         room_halves: None,
-        name_exception: false,
+        name_origin: Default::default(),
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
@@ -716,11 +716,11 @@ pub fn apply_copiable_values(
     // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
     // the Step-1 seed clears it, so it expires with this copy effect.
     obj.copied_room_halves = values.room_halves.clone();
-    // CR 707.9b + CR 707.3: a chained copy of an exception-named copy keeps
-    // the exception as its final name — the snapshot folded it into `name`.
-    if values.name_exception {
-        obj.layer1_name_exception = true;
-    }
+    // CR 707.9b + CR 707.3 + CR 613.1a: EVERY applied copy assigns the name
+    // origin — a later ordinary copy therefore resets an earlier exception,
+    // and a chained copy of an exception-named copy keeps the folded
+    // exception as its final name.
+    obj.layer1_name_origin = Some(values.name_origin);
 }
 
 /// Materialize copiable values onto a newly constructed object (for example a
@@ -770,7 +770,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
         // provide door existence and unlock costs. Which HALF name such an
         // object would show per door is undefined by the CR; keeping X
         // wholesale is the conservative reading.
-        if !values.name_exception {
+        if values.name_origin != crate::types::ability::CopiedNameOrigin::Exception {
             obj.name = halves.left.name.clone();
             obj.base_name = halves.left.name.clone();
         }
@@ -786,6 +786,11 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
                 ..Default::default()
             });
     }
+    // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
+    // the Step-1 seed restores the runtime marker from this every pass.
+    obj.base_name_origin = (values.name_origin
+        == crate::types::ability::CopiedNameOrigin::Exception)
+        .then_some(crate::types::ability::CopiedNameOrigin::Exception);
     obj.base_characteristics_initialized = true;
 }
 

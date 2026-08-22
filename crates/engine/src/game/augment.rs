@@ -398,7 +398,7 @@ fn merged_copiable_values(
         // An augment merge is a Host+Augment creature, never a Room — augment
         // is an Un-set mechanic with no Comprehensive Rules entry to cite.
         room_halves: None,
-        name_exception: false,
+        name_origin: Default::default(),
     };
 
     Some((

@@ -1312,7 +1312,7 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
         replacement_definitions: std::sync::Arc::default(),
         static_definitions: std::sync::Arc::default(),
         room_halves: None,
-        name_exception: false,
+        name_origin: Default::default(),
     });
     state.register_pending_materialization(P0, PersistentAxisMaterialization::Tokens(profile));
 
