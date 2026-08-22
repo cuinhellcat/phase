@@ -4,7 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
     ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
+    ParentTargetMissingReason, PerPlayerScope, ResolvedAbility, TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -54,35 +54,8 @@ pub fn resolve(
     // candidate scan. Building block for Breach the Multiverse.
     // CR 102.2: `EachOpponent` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
-    if matches!(
-        zone_owner,
-        ZoneOwner::EachPlayer | ZoneOwner::EachOpponent | ZoneOwner::EachTargetedPlayer
-    ) {
-        let players = match zone_owner {
-            ZoneOwner::EachOpponent => crate::game::players::apnap_order(state)
-                .into_iter()
-                .filter(|&p| p != ability.controller)
-                .collect(),
-            // CR 115.1 + CR 101.4: the iterated set is the ability's CHOSEN
-            // `Player` targets, walked in APNAP order. CR 601.2c: an "up to N"
-            // selection may be empty — the loop then disposes immediately and
-            // the parked continuation runs with an empty tracked set.
-            ZoneOwner::EachTargetedPlayer => {
-                let chosen: Vec<PlayerId> = ability
-                    .targets
-                    .iter()
-                    .filter_map(|t| match t {
-                        TargetRef::Player(pid) => Some(*pid),
-                        _ => None,
-                    })
-                    .collect();
-                crate::game::players::apnap_order(state)
-                    .into_iter()
-                    .filter(|pid| chosen.contains(pid))
-                    .collect()
-            }
-            _ => crate::game::players::apnap_order(state),
-        };
+    if let ZoneOwner::Each(scope) = zone_owner {
+        let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
         return prompt_next_each_player(state, ability, players, false, events);
     }
@@ -1027,6 +1000,43 @@ fn collect_direct_zone_cards(
         .collect())
 }
 
+/// CR 101.4: The players a [`ZoneOwner::Each`] iteration walks, in APNAP order.
+/// One authority for every population leaf, so a new leaf is a match arm here
+/// rather than a new `ZoneOwner` sibling.
+fn per_player_iteration_population(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: PerPlayerScope,
+) -> Vec<PlayerId> {
+    let apnap = crate::game::players::apnap_order(state);
+    match scope {
+        PerPlayerScope::AllPlayers => apnap,
+        // CR 102.2: "each OTHER player" excludes the controller.
+        PerPlayerScope::Opponents => apnap
+            .into_iter()
+            .filter(|&p| p != ability.controller)
+            .collect(),
+        // CR 115.1: the iterated set is the ability's CHOSEN `Player` targets.
+        // CR 601.2c: an "up to N" selection may be empty — the loop then
+        // disposes immediately and the parked continuation runs with an empty
+        // tracked set.
+        PerPlayerScope::TargetedPlayers => {
+            let chosen: Vec<PlayerId> = ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Player(pid) => Some(*pid),
+                    _ => None,
+                })
+                .collect();
+            apnap
+                .into_iter()
+                .filter(|pid| chosen.contains(pid))
+                .collect()
+        }
+    }
+}
+
 fn resolve_zone_owner(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1051,12 +1061,12 @@ fn resolve_zone_owner(
         // CR 101.4: `EachPlayer` / `EachOpponent` resolve a *set* of zone
         // owners, not one — they are handled by `prompt_next_each_player`, which
         // scans each iterated player's zone directly and never routes here.
-        ZoneOwner::EachPlayer | ZoneOwner::EachOpponent | ZoneOwner::EachTargetedPlayer => {
-            Err(EffectError::MissingParam(
-                "ChooseFromZone Each* zone owners resolve per-player, not via single owner"
-                    .to_string(),
-            ))
-        }
+        // CR 101.4: `Each` resolves a *set* of zone owners, not one — it is
+        // handled by `prompt_next_each_player`, which scans each iterated
+        // player's zone directly and never routes here.
+        ZoneOwner::Each(_) => Err(EffectError::MissingParam(
+            "ChooseFromZone Each resolves per-player, not via a single owner".to_string(),
+        )),
         // CR 400.1: `AllOwners` scans a zone shared across EVERY owner, not a
         // single one — it is handled by the early return in
         // `collect_direct_zone_cards` and never routes through this
@@ -3420,7 +3430,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::EachOpponent,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
@@ -3501,7 +3511,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::EachOpponent,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
@@ -3600,7 +3610,7 @@ mod tests {
                     count: 1,
                     zone: Zone::Graveyard,
                     additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::EachPlayer,
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                     filter: None,
                     chooser: Chooser::Controller,
                     up_to: false,
@@ -3674,7 +3684,7 @@ mod tests {
                     count: 1,
                     zone: Zone::Graveyard,
                     additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::EachPlayer,
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                     filter: None,
                     chooser: Chooser::Controller,
                     up_to: false,

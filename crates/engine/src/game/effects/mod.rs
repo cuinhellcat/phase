@@ -10425,7 +10425,7 @@ fn resolve_chain_body(
         && !matches!(
             ability.effect,
             Effect::ChooseFromZone {
-                zone_owner: crate::types::ability::ZoneOwner::EachTargetedPlayer,
+                zone_owner: crate::types::ability::ZoneOwner::Each(_),
                 ..
             }
         )

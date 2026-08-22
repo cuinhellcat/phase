@@ -11998,7 +11998,7 @@ fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
             Effect::ChooseFromZone {
                 count: 2,
                 zone: Zone::Hand,
-                zone_owner: ZoneOwner::EachTargetedPlayer,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
                 chooser: Chooser::OwningPlayer,
                 up_to: false,
                 // CR 608.2d: each player CHOOSES — a regression to a random

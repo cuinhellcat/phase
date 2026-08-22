@@ -13,7 +13,7 @@
 //! DISCRIMINATORS (anti-hollow-win):
 //! - each player's choice prompt offers ONLY that player's hand (P0's prompt
 //!   never contains P1's cards and vice versa — the per-iteration
-//!   `ZoneOwner::EachTargetedPlayer` scoping).
+//!   `ZoneOwner::Each(PerPlayerScope::TargetedPlayers)` scoping).
 //! - each manifested card enters under ITS OWN player's control — the
 //!   opponent's manifests must NOT land under the caster's control
 //!   (CR 701.40a: the manifesting player puts the card onto the battlefield).

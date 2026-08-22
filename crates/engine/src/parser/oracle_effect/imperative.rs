@@ -39,8 +39,8 @@ use crate::types::ability::{
     CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
     ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp,
     Duration, Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef,
-    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope,
-    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    GrantedAbilityScope, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PerPlayerScope,
+    PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
     ReassembleControlMode, SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment,
     TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
     ZoneOwner,
@@ -4597,7 +4597,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
         return Some(ChooseImperativeAst::FromZone {
             count,
             zones,
-            zone_owner: ZoneOwner::EachPlayer,
+            zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
             filter,
             chooser,
             up_to,
@@ -4694,8 +4694,8 @@ fn parse_controlled_battlefield_body(
 /// optionally zero via "up to one"), accumulated into the chain's tracked set,
 /// then ALL chosen permanents are exiled (`ChangeZoneAll { TrackedSet }`).
 ///
-/// "for each player" iterates every player (`ZoneOwner::EachPlayer`); "for each
-/// other player" excludes the controller (`ZoneOwner::EachOpponent`). Emitted as
+/// "for each player" iterates every player (`ZoneOwner::Each(PerPlayerScope::AllPlayers)`); "for each
+/// other player" excludes the controller (`ZoneOwner::Each(PerPlayerScope::Opponents)`). Emitted as
 /// a `ChooseFromZone { EachPlayer/EachOpponent }` clause with the mass-exile as
 /// its `sub_ability`, mirroring how the choose-only cards chain a separate
 /// "exile those" sentence.
@@ -4707,12 +4707,21 @@ pub(super) fn parse_for_each_player_exile_controlled(
 
     let (after_prefix, iter_scope) = alt((
         value(
-            ZoneOwner::EachOpponent,
+            ZoneOwner::Each(PerPlayerScope::Opponents),
             tag::<_, _, E>("for each other player, "),
         ),
-        value(ZoneOwner::EachOpponent, tag("for each other player ")),
-        value(ZoneOwner::EachPlayer, tag("for each player, ")),
-        value(ZoneOwner::EachPlayer, tag("for each player ")),
+        value(
+            ZoneOwner::Each(PerPlayerScope::Opponents),
+            tag("for each other player "),
+        ),
+        value(
+            ZoneOwner::Each(PerPlayerScope::AllPlayers),
+            tag("for each player, "),
+        ),
+        value(
+            ZoneOwner::Each(PerPlayerScope::AllPlayers),
+            tag("for each player "),
+        ),
     ))
     .parse(lower)
     .ok()?;

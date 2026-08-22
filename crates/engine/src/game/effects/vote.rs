@@ -717,7 +717,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, CardSelectionMode, Chooser, TargetFilter, VoteVisibility, ZoneOwner,
+        AbilityKind, CardSelectionMode, Chooser, PerPlayerScope, TargetFilter, VoteVisibility,
+        ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1163,7 +1164,7 @@ mod tests {
                     count: 1,
                     zone: Zone::Graveyard,
                     additional_zones: Vec::new(),
-                    zone_owner: ZoneOwner::EachPlayer,
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                     filter: None,
                     chooser: Chooser::Controller,
                     up_to: false,

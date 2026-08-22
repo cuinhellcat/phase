@@ -4554,9 +4554,9 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CopyChooseScope, Effect,
-        EffectKind, ForEachCategoryAction, IterationCategory, PostReplacementContinuation,
-        QuantityExpr, RepeatContinuation, ReplacementDefinition, SpellContext, TargetFilter,
-        ZoneOwner,
+        EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
+        PostReplacementContinuation, QuantityExpr, RepeatContinuation, ReplacementDefinition,
+        SpellContext, TargetFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
@@ -6447,7 +6447,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Graveyard,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::EachPlayer,
+                zone_owner: ZoneOwner::Each(PerPlayerScope::AllPlayers),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,

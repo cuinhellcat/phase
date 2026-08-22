@@ -110,15 +110,15 @@ use crate::types::ability::{
     EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
     MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
-    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
-    WheneverEventExpiry, ZoneOwner,
+    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, WheneverEventExpiry, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -21363,7 +21363,7 @@ fn lower_subject_predicate_ast(
             // manifest[s] <N> card[s] from their hand[s]" (Kozilek, the Broken
             // Reality). Each targeted player picks the cards from their OWN
             // hidden hand during resolution: a `ChooseFromZone` iterated over
-            // the chosen player targets (`ZoneOwner::EachTargetedPlayer`),
+            // the chosen player targets (`ZoneOwner::Each(PerPlayerScope::TargetedPlayers)`),
             // each iteration's choice made by that owner
             // (`Chooser::OwningPlayer`), accumulating the picks into the
             // chain's tracked set. The `Manifest` sub-ability then manifests
@@ -21404,7 +21404,9 @@ fn lower_subject_predicate_ast(
                                 // `targets` to that one player — so the
                                 // per-iteration zone is simply "the
                                 // targeted player's".
-                                zone_owner: crate::types::ability::ZoneOwner::EachTargetedPlayer,
+                                zone_owner: crate::types::ability::ZoneOwner::Each(
+                                    PerPlayerScope::TargetedPlayers,
+                                ),
                                 filter: None,
                                 chooser: crate::types::ability::Chooser::OwningPlayer,
                                 up_to: false,
