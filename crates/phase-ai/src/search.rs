@@ -8911,6 +8911,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -9384,6 +9385,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
 
@@ -12167,6 +12169,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         });
         // The row above cannot discriminate the tutor defect: a 3-card pool is
@@ -12198,6 +12201,7 @@ mod tests {
                 up_to: false,
                 allows_partial_find: false,
                 constraint: engine::types::ability::SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             }
         });

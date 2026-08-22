@@ -1941,6 +1941,7 @@ mod tests {
             up_to: true,
             allows_partial_find: true,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         state

@@ -3901,6 +3901,7 @@ pub(super) fn handle_resolution_choice(
                 allows_partial_find,
                 constraint,
                 split,
+                ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -9513,6 +9514,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
 

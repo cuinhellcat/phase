@@ -7588,6 +7588,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         let baseline = candidate_actions_broad(&state);
@@ -7613,6 +7614,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let filtered = candidate_actions_broad(&state);
@@ -7675,6 +7677,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            ordering_hint: Default::default(),
             split: None,
         };
         let actions = candidate_actions_broad(&state);
@@ -7727,6 +7730,7 @@ mod tests {
                 up_to,
                 allows_partial_find: false,
                 constraint: SearchSelectionConstraint::None,
+                ordering_hint: Default::default(),
                 split: None,
             };
             candidate_actions_broad(&state).len()
@@ -7774,6 +7778,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         (state, ids)
@@ -7866,6 +7871,7 @@ mod tests {
             up_to: false,
             allows_partial_find: false,
             constraint: SearchSelectionConstraint::None,
+            ordering_hint: Default::default(),
             split: None,
         };
         assert!(
