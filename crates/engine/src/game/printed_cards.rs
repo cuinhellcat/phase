@@ -533,6 +533,9 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
             .iter()
             .any(|s| s == "Room")
             .then(|| crate::game::room::own_room_halves(obj)),
+        // CR 707.9b exceptions are folded in by `compute_current_copiable_values`,
+        // never by the printed form.
+        name_exception: false,
     }
 }
 
@@ -644,6 +647,7 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         replacement_definitions: Arc::new(result_face.replacements.clone()),
         // A format-pool face is never a Room half pair.
         room_halves: None,
+        name_exception: false,
         static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
@@ -712,6 +716,11 @@ pub fn apply_copiable_values(
     // CR 709.5b + CR 707.2: carry the copied Room half data. Layer-derived —
     // the Step-1 seed clears it, so it expires with this copy effect.
     obj.copied_room_halves = values.room_halves.clone();
+    // CR 707.9b + CR 707.3: a chained copy of an exception-named copy keeps
+    // the exception as its final name — the snapshot folded it into `name`.
+    if values.name_exception {
+        obj.layer1_name_exception = true;
+    }
 }
 
 /// Materialize copiable values onto a newly constructed object (for example a

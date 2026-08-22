@@ -25529,6 +25529,11 @@ pub struct CopiableValues {
     /// serialized snapshots, via the serde default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_halves: Option<RoomCopiableHalves>,
+    /// CR 707.9b: true when `name` carries a folded copy-effect name
+    /// EXCEPTION ("except its name is X") — a later copy of this copy keeps
+    /// X as its final name, and the Room door gate must not replace it.
+    #[serde(default)]
+    pub name_exception: bool,
 }
 
 /// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an

@@ -2368,8 +2368,115 @@ fn a_copy_of_an_already_copied_room_snapshots_the_copied_halves() {
         .expect("CR 707.3: the copied Room halves are part of the new copiable values");
     assert_eq!(halves.left.name, "Bright Hall");
     assert_eq!(
+        halves.left.mana_cost,
+        ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        "CR 707.3: the copied left half's unlock cost is part of the new copiable values"
+    );
+    assert_eq!(
         halves.right.as_ref().map(|half| half.name.as_str()),
         Some("Dim Cellar")
+    );
+}
+
+/// CR 707.9b + CR 709.5: an "except its name is X" copy exception is part of
+/// the COPIABLE values and is the copy's final name — the Room door gate
+/// removes locked HALves' names, never a separate name exception. The
+/// exception also propagates through a chained copy (CR 707.3).
+#[test]
+fn a_set_name_exception_survives_the_room_name_derivation() {
+    let mut state = setup_game_at_main_phase();
+    let source = uncast_room_with_front_marker(&mut state, 915, "Bright Hall", "Dim Cellar");
+    let bear = create_object(
+        &mut state,
+        CardId(916),
+        PlayerId(0),
+        "Plain Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source]);
+    state.add_transient_continuous_effect(
+        bear,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear },
+        vec![
+            crate::types::ability::ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: crate::game::game_object::DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            },
+            // CR 707.9b: the "except its name is X" rider follows CopyValues
+            // within the same effect, exactly as production installs it.
+            crate::types::ability::ContinuousModification::SetName {
+                name: "Wrong Turn".to_string(),
+            },
+        ],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the name exception is the copy's final name — the door          gate must not erase it while both halves are locked"
+    );
+
+    // CR 709.5e: unlocking a door changes the half text, never the exception name.
+    state.players[0]
+        .mana_pool
+        .add(crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Green,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    apply_as_current(
+        &mut state,
+        GameAction::UnlockRoomDoor {
+            object_id: bear,
+            door: RoomDoor::Left,
+        },
+    )
+    .unwrap();
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear].name, "Wrong Turn",
+        "CR 707.9b: the exception stays the final name after unlocking too"
+    );
+
+    // CR 707.3: a chained copy sees the overridden name as a copiable value.
+    let bear2 = create_object(
+        &mut state,
+        CardId(917),
+        PlayerId(0),
+        "Second Bear".to_string(),
+        Zone::Battlefield,
+    );
+    let chained = crate::game::layers::compute_current_copiable_values(&state, bear)
+        .expect("the copy exists");
+    assert_eq!(
+        chained.name, "Wrong Turn",
+        "CR 707.9b: the exception is part of the snapshot a later copy takes"
+    );
+    state.add_transient_continuous_effect(
+        bear2,
+        PlayerId(0),
+        crate::types::ability::Duration::Permanent,
+        TargetFilter::SpecificObject { id: bear2 },
+        vec![crate::types::ability::ContinuousModification::CopyValues {
+            values: Box::new(chained),
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref: None,
+            token_image_ref: None,
+        }],
+        None,
+    );
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&bear2].name, "Wrong Turn",
+        "CR 707.3 + CR 707.9b: the chained copy keeps the exception name —          the door gate must not rename it to a half string"
     );
 }
 

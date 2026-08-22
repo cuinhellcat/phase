@@ -1159,6 +1159,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copied_room_halves: Option<crate::types::ability::RoomCopiableHalves>,
 
+    /// CR 707.9b: a Layer-1 copy-effect name EXCEPTION ("except its name is
+    /// X") applied to this object this pass — the exception is the copy's
+    /// final copiable name, so the Room door gate must not replace it.
+    /// Layer-derived: set by the `SetName` application arm (and by
+    /// `apply_copiable_values` when the snapshot carries a folded exception),
+    /// cleared by the Step-1 seed.
+    #[serde(default)]
+    pub layer1_name_exception: bool,
+
     /// CR 716.3: Class enchantment level. Present only on Class permanents.
     /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1460,6 +1469,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         case_state: _,
         room_unlocks: _,
         copied_room_halves: _,
+        layer1_name_exception: _,
         class_level: _,
         cast_from_zone: _,
         cast_controller: _,
@@ -2354,6 +2364,7 @@ impl GameObject {
             case_state: None,
             room_unlocks: None,
             copied_room_halves: None,
+            layer1_name_exception: false,
             class_level: None,
             cast_from_zone: None,
             cast_controller: None,
