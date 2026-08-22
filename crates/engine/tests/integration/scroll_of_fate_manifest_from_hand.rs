@@ -31,7 +31,8 @@ use engine::types::ability::AbilityKind;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaCost;
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -43,6 +44,11 @@ fn scroll_of_fate_activated_ability_manifests_a_chosen_noncreature_hand_card() {
     // NONCREATURE hand card: a plain sorcery with no creature side.
     let hand_a = scenario
         .add_spell_to_hand_from_oracle(P0, "Plain Sorcery A", false, "Draw a card.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        })
+        .with_keyword(Keyword::Flash)
         .id();
     // A distinguishable card sitting on top of P0's library — the library-top
     // source a hollow (library-top) fix would wrongly manifest instead.
@@ -139,6 +145,16 @@ fn scroll_of_fate_activated_ability_manifests_a_chosen_noncreature_hand_card() {
         a.mana_cost,
         ManaCost::NoCost,
         "a face-down card has no mana cost (CR 701.40a)"
+    );
+    assert!(
+        a.color.is_empty(),
+        "a manifested card is colorless (CR 708.2a), got {:?}",
+        a.color
+    );
+    assert!(
+        a.abilities.is_empty(),
+        "a manifested card has no abilities (CR 701.40a), got {:?}",
+        a.abilities
     );
     // DISCRIMINATOR — manifest is NOT cloak: no keywords at all, in
     // particular no ward {2} (CR 701.58a).

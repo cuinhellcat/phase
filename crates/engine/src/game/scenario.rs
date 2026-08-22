@@ -722,10 +722,12 @@ impl GameScenario {
             Zone::Battlefield,
         );
         let ts = self.state.next_timestamp();
+        let entered_turn = self.state.turn_number.saturating_sub(1);
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.base_card_types = obj.card_types.clone();
         obj.timestamp = ts;
+        obj.entered_battlefield_turn = Some(entered_turn);
         // A pre-existing permanent (entered on a prior turn), matching the
         // enchantment/land builders (CR 302.6 gates only creatures).
         obj.summoning_sick = false;
