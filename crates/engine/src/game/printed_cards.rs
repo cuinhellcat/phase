@@ -763,8 +763,17 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     // door-stamped definition sets installed above, and `own_room_halves`
     // re-derives printed order from this exact shape (`modal_back_face` false).
     if let Some(halves) = &values.room_halves {
-        obj.name = halves.left.name.clone();
-        obj.base_name = halves.left.name.clone();
+        // CR 707.9b: an exception-named copy ("except its name is X") keeps X
+        // as its copiable name even when materialized (reachable via
+        // Impossible Man copying a Room + Snowborn Simulacra / Vona de Iedo
+        // conjuring a duplicate of that permanent). The half identities still
+        // provide door existence and unlock costs. Which HALF name such an
+        // object would show per door is undefined by the CR; keeping X
+        // wholesale is the conservative reading.
+        if !values.name_exception {
+            obj.name = halves.left.name.clone();
+            obj.base_name = halves.left.name.clone();
+        }
         obj.mana_cost = halves.left.mana_cost.clone();
         obj.base_mana_cost = halves.left.mana_cost.clone();
         obj.modal_back_face = false;
