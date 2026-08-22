@@ -31,7 +31,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, Effect};
+use engine::types::ability::{AbilityKind, Effect, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::keywords::Keyword;
@@ -74,8 +74,14 @@ fn scroll_of_fate_manifests_chosen_hand_card_leaving_library_top_untouched() {
         .as_ref()
         .expect("from-hand manifest chains a Manifest sub-ability");
     assert!(
-        matches!(sub.effect.as_ref(), Effect::Manifest { .. }),
-        "sub-ability must manifest the chosen object, got {:?}",
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Manifest {
+                object_source: Some(TargetFilter::ParentTarget),
+                ..
+            }
+        ),
+        "sub-ability must manifest the chosen object (object_source: Some(ParentTarget)), got {:?}",
         sub.effect
     );
 

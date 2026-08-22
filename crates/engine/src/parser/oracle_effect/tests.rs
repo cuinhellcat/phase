@@ -11953,7 +11953,7 @@ fn effect_manifest_a_card_from_your_hand_lowers_to_choose_from_zone_then_manifes
         matches!(
             sub.effect.as_ref(),
             Effect::Manifest {
-                object_source: Some(_),
+                object_source: Some(TargetFilter::ParentTarget),
                 enters_under: Some(ControllerRef::You),
                 ..
             }
