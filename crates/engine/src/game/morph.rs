@@ -644,8 +644,32 @@ pub(crate) fn finish_paid_turn_face_up(
     // would resurrect a dead prompt. An `Err` from `turn_face_up` cannot leak
     // the seed: every dispatch into this completion runs under the action
     // boundary, which restores the whole pre-action state on `Err`.
+    // CR 702.37b: "As this permanent is turned face up, put a +1/+1 counter
+    // on it if its megamorph cost was paid to turn it face up." Only this PAID
+    // special action satisfies the condition — effect-driven turn-ups call the
+    // free commit directly and place nothing. Read BEFORE the commit (the
+    // stored face is consumed by it).
+    let megamorph_paid = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.back_face.as_ref())
+        .is_some_and(|face| {
+            face.keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Megamorph(_)))
+        });
     state.waiting_for = WaitingFor::Priority { player };
     turn_face_up(state, player, object_id, events)?;
+    if megamorph_paid {
+        crate::game::effects::counters::apply_counter_addition(
+            state,
+            player,
+            object_id,
+            crate::types::counter::CounterType::Plus1Plus1,
+            1,
+            events,
+        );
+    }
     // CR 603.2 + CR 603.3b: when the pipeline paused, the reducer's settled
     // epilogue will not run for this action, so the `TurnedFaceUp` observer
     // triggers in `events` would be lost (measured: the "when turned face up"
@@ -1394,6 +1418,107 @@ mod tests {
         turn_face_up(&mut state, opponent, face_down, &mut events)
             .expect("the opponent may turn their creature up on their own turn");
         assert!(!state.objects[&face_down].face_down);
+    }
+
+    /// CR 702.37b: "As this permanent is turned face up, put a +1/+1 counter
+    /// on it if its megamorph cost was paid to turn it face up." The PAID
+    /// special action places the counter; a plain morph payment and an
+    /// effect-driven (free) turn-up never do.
+    #[test]
+    fn a_paid_megamorph_turn_up_puts_its_counter() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        state.objects.get_mut(&id).unwrap().keywords =
+            vec![Keyword::Megamorph(crate::types::mana::ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })];
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        for _ in 0..2 {
+            state.players[0]
+                .mana_pool
+                .add(crate::types::mana::ManaUnit::new(
+                    crate::types::mana::ManaType::Green,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+        }
+        handle_turn_face_up(&mut state, player, id, 0, &mut events).unwrap();
+        assert!(!state.objects[&id].face_down);
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "CR 702.37b: paying the megamorph cost to turn face up puts a +1/+1 counter on it"
+        );
+    }
+
+    /// CR 702.37a-e: plain morph has no counter rider — the paid turn-up must
+    /// not gain one from the megamorph path.
+    #[test]
+    fn a_paid_morph_turn_up_puts_no_counter() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        for _ in 0..3 {
+            state.players[0]
+                .mana_pool
+                .add(crate::types::mana::ManaUnit::new(
+                    crate::types::mana::ManaType::Green,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+        }
+        handle_turn_face_up(&mut state, player, id, 0, &mut events).unwrap();
+        assert!(!state.objects[&id].face_down);
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "CR 702.37: a plain morph turn-up places no counter"
+        );
+    }
+
+    /// CR 702.37b: the rider is conditional on the megamorph COST being paid —
+    /// an effect-driven (free) turn-up of a megamorph creature places nothing.
+    #[test]
+    fn an_effect_driven_turn_up_of_a_megamorph_puts_no_counter() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        state.objects.get_mut(&id).unwrap().keywords =
+            vec![Keyword::Megamorph(crate::types::mana::ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })];
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        turn_face_up(&mut state, player, id, &mut events).unwrap();
+        assert!(!state.objects[&id].face_down);
+        assert_eq!(
+            state.objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "CR 702.37b: without paying the megamorph cost there is no counter"
+        );
     }
 
     #[test]
