@@ -12001,6 +12001,9 @@ fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
                 zone_owner: ZoneOwner::EachTargetedPlayer,
                 chooser: Chooser::OwningPlayer,
                 up_to: false,
+                // CR 608.2d: each player CHOOSES — a regression to a random
+                // or non-choice selection mode must fail here.
+                selection: CardSelectionMode::Chosen,
                 ..
             }
         ),
@@ -12025,7 +12028,11 @@ fn kozilek_target_players_each_manifest_two_from_their_hands_parses() {
             Effect::Manifest {
                 target: TargetFilter::Player,
                 count: QuantityExpr::Fixed { value: 2 },
-                object_source: Some(TargetFilter::TrackedSet { .. }),
+                // CR 608.2c: the manifest must consume THIS chain's picks —
+                // the `TrackedSetId(0)` sentinel the choose publishes into.
+                object_source: Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                }),
                 enters_under: None,
                 ..
             }
