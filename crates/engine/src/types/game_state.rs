@@ -6997,6 +6997,12 @@ pub enum ManaAbilityResume {
         /// cost had no X; `Some(0)` remains a real CR 107.3d announcement and
         /// binds that zero to the resulting turn-face-up trigger.
         announced_x: Option<u32>,
+        /// CR 702.37b: which stored-face source the prepared cost came from —
+        /// locked at initiation exactly like `cost`, so the rider decision
+        /// cannot drift against a board that changed while paused. The serde
+        /// default (`Morph`) covers pre-existing paused snapshots: no counter.
+        #[serde(default)]
+        cost_source: crate::types::ability::TurnUpCostSource,
     },
     /// CR 116.2c + CR 605.3b + CR 616.1: A pay-to-end special action whose
     /// auto-tapped mana source paused on a replacement-aware cost move. `cost`
@@ -17491,6 +17497,15 @@ declare_game_state! {
         skip_serializing_if = "Option::is_none"
     )]
     pub announced_source_x: Option<(ObjectId, u32)>,
+    /// CR 702.37b: the payment fact of the in-flight PAID turn-face-up
+    /// special action — which cost source was selected for WHICH object.
+    /// Published by `finish_paid_turn_face_up` immediately before the flip it
+    /// commits and cleared right after the flip's replacement pipeline
+    /// settles, so only the CR 702.37b rider of exactly that flip can read
+    /// it. Effect-driven (free) turn-ups never publish one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_up_paid_cost_source:
+        Option<(ObjectId, crate::types::ability::TurnUpCostSource)>,
     /// CR 400.7j (+ CR 400.7g/h cast hop): a resolution-scoped record of a source
     /// object that the currently-resolving ability moved as part of its own
     /// resolution (Siege "exile it, then you may cast it"). It lets
@@ -21853,6 +21868,7 @@ impl GameState {
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
             announced_source_x: None,
+            turn_up_paid_cost_source: None,
             current_trigger_match_count: None,
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
@@ -23724,6 +23740,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // context, not durable board state — like `current_trigger_event`, it is not a
         // per-cycle accumulator and PartialEq does not compare it.
         announced_source_x: _,
+        turn_up_paid_cost_source: _,
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         pending_resolution_completion: _,

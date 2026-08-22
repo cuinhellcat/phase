@@ -22993,6 +22993,22 @@ impl TriggerCondition {
     }
 }
 
+/// CR 702.37e / CR 702.168d / CR 701.40b: which stored-face source supplies
+/// a turn-face-up cost — the classification `turn_face_up_prepare` reports
+/// next to the cost, carried through the payment (and its pause/resume) like
+/// the cost itself. CR 702.37b's counter rider keys on `Megamorph` EXACTLY.
+/// `Default` (`Morph`) exists only for serde back-compat of pre-existing
+/// paused-payment snapshots, which never carried a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TurnUpCostSource {
+    #[default]
+    Morph,
+    Megamorph,
+    Disguise,
+    /// CR 701.40b: a manifested creature card's own mana cost.
+    ManifestManaCost,
+}
+
 /// Condition that gates whether a replacement effect applies.
 /// Checked when determining if the replacement is a candidate for an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23073,6 +23089,13 @@ pub enum ReplacementCondition {
     /// `AbilityCondition::CastVariantPaid`. Evaluated against
     /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
     CastVariantPaid { variant: CastVariantPaid },
+    /// CR 702.37b: the in-flight PAID turn-face-up special action selected
+    /// this cost source ("… if its megamorph cost was paid to turn it face
+    /// up"). Reads the payment fact `state.turn_up_paid_cost_source`, which
+    /// the paid action publishes for exactly the flip it commits — an
+    /// effect-driven (free) turn-up never publishes one. Payment-fact sibling
+    /// of `CastVariantPaid` / `CastViaEscape` / `CastViaKicker`.
+    TurnUpCostSourcePaid { source: TurnUpCostSource },
     /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
     /// the source object was cast from the specified zone (e.g., Myojin's
     /// "enters with an indestructible counter on it if you cast it from your

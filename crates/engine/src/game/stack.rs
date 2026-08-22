@@ -1142,6 +1142,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // published it. Clear it here so it never leaks into an unrelated resolution; it is
     // republished below for an `ActivatedAbility` entry (and only for that kind).
     state.announced_source_x = None;
+    state.turn_up_paid_cost_source = None;
 
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let Some(PoppedStackEntry {

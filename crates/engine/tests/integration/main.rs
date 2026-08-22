@@ -854,6 +854,7 @@ mod maze_of_ith_untap_bidirectional_prevent;
 mod mazemind_tome_existential_counter_state_trigger;
 mod mbaku_attacked_monarch_intervening_if;
 mod mechtitan_core_return_exiled;
+mod megamorph_paid_turn_up_counter;
 mod memory_jar_delayed_end_step;
 mod memory_plunder_free_cast_2884;
 mod mercenaries_any_player_activate_prevention_scope;

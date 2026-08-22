@@ -4153,6 +4153,13 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
             }
             acc
         }
+        // Reads the resolution-local turn-up payment fact — an event-scoped
+        // signal, no board census and no projected resource.
+        ReplacementCondition::TurnUpCostSourcePaid { source: _ } => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         ReplacementCondition::UnlessControlsSubtype { subtypes: _ } => Axes::NONE,
         ReplacementCondition::UnlessControlsOtherLeq { .. } => Axes::CONSERVATIVE,
         ReplacementCondition::UnlessControlsMatching { filter } => {
