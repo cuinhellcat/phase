@@ -47091,7 +47091,7 @@ fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
     match &attach.condition {
         Some(AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(
@@ -47296,7 +47296,7 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
     match &attach.condition {
         Some(AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) => match filter {
             TargetFilter::Typed(t) => assert!(
                 t.type_filters.iter().any(

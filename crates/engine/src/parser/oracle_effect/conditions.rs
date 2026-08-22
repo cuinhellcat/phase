@@ -8639,7 +8639,7 @@ mod tests {
         assert_eq!(body, "it enters with an additional +1/+1 counter on it");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) = condition
         else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
@@ -8662,7 +8662,7 @@ mod tests {
         assert_eq!(body, "you may attach one of them to a samurai you control");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) = condition
         else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
@@ -8695,7 +8695,7 @@ mod tests {
         assert_eq!(body, "you gain 4 life.");
         let Some(AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         }) = condition
         else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");
@@ -8724,7 +8724,7 @@ mod tests {
                 .expect("active-voice put gate must lower to ZoneChangedThisWay");
         let AbilityCondition::ZoneChangedThisWay {
             filter,
-            destination: None,
+            destination: Some(Zone::Battlefield),
         } = condition
         else {
             panic!("expected ZoneChangedThisWay condition, got {condition:?}");

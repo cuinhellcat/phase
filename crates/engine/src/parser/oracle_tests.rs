@@ -515,7 +515,7 @@ fn spelunking_etb_put_cave_gains_life_conditionally() {
 
     let Some(AbilityCondition::ZoneChangedThisWay {
         filter,
-        destination: None,
+        destination: Some(Zone::Battlefield),
     }) = &gain.condition
     else {
         panic!(

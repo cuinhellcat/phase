@@ -2000,17 +2000,24 @@ pub(super) fn fold_enters_this_way_counter_rider(def: &mut AbilityDefinition) {
         return;
     };
 
-    // Entry-rider folding is destination-blind by construction: a
-    // destination-bound clause is never an ETB rider, so it passes through.
+    // The parent is itself a battlefield-entry effect, so both legacy
+    // destination-agnostic conditions and explicit battlefield-arrival
+    // conditions describe this typed entry-counter slot. Other named
+    // destinations must remain standalone riders.
     let Some(AbilityCondition::ZoneChangedThisWay {
         filter,
-        destination: None,
+        destination,
     }) = sub.condition.clone()
     else {
         def.sub_ability = Some(sub);
         fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
         return;
     };
+    if !matches!(destination, None | Some(Zone::Battlefield)) {
+        def.sub_ability = Some(sub);
+        fold_enters_this_way_counter_rider(def.sub_ability.as_mut().unwrap());
+        return;
+    }
 
     if let Effect::PutCounter {
         counter_type,
