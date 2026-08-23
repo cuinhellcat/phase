@@ -1636,6 +1636,7 @@ fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice(
 
 fn room_back_face(name: &str) -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
         name: name.to_string(),
         power: None,
         toughness: None,
@@ -2678,11 +2679,11 @@ fn a_recast_split_room_offers_the_face_choice_again() {
     );
 }
 
-/// #7565 round 2 (live playtest): the BACK-half round trip. Casting the back
-/// half swaps the faces; leaving the battlefield swaps them back via
-/// snapshots — and `snapshot_object_face` hardcodes `layout_kind: None`, so
-/// the Split marker died in the swap chain and the next cast silently
-/// auto-picked the front face. `swap_object_faces` preserves the marker.
+/// CR 601.2b + CR 709.3 (#7565): the BACK-half round trip. Casting the back
+/// half chooses that half before it reaches the stack; leaving the battlefield
+/// restores the front face. The per-cast commitment ends with that cast, so a
+/// later cast must offer its face choice again. `swap_object_faces` preserves
+/// the split layout marker across the first cast's face swap.
 #[test]
 fn a_room_recast_after_a_back_half_round_trip_offers_the_choice_again() {
     use crate::game::stack;
