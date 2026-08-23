@@ -183,7 +183,7 @@ mod trigger_occurrence_tests {
     }
 }
 
-/// CR 101.4 + CR 102.2 + CR 115.1: Which players a [`ZoneOwner::Each`]
+/// CR 101.4 + CR 102.3 + CR 115.1: Which players a [`ZoneOwner::Each`]
 /// iteration walks, in APNAP order. This is the population axis of the
 /// per-player iteration — the machinery (one parked choice per player,
 /// accumulating into the chain's tracked set) is identical for every leaf, so
@@ -193,9 +193,15 @@ pub enum PerPlayerScope {
     /// CR 101.4: every player in the game.
     #[default]
     AllPlayers,
-    /// CR 102.2: every opponent of the ability's controller (the controller is
-    /// excluded).
-    Opponents,
+    /// CR 102.3: every player OTHER than the ability's controller — the
+    /// population of "for each other player" (Kaya, Spirits' Justice).
+    /// Deliberately NOT "each opponent": CR 102.3 makes a teammate one of the
+    /// "other players on their team" while excluding them from that player's
+    /// opponents, so in a team format a teammate belongs in this population and
+    /// would be wrongly dropped by `players::opponents`. An opponent-scoped
+    /// population is a different leaf, to be added here (resolved through
+    /// `players::opponents`) when a card's wording asks for one.
+    OtherPlayers,
     /// CR 115.1: every player chosen as a `Player` target of the resolving
     /// ability. CR 601.2c: an "up to N" selection may be empty, which disposes
     /// the iteration immediately.
@@ -238,7 +244,7 @@ pub enum ZoneOwner {
     /// regardless of who owns each card — and Koh typically exiles *opponents'*
     /// creatures, so gating to the controller's own exiled cards empties the
     /// pool. This is the single-pool owner-agnostic leaf of the scope axis:
-    /// distinct from [`ZoneOwner::Each(PerPlayerScope::AllPlayers)`]/[`ZoneOwner::Each(PerPlayerScope::Opponents)`],
+    /// distinct from [`ZoneOwner::Each(PerPlayerScope::AllPlayers)`]/[`ZoneOwner::Each(PerPlayerScope::OtherPlayers)`],
     /// which iterate one prompt per player and accumulate into a tracked set —
     /// this raises ONE prompt over the whole-zone union. Mirrors the
     /// `ScopedPlayer`-on-Battlefield branch in `collect_direct_zone_cards`
@@ -276,7 +282,10 @@ impl From<ZoneOwnerRepr> for ZoneOwner {
             ZoneOwnerRepr::Each(scope) => ZoneOwner::Each(scope),
             ZoneOwnerRepr::AllOwners => ZoneOwner::AllOwners,
             ZoneOwnerRepr::EachPlayer => ZoneOwner::Each(PerPlayerScope::AllPlayers),
-            ZoneOwnerRepr::EachOpponent => ZoneOwner::Each(PerPlayerScope::Opponents),
+            // The legacy name said "Opponent", but the only wording that ever
+            // produced it is "for each other player" — CR 102.3 keeps those
+            // apart, so the migration maps it onto the population it always had.
+            ZoneOwnerRepr::EachOpponent => ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             ZoneOwnerRepr::EachTargetedPlayer => ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
         }
     }
@@ -311,7 +320,7 @@ mod zone_owner_migration_tests {
             ),
             (
                 "\"EachOpponent\"",
-                ZoneOwner::Each(PerPlayerScope::Opponents),
+                ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             ),
             (
                 "\"EachTargetedPlayer\"",
@@ -28811,7 +28820,7 @@ mod tests {
             ZoneOwner::Opponent,
             ZoneOwner::ScopedPlayer,
             ZoneOwner::Each(PerPlayerScope::AllPlayers),
-            ZoneOwner::Each(PerPlayerScope::Opponents),
+            ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             ZoneOwner::Each(PerPlayerScope::TargetedPlayers),
             ZoneOwner::AllOwners,
         ] {

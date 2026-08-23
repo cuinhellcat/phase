@@ -131,7 +131,7 @@ fn scan_minus_two_chain(parsed: &engine::parser::oracle::ParsedAbilities) -> (bo
     while let Some(def) = node {
         match &*def.effect {
             Effect::ChooseFromZone {
-                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 ..
             } => found_each_opponent = true,
             Effect::Unimplemented { .. } => found_unimplemented = true,
@@ -220,7 +220,7 @@ fn non_target_form_still_parses_to_each_opponent_exile_chain() {
     let mut found_chain = false;
     while let Some(def) = node {
         if let Effect::ChooseFromZone {
-            zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+            zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
             up_to: true,
             ..
         } = &*def.effect

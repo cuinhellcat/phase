@@ -1011,8 +1011,10 @@ fn per_player_iteration_population(
     let apnap = crate::game::players::apnap_order(state);
     match scope {
         PerPlayerScope::AllPlayers => apnap,
-        // CR 102.2: "each OTHER player" excludes the controller.
-        PerPlayerScope::Opponents => apnap
+        // CR 102.3: "each OTHER player" is every player but the controller.
+        // Deliberately not `players::opponents`: that set is team-relative and
+        // excludes a teammate, whom this wording includes.
+        PerPlayerScope::OtherPlayers => apnap
             .into_iter()
             .filter(|&p| p != ability.controller)
             .collect(),
@@ -3430,7 +3432,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
@@ -3511,7 +3513,7 @@ mod tests {
                 count: 1,
                 zone: Zone::Battlefield,
                 additional_zones: Vec::new(),
-                zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                zone_owner: ZoneOwner::Each(PerPlayerScope::OtherPlayers),
                 filter: None,
                 chooser: Chooser::Controller,
                 up_to: true,
