@@ -631,13 +631,12 @@ pub(crate) fn resolve_random_in_chain(
         _ => return false,
     };
 
-    // CR 608.2d: `Each` is the one zone owner with no single candidate pool —
-    // it resolves one prompt per player — so it cannot be answered here, and a
-    // per-player random pick is unbuilt. No parse produces the combination (of
-    // the 43 cards whose text carries per-player wording, none say "at
-    // random"), so the guard lives in this function rather than in a hand-kept
-    // list: without it the error reads as an empty pool and the chain silently
-    // does nothing. Release behavior is unchanged.
+    // CR 608.2d: `Each` has no single candidate pool, and a per-player random
+    // pick is unbuilt. No parse produces the combination (of the 43 cards whose
+    // text carries per-player wording, none say "at random"), so rather than
+    // build speculative machinery the pool authority rejects the owner up front
+    // and this arm keeps the rejection loud instead of reading it as an empty
+    // pool. Release behavior is a no-op resolution, as before.
     let cards = match resolve_candidate_cards(
         state,
         ability,
@@ -884,6 +883,17 @@ fn collect_player_zone_cards(
 /// 2. The latest non-empty tracked set from any prior publish in this game.
 /// 3. Explicit `TargetRef::Object` targets on the ability.
 /// 4. Direct zone scan (`zone` + `additional_zones`).
+///
+/// CR 101.4: a per-player [`ZoneOwner::Each`] has no single pool at all — it
+/// resolves one prompt per player through `prompt_next_each_player` — so it is
+/// rejected here rather than deeper in the owner resolution. The rejection has
+/// to precede the tracked-set fast paths above: those return before the owner
+/// is ever read, which would otherwise hand a per-player choice the whole
+/// global or prior-chain set. No caller reaches this with `Each` on a supported
+/// path (`resolve` returns to the per-player iteration first, and
+/// `resolve_with_choosing_player` is only entered from below that return), so
+/// the arm exists to keep an unsupported combination loud instead of silently
+/// answered.
 fn resolve_candidate_cards(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -892,6 +902,12 @@ fn resolve_candidate_cards(
     zone_owner: ZoneOwner,
     filter: Option<&TargetFilter>,
 ) -> Result<Vec<ObjectId>, EffectError> {
+    if matches!(zone_owner, ZoneOwner::Each(_)) {
+        return Err(EffectError::MissingParam(
+            "ChooseFromZone Each resolves per-player and has no single candidate pool".to_string(),
+        ));
+    }
+
     if let Some(cards) = chain_tracked_set_cards(state) {
         return Ok(retain_matching_candidates(state, ability, cards, filter));
     }
