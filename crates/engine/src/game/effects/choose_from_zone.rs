@@ -52,7 +52,7 @@ pub fn resolve(
     // accumulating each pick into the chain's tracked set. Routed here before
     // the single-pool path so the per-player prompts never collapse into one
     // candidate scan. Building block for Breach the Multiverse.
-    // CR 102.2: `EachOpponent` is the same iteration with the controller
+    // CR 102.3: `Each(OtherPlayers)` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
     if let ZoneOwner::Each(scope) = zone_owner {
         let players = per_player_iteration_population(state, ability, scope);
@@ -631,15 +631,30 @@ pub(crate) fn resolve_random_in_chain(
         _ => return false,
     };
 
-    let cards = resolve_candidate_cards(
+    // CR 608.2d: `Each` is the one zone owner with no single candidate pool —
+    // it resolves one prompt per player — so it cannot be answered here, and a
+    // per-player random pick is unbuilt. No parse produces the combination (of
+    // the 43 cards whose text carries per-player wording, none say "at
+    // random"), so the guard lives in this function rather than in a hand-kept
+    // list: without it the error reads as an empty pool and the chain silently
+    // does nothing. Release behavior is unchanged.
+    let cards = match resolve_candidate_cards(
         state,
         ability,
         zone,
         &additional_zones,
         zone_owner,
         filter.as_ref(),
-    )
-    .unwrap_or_default();
+    ) {
+        Ok(cards) => cards,
+        Err(_) => {
+            debug_assert!(
+                !matches!(zone_owner, ZoneOwner::Each(_)),
+                "a random ChooseFromZone with a per-player zone owner has no resolution path"
+            );
+            Vec::new()
+        }
+    };
 
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
     // any continuation that depends on the missing pick.
