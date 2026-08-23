@@ -310,3 +310,111 @@ fn a_face_up_creature_spell_is_not_reduced() {
         "a face-up creature spell must pay its full {{2}}"
     );
 }
+
+/// Helper for the exile-parity pair below: a morph creature in EXILE that is
+/// both foretold (castable face up for {1}) and granted `PlayFromExile` with a
+/// {2} `cast_cost_raise`. The explicit face-down election routes through
+/// `PlayFromExile` (CR 601.2a-b), so the real face-down cast pays {3}+{2}={5};
+/// a variant-less projection infers Foretell first and would price {3}.
+fn exile_morph_with_competing_permissions(
+    pool: usize,
+) -> (engine::game::scenario::GameRunner, ObjectId) {
+    use engine::types::ability::{CastingPermission, Duration};
+    use engine::types::statics::CastFrequency;
+    use engine::types::zones::EtbTapState;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let morph = scenario
+        .add_creature_to_exile(P0, "Foretold Beast", 4, 5)
+        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    scenario.with_mana_pool(P0, colorless(pool));
+    let mut runner = scenario.build();
+    let obj = runner.state_mut().objects.get_mut(&morph).unwrap();
+    obj.casting_permissions.push(CastingPermission::Foretold {
+        cost: ManaCost::generic(1),
+        turn_foretold: 0,
+    });
+    obj.casting_permissions
+        .push(CastingPermission::PlayFromExile {
+            duration: Duration::UntilEndOfTurn,
+            granted_to: P0,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: Some(ManaCost::generic(2)),
+            land_enter_tapped: EtbTapState::Unspecified,
+        });
+    (runner, morph)
+}
+
+/// CR 601.2a-b + CR 601.2f: the face-down OFFER from exile must be priced by the
+/// permission the real cast elects. The menu has to show {3}+{2}={5} (the
+/// `PlayFromExile` raise), and choosing it has to charge exactly that.
+///
+/// Discriminating: a variant-less projection infers the Foretold permission
+/// (no raise) and displays {3} while the payment takes {5}.
+#[test]
+fn the_face_down_offer_from_exile_prices_the_play_from_exile_raise() {
+    use engine::types::actions::AlternativeCastDecision;
+    use engine::types::game_state::{AlternativeCastKeyword, WaitingFor};
+
+    let (mut runner, morph) = exile_morph_with_competing_permissions(5);
+
+    assert!(cast(&mut runner, morph), "the cast must be accepted");
+    match &runner.state().waiting_for {
+        WaitingFor::AlternativeCastChoice {
+            keyword: AlternativeCastKeyword::FaceDown,
+            alternative_cost: Some(cost),
+            ..
+        } => assert_eq!(
+            cost.mana_value(),
+            5,
+            "the offer must price the PlayFromExile raise: {{3}}+{{2}}, got {cost:?}"
+        ),
+        other => panic!("expected the face-down AlternativeCastChoice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Alternative,
+        })
+        .expect("the priced face-down cast must complete");
+    assert!(
+        runner.state().objects[&morph].face_down
+            && runner.state().objects[&morph].zone == Zone::Stack,
+        "the spell must be on the stack face down"
+    );
+    assert_eq!(
+        unspent(&runner),
+        0,
+        "the displayed {{5}} is what is charged"
+    );
+}
+
+/// CR 601.2f: the same board with only 3 mana — the real face-down cost {5} is
+/// NOT payable, so the face-down offer must be withheld and the cast must fall
+/// through to the legal face-up Foretell cast for {1}.
+///
+/// Discriminating: the variant-less projection prices {3}, offers/auto-routes
+/// the face-down cast, and the payment then fails — the accepted action dies.
+#[test]
+fn an_unpayable_exile_raise_withholds_the_face_down_offer() {
+    let (mut runner, morph) = exile_morph_with_competing_permissions(3);
+
+    assert!(
+        cast(&mut runner, morph),
+        "the cast must be accepted (face up via Foretell)"
+    );
+    assert!(
+        runner.state().objects[&morph].zone == Zone::Stack
+            && !runner.state().objects[&morph].face_down,
+        "with the {{5}} unpayable the legal cast is the FACE-UP foretell one"
+    );
+}
