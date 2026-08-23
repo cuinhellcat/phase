@@ -9052,9 +9052,11 @@ fn cast_spell_face_choice_available(obj: &crate::game::game_object::GameObject) 
 /// face normally and plays its land (back) face via PlayLand, so neither needs
 /// a cast-time choice here.
 ///
-/// The gate keys off `back_face.layout_kind == Modal`, which
-/// `snapshot_object_face` clears to `None` after a swap — so re-entry into the
-/// cast pipeline for the chosen face does not re-prompt.
+/// The gate keys off `back_face.layout_kind == Modal`. #7565: a swap now
+/// preserves that layout ([`crate::game::printed_cards::swap_object_faces`]), so
+/// re-entry into the cast pipeline for the chosen face is stopped one level up
+/// instead — [`cast_spell_face_choice_available`] returns `false` once
+/// `cast_face_committed` is set (CR 601.2b).
 fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card_type::CoreType;
     let Some(back) = obj.back_face.as_ref() else {
@@ -14579,9 +14581,11 @@ fn can_cast_prepared_now_with_probe(
     // (Esika, God of the Tree needs {1}{G}{G}) while the back face is castable
     // (The Prismatic Bridge needs {W}{U}{B}{R}{G}); the card is still legally
     // castable and will prompt ModalFaceChoice (CR 712.11b). Mirror the Adventure
-    // recursion: swap to the back face and re-test. `simulate_chosen_split_spell_back_face`
-    // clears the stashed face's `layout_kind`, so the recursive call does not
-    // re-enter this branch (no infinite recursion).
+    // recursion: swap to the back face and re-test. #7565: the recursion stops
+    // because `simulate_chosen_split_spell_back_face` sets `cast_face_committed`,
+    // which `cast_spell_face_choice_available` reads (CR 601.2b — a choice already
+    // made for the current cast is not offered again). The swap itself no longer
+    // erases the stashed `layout_kind`, so that erasure can no longer be the guard.
     if cast_spell_face_choice_available(obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
