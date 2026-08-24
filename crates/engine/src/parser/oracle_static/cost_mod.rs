@@ -515,22 +515,29 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     } else {
         // CR 601.2a: singular subjects carry an article before the type word —
         // "a creature spell", "a colorless spell" — peel it before the type
-        // phrase so the article is not read as a type word.
-        let peeled = opt(alt((tag::<_, _, VE<'_>>("a "), tag("an "))))
-            .parse(type_prefix_original)
-            .map_or(type_prefix_original, |(rest, _)| rest);
+        // phrase so the article is not read as a type word. Grammar tokens are
+        // matched on the LOWERCASE view (mixed-case input must not skip the
+        // peel); only the preserved type tail hands the original-case slice on.
+        let prefix_lower = type_prefix_lower.trim();
+        let after_article = opt(alt((tag::<_, _, VE<'_>>("a "), tag("an "))))
+            .parse(prefix_lower)
+            .map_or(prefix_lower, |(rest, _)| rest);
         // CR 105.2: peel a color-quality prefix ("colorless spell" — Darksteel
         // Monolith) via the shared authority — `parse_type_phrase` drops the
         // word, which would silently over-broaden the grant to any spell. The
         // helper expects the word with its trailing space, so re-pad the
         // trimmed prefix slice.
-        let padded = format!("{peeled} ");
+        let padded = format!("{after_article} ");
         let (rest_padded, color_prop) = super::shared::peel_color_quality_prefix(&padded);
         let rest = rest_padded.trim();
         let base = if rest.is_empty() {
             TargetFilter::Typed(TypedFilter::card())
         } else {
-            parse_type_phrase(rest).0
+            // End-anchored original tail: the peels only removed a prefix, so
+            // the remaining type words are the last `rest.len()` bytes of the
+            // trimmed original slice (the TextPair length-mapping convention).
+            let tail = &type_prefix_original[type_prefix_original.len() - rest.len()..];
+            parse_type_phrase(tail).0
         };
         (base, color_prop.into_iter().collect::<Vec<_>>())
     };

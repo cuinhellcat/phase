@@ -4,6 +4,8 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use nom::character::complete::alphanumeric1;
+use nom::combinator::not;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStaticPredicate {
@@ -683,10 +685,15 @@ pub(crate) fn parse_cast_as_though_flash_static(
 /// (`spell_object_matches_filter_inner`), so the lowered prop means "cast from
 /// that zone", not "currently in that zone".
 pub(crate) fn parse_cast_origin_zone_qualifier(input: &str) -> Option<(&str, FilterProp)> {
-    alt((
-        value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
-        value(Zone::Hand, tag("from your hand")),
-    ))
+    // Word boundary: "from exile" must not accept "from exiled..." (the repo's
+    // parser doctrine — near-miss tokens reject, PR #7543's pattern).
+    terminated(
+        alt((
+            value(Zone::Exile, tag::<_, _, OracleError<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        )),
+        not(alphanumeric1),
+    )
     .parse(input)
     .ok()
     .map(|(rest, zone)| (rest.trim_start(), FilterProp::InZone { zone }))

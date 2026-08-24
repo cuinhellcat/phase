@@ -2212,7 +2212,7 @@ pub(crate) fn spell_cast_origin(state: &GameState, object_id: ObjectId) -> Optio
     state.objects.get(&object_id).and_then(|o| o.cast_from_zone)
 }
 
-/// CR 601.2a + CR 603.4: Look up the pre-announcement zone for a spell that
+/// CR 601.2a: Look up the pre-announcement zone for a spell that
 /// is currently mid-cast. `obj.zone` stays at the origin until `finalize_cast`
 /// performs the Hand→Stack move itself, but should the ordering ever change
 /// this fallback preserves correctness for filters like "spells you cast from
@@ -2466,12 +2466,6 @@ pub(super) struct GrantedSpellAlternativeCost {
     /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
     /// `None` for `Unlimited` grants (Fist of Suns, Rooftop Storm, Jodah).
     pub(super) once_per_turn_source: Option<ObjectId>,
-    /// CR 118.9 + CR 601.2a (#7575): true when the grant's `affected` filter
-    /// itself constrains the cast's ORIGIN zone (`InZone`/`InAnyZone` — Warped
-    /// Space's "a spell you cast from exile"). Such a grant must reach an
-    /// authorized cast from that zone, so the alternative-cost offer's
-    /// hand-only default does not apply to it.
-    pub(super) origin_zone_scoped: bool,
 }
 
 pub(super) fn granted_spell_alternative_cost(
@@ -2516,23 +2510,40 @@ pub(super) fn granted_spell_alternative_cost_for(
             continue;
         }
 
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
+        // CR 118.9 + CR 601.2a (#7575): the offer's default reach is hand
+        // casts. For a NON-hand origin the match must come THROUGH a branch
+        // that itself constrains the cast's origin zone (Warped Space's "a
+        // spell you cast from exile") — a mixed `Or` whose unscoped branch
+        // matched must not unlock the non-hand reach, and a filterless grant
+        // ("spells you cast") is zone-less by definition. Zone-less grants
+        // (Rooftop Storm class) therefore keep their hand-only reach.
+        let matches = if origin_zone == Zone::Hand {
+            def.affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state_for(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    &state.all_creature_types,
+                    fused,
+                )
+            })
+        } else {
+            def.affected.as_ref().is_some_and(|filter| {
+                matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    source_obj.id,
+                    fused,
+                )
+            })
+        };
         if matches {
-            let origin_zone_scoped = def
-                .affected
-                .as_ref()
-                .is_some_and(filter_constrains_origin_zone);
             return Some(GrantedSpellAlternativeCost {
                 // CR 107.3c + CR 118.9: A static's alternative cost can bind X
                 // to the affected spell's mana value (Kentaro). Concretize the
@@ -2543,7 +2554,6 @@ pub(super) fn granted_spell_alternative_cost_for(
                 timing_permission: *timing_permission,
                 once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
                     .then_some(source_obj.id),
-                origin_zone_scoped,
             });
         }
     }
@@ -2551,24 +2561,142 @@ pub(super) fn granted_spell_alternative_cost_for(
     None
 }
 
-/// CR 118.9 + CR 601.2a: Whether a grant's `affected` filter carries an
-/// origin-zone constraint (`InZone`/`InAnyZone`) on any positive leaf. The
-/// spell-filter path compares those props against the cast's ORIGIN zone, so
-/// their presence is the grant's own statement "I apply to casts from that
-/// zone". `Not` legs are skipped: a negated zone is an exclusion, not a scope.
-fn filter_constrains_origin_zone(filter: &TargetFilter) -> bool {
+/// CR 118.9 + CR 601.2a: Whether this cast matches the grant's `affected`
+/// filter THROUGH a branch that itself constrains the cast's ORIGIN zone
+/// (`InZone`/`InAnyZone` — Warped Space's "a spell you cast from exile").
+///
+/// This is a per-cast question, not a whole-filter presence bit:
+/// `Or(hand-scoped, Creature)` matched by an exile Creature through the
+/// unscoped branch is NOT an origin-scoped match, so the non-hand
+/// alternative-cost reach stays closed for that cast. `Not` is an exclusion,
+/// never a scope.
+///
+/// Exhaustive by design — no wildcard arm: a future filter variant that can
+/// nest a zone constraint must be classified here explicitly instead of
+/// silently falling into the hand-only default.
+fn matches_via_origin_scoped_branch(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    fused: bool,
+) -> bool {
+    let full_match = |f: &TargetFilter| {
+        super::filter::spell_object_matches_filter_from_state_for(
+            state,
+            spell_obj,
+            origin_zone,
+            caster,
+            f,
+            source_id,
+            &state.all_creature_types,
+            fused,
+        )
+    };
     match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
-            matches!(
-                prop,
-                crate::types::ability::FilterProp::InZone { .. }
-                    | crate::types::ability::FilterProp::InAnyZone { .. }
+        TargetFilter::Typed(typed) => {
+            typed.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    crate::types::ability::FilterProp::InZone { .. }
+                        | crate::types::ability::FilterProp::InAnyZone { .. }
+                )
+            }) && full_match(filter)
+        }
+        // A disjunction is origin-scoped only through a branch that is.
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            matches_via_origin_scoped_branch(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                f,
+                source_id,
+                fused,
             )
         }),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_constrains_origin_zone)
+        // A conjunction must match as a whole AND carry some leg that is an
+        // origin-scoped match in its own right (recursing keeps a mixed `Or`
+        // nested under `And` honest too).
+        TargetFilter::And { filters } => {
+            full_match(filter)
+                && filters.iter().any(|f| {
+                    matches_via_origin_scoped_branch(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        f,
+                        source_id,
+                        fused,
+                    )
+                })
         }
-        _ => false,
+        TargetFilter::TrackedSetFiltered { filter: inner, .. } => {
+            full_match(filter)
+                && matches_via_origin_scoped_branch(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    inner,
+                    source_id,
+                    fused,
+                )
+        }
+        // A negated zone prop is an exclusion, not an origin scope.
+        TargetFilter::Not { .. } => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
