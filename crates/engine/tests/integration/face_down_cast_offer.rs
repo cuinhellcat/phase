@@ -215,3 +215,69 @@ fn the_printed_cast_stays_offered_with_on_color_mana() {
         "the printed {{1}}{{G}} is payable — offered exactly as before the fix"
     );
 }
+
+/// CR 702.37b (Megamorph) — same face-down rule, distinct keyword variant.
+/// `object_has_effective_face_down_keyword` spans Morph/Megamorph/Disguise; a
+/// regression narrowing that scan would leave the 31 Megamorph cards
+/// unoffered while every Morph test stays green.
+#[test]
+fn a_megamorph_creature_is_offered_and_dispatches_face_down() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let morph = scenario
+        .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
+        .with_keyword(Keyword::Megamorph(green_morph_cost()))
+        .with_mana_cost(green_morph_cost())
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+
+    assert!(
+        offered_cast(runner.state(), morph),
+        "a Megamorph card must be offered when only the {{3}} is payable"
+    );
+    assert!(
+        cast(&mut runner, morph),
+        "the offered cast must be accepted"
+    );
+    assert!(
+        runner.state().objects[&morph].face_down
+            && runner.state().objects[&morph].zone == Zone::Stack,
+        "the Megamorph spell must reach the stack face down"
+    );
+}
+
+/// CR 702.168b (Disguise) — the third keyword of the class (48 cards), cast
+/// face down as a 2/2 with ward {2} for the same fixed {3}.
+#[test]
+fn a_disguise_creature_is_offered_and_dispatches_face_down() {
+    use engine::types::keywords::DisguiseCost;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let disguised = scenario
+        .add_creature_to_hand(P0, "Faceless Hunter", 3, 2)
+        .with_keyword(Keyword::Disguise(DisguiseCost::Mana(green_morph_cost())))
+        .with_mana_cost(green_morph_cost())
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+
+    assert!(
+        offered_cast(runner.state(), disguised),
+        "a Disguise card must be offered when only the {{3}} is payable"
+    );
+    assert!(
+        cast(&mut runner, disguised),
+        "the offered cast must be accepted"
+    );
+    assert!(
+        runner.state().objects[&disguised].face_down
+            && runner.state().objects[&disguised].zone == Zone::Stack,
+        "the Disguise spell must reach the stack face down"
+    );
+}
