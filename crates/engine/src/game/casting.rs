@@ -2243,8 +2243,13 @@ pub(super) fn spell_cast_origin_zone(
     state: &GameState,
     spell_obj: &crate::game::game_object::GameObject,
 ) -> Zone {
-    spell_cast_origin(state, spell_obj.id)
-        .or_else(|| pending_cast_origin_zone_for(state, spell_obj.id))
+    // The IN-FLIGHT cast's record outranks the persisted stamp: the stamp is
+    // written at finalize, so during a NEW cast it can only describe a
+    // PREVIOUS cast of this object — a graveyard recast must not inherit a
+    // stale hand origin. Post-finalize the pending record is gone and the
+    // persisted authority answers.
+    pending_cast_origin_zone_for(state, spell_obj.id)
+        .or_else(|| spell_cast_origin(state, spell_obj.id))
         .unwrap_or(spell_obj.zone)
 }
 

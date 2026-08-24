@@ -338,6 +338,20 @@ pub(crate) fn apply_zone_exit_cleanup(
         // restored into the graveyard.
         crate::game::flip::revert_flip_on_zone_exit(obj_mut);
 
+        // CR 400.7: a zone change makes a new object with no memory of its
+        // cast. The `cast_from_zone` stamp (written at finalize for
+        // "was it cast from …" consumers) survives only onto the STACK (the
+        // cast itself) and onto the BATTLEFIELD (resolution — battlefield
+        // readers consume it there); every other destination clears it so a
+        // later recast from another zone cannot inherit a stale origin.
+        // The battlefield already owns its two resets
+        // (`reset_for_battlefield_entry`, restored from `CastLinkSnapshot`
+        // for genuine cast resolutions, and `reset_for_battlefield_exit`);
+        // this covers the remaining stack-exit window.
+        if to != Zone::Stack && to != Zone::Battlefield {
+            obj_mut.cast_from_zone = None;
+        }
+
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {
@@ -4352,6 +4366,32 @@ mod tests {
         assert_eq!(obj.name, "Front Face", "must show front face in graveyard");
         assert_eq!(obj.power, Some(1), "power must revert to front face");
         assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// #7782 round 3: a spell leaving the STACK for a non-battlefield zone
+    /// (countered / fizzled / instant to the graveyard) must lose its
+    /// `cast_from_zone` stamp (CR 400.7 — a new object has no memory of its
+    /// cast), so a later recast from another zone cannot inherit the stale
+    /// origin. The battlefield legs are owned by `reset_for_battlefield_entry`
+    /// / `_exit` and their `CastLinkSnapshot` restore.
+    #[test]
+    fn the_cast_from_zone_stamp_dies_off_stack_and_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(7782),
+            PlayerId(0),
+            "Stamped Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&id).unwrap().cast_from_zone = Some(Zone::Hand);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state.objects[&id].cast_from_zone, None,
+            "a spell leaving the stack for the graveyard must lose the stamp (CR 400.7)"
+        );
     }
 
     /// CR 708.9: A face-down permanent is revealed when it leaves the battlefield.
