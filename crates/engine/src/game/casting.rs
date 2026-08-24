@@ -2231,18 +2231,19 @@ pub(super) fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectI
     None
 }
 
-/// CR 601.2a: The cast's origin zone as grant filters must see it —
-/// `cast_from_zone` first (stamped during `finalize_cast` and persisting
-/// through the SpellCast event), the transient pending-cast record second,
-/// the object's current zone last. Single chain shared by the keyword-grant
-/// walkers and the alternative-cost grant, so a zone-less grant (Rooftop
-/// Storm) keeps matching a hand cast when it is re-asked after finalize.
+/// CR 601.2a: The cast's origin zone as grant filters must see it — the
+/// persisted origin first ([`spell_cast_origin`], which owns the stack
+/// ability-context vs. permanent-object storage split and survives
+/// `finalize_cast`), the transient pending-cast record second, the object's
+/// current zone last. Single chain shared by the keyword-grant walkers and
+/// the alternative-cost grant, so a zone-less grant (Rooftop Storm) keeps
+/// matching a hand cast — and an origin-scoped grant its exile cast — when
+/// re-asked after finalize, for permanents and instants/sorceries alike.
 pub(super) fn spell_cast_origin_zone(
     state: &GameState,
     spell_obj: &crate::game::game_object::GameObject,
 ) -> Zone {
-    spell_obj
-        .cast_from_zone
+    spell_cast_origin(state, spell_obj.id)
         .or_else(|| pending_cast_origin_zone_for(state, spell_obj.id))
         .unwrap_or(spell_obj.zone)
 }
