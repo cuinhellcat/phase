@@ -29884,3 +29884,66 @@ fn whole_event_threshold_effect_does_not_read_event_context_amount() {
         "detector must fire on an effect that DOES read the event amount"
     );
 }
+
+/// Issue #7795 (Aragorn, Company Leader): the Ring-tempts trigger's effect —
+/// "put your choice of a counter from among first strike, vigilance,
+/// deathtouch, and lifelink on ~" — must lower to the counter-kind choice, not
+/// to `Unimplemented`. The standalone effect parser already handles this
+/// clause (`choose_one_of_detects_from_among_counter_choice`); this pins the
+/// TRIGGER path reaching the same reader.
+#[test]
+fn ring_tempts_put_choice_from_among_lowers_to_counter_choice() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    const ORACLE: &str = "Whenever the Ring tempts you, if you chose a creature other than Aragorn as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Aragorn, Company Leader",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string()],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "parsed triggers: {:?}",
+        parsed.triggers
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::RingTemptsYou);
+
+    fn find_choice(def: &AbilityDefinition) -> Option<&Vec<AbilityDefinition>> {
+        if let Effect::ChooseOneOf { branches, .. } = &*def.effect {
+            return Some(branches);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            return find_choice(sub);
+        }
+        None
+    }
+
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let branches = find_choice(execute).unwrap_or_else(|| {
+        panic!(
+            "expected a ChooseOneOf in the trigger effect chain, got {:?}",
+            execute
+        )
+    });
+    let expected = [
+        KeywordKind::FirstStrike,
+        KeywordKind::Vigilance,
+        KeywordKind::Deathtouch,
+        KeywordKind::Lifelink,
+    ];
+    assert_eq!(branches.len(), expected.len());
+    for (branch, kind) in branches.iter().zip(expected) {
+        match &*branch.effect {
+            Effect::PutCounter { counter_type, .. } => {
+                assert_eq!(counter_type, &CounterType::Keyword(kind));
+            }
+            other => panic!("expected PutCounter branch, got {other:?}"),
+        }
+    }
+}
