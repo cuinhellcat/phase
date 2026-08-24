@@ -453,6 +453,17 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
     let type_prefix_original = subject.original[..type_prefix_lower.len()].trim();
     let after_spells = after_spells_lower.trim();
 
+    // CR 601.2a + CR 118.9: optional origin-zone qualifier on the subject — "a
+    // spell you cast from exile" (Warped Space, Dragon's Smile, Tlincalli
+    // Hunter), "a colorless spell you cast from your hand" (Darksteel
+    // Monolith). Shared zone authority with the keyword-grant subject walk;
+    // the runtime filter compares the cast's origin zone.
+    let (after_spells, zone_filter) =
+        match super::keyword_grant::parse_cast_origin_zone_qualifier(after_spells) {
+            Some((rest, prop)) => (rest, Some(prop)),
+            None => (after_spells, None),
+        };
+
     let parsed_cost = parse_oracle_cost(cost_slice);
     if !supported_alternative_cast_cost(&parsed_cost) {
         return None;
@@ -499,13 +510,32 @@ pub(crate) fn parse_spells_alternative_cost(text: &str) -> Option<StaticDefiniti
 
     // CR 118.9: a bare leading article ("a"/"an") with no type word — "a spell you
     // cast" (As Foretold) — scopes to any spell, same as the no-prefix case.
-    let base_filter = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
-        TargetFilter::Typed(TypedFilter::card())
+    let (base_filter, color_props) = if matches!(type_prefix_lower.trim(), "" | "a" | "an") {
+        (TargetFilter::Typed(TypedFilter::card()), Vec::new())
     } else {
-        parse_type_phrase(type_prefix_original).0
+        // CR 601.2a: singular subjects carry an article before the type word —
+        // "a creature spell", "a colorless spell" — peel it before the type
+        // phrase so the article is not read as a type word.
+        let peeled = opt(alt((tag::<_, _, VE<'_>>("a "), tag("an "))))
+            .parse(type_prefix_original)
+            .map_or(type_prefix_original, |(rest, _)| rest);
+        // CR 105.2: peel a color-quality prefix ("colorless spell" — Darksteel
+        // Monolith) via the shared authority — `parse_type_phrase` drops the
+        // word, which would silently over-broaden the grant to any spell. The
+        // helper expects the word with its trailing space, so re-pad the
+        // trimmed prefix slice.
+        let padded = format!("{peeled} ");
+        let (rest_padded, color_prop) = super::shared::peel_color_quality_prefix(&padded);
+        let rest = rest_padded.trim();
+        let base = if rest.is_empty() {
+            TargetFilter::Typed(TypedFilter::card())
+        } else {
+            parse_type_phrase(rest).0
+        };
+        (base, color_prop.into_iter().collect::<Vec<_>>())
     };
     let affected =
-        apply_spell_keyword_subject_constraints(base_filter, None, mv_filter, Vec::new());
+        apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter, color_props);
 
     Some(
         StaticDefinition::new(StaticMode::CastWithAlternativeCost {

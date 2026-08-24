@@ -2217,7 +2217,7 @@ pub(crate) fn spell_cast_origin(state: &GameState, object_id: ObjectId) -> Optio
 /// performs the Hand→Stack move itself, but should the ordering ever change
 /// this fallback preserves correctness for filters like "spells you cast from
 /// exile have convoke" that must evaluate against the pre-announcement zone.
-fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
+pub(super) fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectId) -> Option<Zone> {
     if let Some(pc) = state.waiting_for.pending_cast_ref() {
         if pc.object_id == object_id {
             return Some(pc.origin_zone);
@@ -2466,6 +2466,12 @@ pub(super) struct GrantedSpellAlternativeCost {
     /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
     /// `None` for `Unlimited` grants (Fist of Suns, Rooftop Storm, Jodah).
     pub(super) once_per_turn_source: Option<ObjectId>,
+    /// CR 118.9 + CR 601.2a (#7575): true when the grant's `affected` filter
+    /// itself constrains the cast's ORIGIN zone (`InZone`/`InAnyZone` — Warped
+    /// Space's "a spell you cast from exile"). Such a grant must reach an
+    /// authorized cast from that zone, so the alternative-cost offer's
+    /// hand-only default does not apply to it.
+    pub(super) origin_zone_scoped: bool,
 }
 
 pub(super) fn granted_spell_alternative_cost(
@@ -2523,6 +2529,10 @@ pub(super) fn granted_spell_alternative_cost_for(
             )
         });
         if matches {
+            let origin_zone_scoped = def
+                .affected
+                .as_ref()
+                .is_some_and(filter_constrains_origin_zone);
             return Some(GrantedSpellAlternativeCost {
                 // CR 107.3c + CR 118.9: A static's alternative cost can bind X
                 // to the affected spell's mana value (Kentaro). Concretize the
@@ -2533,11 +2543,33 @@ pub(super) fn granted_spell_alternative_cost_for(
                 timing_permission: *timing_permission,
                 once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
                     .then_some(source_obj.id),
+                origin_zone_scoped,
             });
         }
     }
 
     None
+}
+
+/// CR 118.9 + CR 601.2a: Whether a grant's `affected` filter carries an
+/// origin-zone constraint (`InZone`/`InAnyZone`) on any positive leaf. The
+/// spell-filter path compares those props against the cast's ORIGIN zone, so
+/// their presence is the grant's own statement "I apply to casts from that
+/// zone". `Not` legs are skipped: a negated zone is an exclusion, not a scope.
+fn filter_constrains_origin_zone(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::InZone { .. }
+                    | crate::types::ability::FilterProp::InAnyZone { .. }
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_constrains_origin_zone)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn effective_spell_keywords(
