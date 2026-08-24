@@ -11,8 +11,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
-import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState } from "../types";
+import type { WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { WIRE_PROTOCOL_VERSION } from "../../network/protocol";
 import { p2pFinalStateCommitment } from "../../services/p2pTerminalResult";
@@ -181,8 +182,16 @@ const nativeWebSocketMocks = vi.hoisted(() => ({
 
 vi.mock("../ws-adapter", () => ({
   WebSocketAdapter: vi.fn().mockImplementation(function () {
+    let playerId: number | null = null;
     return {
-      initializePregame: nativeWebSocketMocks.initializePregame,
+      get playerId() {
+        return playerId;
+      },
+      initializePregame: async () => {
+        const attachment = await nativeWebSocketMocks.initializePregame();
+        playerId = attachment.playerId;
+        return attachment;
+      },
       waitForPlayerSlots: nativeWebSocketMocks.waitForPlayerSlots,
       onEvent: nativeWebSocketMocks.onEvent,
       sendAbandonGame: nativeWebSocketMocks.sendAbandonGame,
@@ -1335,6 +1344,175 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     mockSubmitAction.mockClear();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(mockSubmitAction).not.toHaveBeenCalled();
+  });
+
+  it("replays a native AI driver fault after reconnecting guest's snapshot", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const fault: { id: number; revision: number; message: string } = {
+      id: 7,
+      revision: 3,
+      message: "Native AI driver stopped",
+    };
+    const host = adapter as unknown as {
+      authoritativeRevision: number;
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
+    };
+    host.authoritativeRevision = fault.revision;
+    await host.handleNativeAiDriverFault(fault);
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    const messages = await reconnectedGuest.getSentMessages();
+    expect(messages.map((message) => (message as { type: string }).type)).toEqual([
+      "reconnect_ack",
+      "ai_driver_fault",
+    ]);
+    expect(messages[1]).toMatchObject({ type: "ai_driver_fault", ...fault });
+  });
+
+  it("waits for a resumed native fault's final revision before replaying it to a reconnecting guest", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const setup = (await guest.getSentMessages()).find(
+      (message): message is { type: "game_setup"; playerToken: string } =>
+        typeof message === "object"
+        && message !== null
+        && (message as { type: string }).type === "game_setup",
+    );
+    expect(setup).toBeDefined();
+    guest.simulateClose();
+
+    const host = adapter as unknown as {
+      nativeAiDriverFault: { id: number; revision: number; message: string } | null;
+      deliveredNativeAiDriverFault: { id: number; revision: number; message: string } | null;
+    };
+    host.nativeAiDriverFault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    host.deliveredNativeAiDriverFault = null;
+
+    const reconnectedGuest = await joinGuest(emitConnection, {
+      type: "reconnect",
+      playerToken: setup!.playerToken,
+    });
+    await flushPromises();
+
+    const messageTypes = (await reconnectedGuest.getSentMessages()).map(
+      (message) => (message as { type: string }).type,
+    );
+    expect(messageTypes).toContain("reconnect_ack");
+    expect(messageTypes).not.toContain("ai_driver_fault");
+  });
+
+  it("renders a persisted native AI driver fault once when the host resumes", async () => {
+    const { peer, onGuestConnected } = createFakePeer();
+    const fault = { id: 7, revision: 3, message: "Native AI driver stopped" };
+    const adapter = new P2PHostAdapter(
+      {
+        player: { main_deck: ["Mountain"], sideboard: [] },
+        opponent: { main_deck: ["Forest"], sideboard: [] },
+        ai_decks: [],
+      },
+      peer as unknown as Peer,
+      onGuestConnected,
+      2,
+      commanderConfig(),
+      undefined,
+      5_000,
+      undefined,
+      true,
+      undefined,
+      {
+        gameId: "native-resume-fault",
+        roomCode: "ABCDE",
+        resumeData: {
+          session: {
+            gameId: "native-resume-fault",
+            roomCode: "ABCDE",
+            sessionKey: "native-resume-fault-session",
+            useBroker: false,
+            playerTokens: {},
+            guestDecks: {},
+            kickedTokens: [],
+            eliminatedSeats: [],
+            playerCount: 2,
+            hostDeckData: {
+              player: { main_deck: ["Mountain"], sideboard: [] },
+              opponent: { main_deck: ["Forest"], sideboard: [] },
+              ai_decks: [],
+            },
+            gameStarted: true,
+            nativeAiDriverFault: fault,
+            nativeSession: {
+              gameCode: "native-game",
+              fullKey: { game_code: "native-game", generation: 1 },
+              playerTokens: { 0: "native-host-token" },
+            },
+          },
+        },
+      },
+      {},
+    );
+    nativeWebSocketMocks.initializePregame.mockResolvedValue(NATIVE_HOST_ATTACHMENT);
+
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+
+    const onNativeEvent = nativeWebSocketMocks.onEvent.mock.calls[0]?.[0] as
+      | ((event: WsAdapterEvent) => void)
+      | undefined;
+    if (!onNativeEvent) throw new Error("Native bridge did not register a WebSocket event listener");
+
+    const finalSnapshot: EngineSnapshot = {
+      state: remoteState("native AI final state"),
+      legalResult: { actions: [], autoPassRecommended: false },
+      seq: 3,
+    };
+    onNativeEvent({
+      type: "stateChanged",
+      snapshot: finalSnapshot,
+      events: [],
+      serverRevision: fault.revision,
+    });
+    await flushPromises();
+    const host = adapter as unknown as {
+      handleNativeAiDriverFault: (driverFault: typeof fault) => Promise<void>;
+    };
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault(fault);
+    await host.handleNativeAiDriverFault({ ...fault, id: fault.id + 1 });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "stateChanged",
+      snapshot: finalSnapshot,
+      events: [],
+    }));
+    expect(events).toContainEqual({ type: "error", message: fault.message });
   });
 
   it("kick adds token to denylist; subsequent reconnect with same token is rejected", async () => {

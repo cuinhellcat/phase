@@ -80,6 +80,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * of silently corrupting state.
  *
  * Bumps to date:
+ *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *       classification of the live target announcement. The field is optional
+ *       and parses on a v24 peer, so the loss is silent: this client deleted
+ *       inferTargetNoun, so a v24 host would leave a v25 guest naming no
+ *       target at all. The handshake is the only place to refuse it.
  *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
  *       changed from a string to a typed Emerge-sacrifice descriptor. Older
  *       clients would receive an object where their modal expects display text.
@@ -127,7 +132,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 24 as const;
+export const WIRE_PROTOCOL_VERSION = 26 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
@@ -190,6 +195,9 @@ export type P2PMessage = P2PAuthorityWire & (
    * lease-bound; guests pin the first valid terminal id and never reconnect
    * after accepting the commitment for their filtered state. */
   | { type: "terminal_result"; result: P2PTerminalResult }
+  /** Native server AI became unable to advance the authoritative session.
+   * The host sends this only after the final state revision it depends on. */
+  | { type: "ai_driver_fault"; id: number; revision: number; message: string }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -229,6 +237,7 @@ const VALID_TYPES = new Set([
   "kick",
   "host_left",
   "terminal_result",
+  "ai_driver_fault",
   "player_kicked",
   "player_conceded",
   "player_disconnected",

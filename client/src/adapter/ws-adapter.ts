@@ -203,6 +203,13 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *      classification of the live target announcement. A CAPABILITY bump like
+ *      24 and 32, not a parse bump: the field is serde-optional, but this
+ *      client deleted inferTargetNoun, so a v34 server that omits it would
+ *      leave this client naming no target at all — silently, with no parse
+ *      error to catch it. The handshake is the only place that pairing is
+ *      refusable.
  * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
  *      not publish an affirmative original/copy identity.
  * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
@@ -262,7 +269,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 33;
+export const PROTOCOL_VERSION = 35;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -380,6 +387,7 @@ export type WsAdapterEvent =
   | { type: "playerEliminated"; playerId: PlayerId; becameSpectator: boolean }
   | { type: "spectatorJoined"; name: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "aiDriverFault"; id: number; revision: number; message: string }
   | { type: "error"; message: string }
   | { type: "deckRejected"; reason: string }
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
@@ -1851,6 +1859,27 @@ export class WebSocketAdapter implements EngineAdapter {
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         this.emit({ type: "error", message: data.message });
+        break;
+      }
+
+      case "AiDriverFault": {
+        const data = msg.data as {
+          fault: { id: number; after_state_revision: number; cause: unknown };
+        };
+        const message = "Native AI driver stopped; this game can no longer advance.";
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        this.emit({
+          type: "aiDriverFault",
+          id: data.fault.id,
+          revision: data.fault.after_state_revision,
+          message,
+        });
+        this.emit({ type: "error", message });
         break;
       }
     }
