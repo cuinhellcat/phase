@@ -786,8 +786,7 @@ pub(crate) fn payable_spell_alternative_cost_details(
     }
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
-    let origin_zone =
-        super::casting::pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
+    let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -23890,6 +23889,107 @@ its replicate cost was paid.)\nDraw a card.";
             payable_spell_alternative_cost(&state, caster, spell),
             None,
             "a graveyard-origin pending cast is a zone mismatch for the exile-scoped grant"
+        );
+    }
+
+    /// #7782 round 2 (CodeRabbit): after `finalize_cast` the pending record is
+    /// gone and `cast_from_zone` is the surviving origin authority. A re-ask
+    /// must still see the true origin — a zone-less grant keeps matching the
+    /// finalized hand cast, and the exile-scoped grant the finalized exile
+    /// cast.
+    #[test]
+    fn the_stamped_cast_from_zone_survives_finalize_for_the_grant() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Host".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let finalized = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Finalized Hand Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the zone-less grant must keep matching the finalized hand cast"
+        );
+
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let exile_grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(typed));
+        let exile_source = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exile_source)
+            .unwrap()
+            .static_definitions
+            .push(exile_grant);
+        let exile_finalized = create_object(
+            &mut state,
+            CardId(4),
+            caster,
+            "Finalized Exile Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&exile_finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Exile);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exile_finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the exile-scoped grant must keep matching the finalized exile cast"
         );
     }
 }

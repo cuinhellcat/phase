@@ -2231,6 +2231,22 @@ pub(super) fn pending_cast_origin_zone_for(state: &GameState, object_id: ObjectI
     None
 }
 
+/// CR 601.2a: The cast's origin zone as grant filters must see it —
+/// `cast_from_zone` first (stamped during `finalize_cast` and persisting
+/// through the SpellCast event), the transient pending-cast record second,
+/// the object's current zone last. Single chain shared by the keyword-grant
+/// walkers and the alternative-cost grant, so a zone-less grant (Rooftop
+/// Storm) keeps matching a hand cast when it is re-asked after finalize.
+pub(super) fn spell_cast_origin_zone(
+    state: &GameState,
+    spell_obj: &crate::game::game_object::GameObject,
+) -> Zone {
+    spell_obj
+        .cast_from_zone
+        .or_else(|| pending_cast_origin_zone_for(state, spell_obj.id))
+        .unwrap_or(spell_obj.zone)
+}
+
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
 /// (CR 604.1). `fused` projects a pre-payment fused split spell with its COMBINED
 /// characteristics (CR 702.102b) so `CastWithKeyword` `affected` filters keyed on
@@ -2247,14 +2263,8 @@ fn granted_spell_keywords_for(
         return Vec::new();
     };
 
-    // CR 601.2a: Prefer cast_from_zone (stamped during finalize_cast and persists
-    // through SpellCast event) over pending_cast_origin_zone_for (transient and
-    // cleared after finalize_cast). This ensures origin zone is available when
-    // triggers are processed for filters like "InZone { zone: Hand }".
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
@@ -2324,10 +2334,8 @@ fn granted_spell_keyword_instances_for(
         return Vec::new();
     };
 
-    let origin_zone = spell_obj
-        .cast_from_zone
-        .or_else(|| pending_cast_origin_zone_for(state, object_id))
-        .unwrap_or(spell_obj.zone);
+    // CR 601.2a: single origin-zone chain (see `spell_cast_origin_zone`).
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
@@ -2487,7 +2495,10 @@ pub(super) fn granted_spell_alternative_cost_for(
     fused: bool,
 ) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
-    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+    // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
+    // after finalize (cast_from_zone stamped, pending cleared) still sees the
+    // true origin instead of Zone::Stack.
+    let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     // CR 604.1: Functioning gate owned by `game_active_statics`.
     for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
