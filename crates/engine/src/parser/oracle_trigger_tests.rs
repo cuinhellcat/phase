@@ -29913,6 +29913,14 @@ fn ring_tempts_put_choice_from_among_lowers_to_counter_choice() {
     );
     let trigger = &parsed.triggers[0];
     assert_eq!(trigger.mode, TriggerMode::RingTemptsYou);
+    // CR 603.4: the intervening "if you chose a creature other than ~ as your
+    // Ring-bearer" must survive as a trigger-level condition — dropping it
+    // would fire the counter choice even when Aragorn himself is chosen.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::ChoseOtherRingBearer),
+        "intervening-if must lower to ChoseOtherRingBearer"
+    );
 
     fn find_choice(def: &AbilityDefinition) -> Option<&Vec<AbilityDefinition>> {
         if let Effect::ChooseOneOf { branches, .. } = &*def.effect {

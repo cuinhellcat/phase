@@ -4278,6 +4278,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::GainedLife { minimum } => format!("gained {minimum}+ life this turn"),
         TC::LostLife => "lost life this turn".into(),
         TC::Descended => "descended this turn".into(),
+        TC::ChoseOtherRingBearer => "chose a creature other than this as your Ring-bearer".into(),
         TC::ControlsType { filter } => format!("you control {}", fmt_target(filter)),
         TC::NoSpellsCastLastTurn => "no spells cast last turn".into(),
         TC::TwoOrMoreSpellsCastLastTurn => "two or more spells cast last turn".into(),

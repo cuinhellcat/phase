@@ -5036,6 +5036,18 @@ fn graveyard_origin_or_condition(owner: Option<ControllerRef>) -> TriggerConditi
 /// where
 ///   <compact-form>     = "entered or " ( "was" | "were" ) " cast from a graveyard"
 ///   <split-your-form>  = "entered from your graveyard or you cast it from your graveyard"
+/// CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
+/// ring-bearer, " — Aragorn, Company Leader's intervening-if. The card name is
+/// already normalized to `~` at the parser entry point (CR 201.5: a name in an
+/// object's own text means just that object).
+fn parse_chose_other_ring_bearer_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
+    value(
+        TriggerCondition::ChoseOtherRingBearer,
+        tag("if you chose a creature other than ~ as your ring-bearer, "),
+    )
+    .parse(input)
+}
+
 fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if ").parse(input)?;
     let (rest, _) = alt((tag("it "), tag("they "))).parse(rest)?;
@@ -5383,6 +5395,20 @@ fn extract_if_condition_with_card_name(
 
     // --- Source-referential patterns (cannot be StaticConditions) ---
     // These require trigger-source context that StaticCondition can't express.
+
+    // CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
+    // ring-bearer" (Aragorn, Company Leader) — the temptation that fired this
+    // RingTemptsYou observer completes its bearer choice before the batched
+    // triggers drain, so the condition reads the fresh choice at fire time.
+    if let Some((before, condition, rest)) =
+        scan_preceded(&lower, parse_chose_other_ring_bearer_intervening_if)
+    {
+        let clause_len = lower.len() - before.len() - rest.len();
+        return (
+            strip_condition_clause(text, before.len(), clause_len),
+            Some(condition),
+        );
+    }
 
     // CR 603.4 + CR 702.33d-f + CR 702.166a: an ETB "if it was kicked
     // [twice]" or "if it was bargained" clause is an

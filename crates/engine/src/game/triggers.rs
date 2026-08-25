@@ -2394,7 +2394,15 @@ fn collect_matching_triggers_inner(
                     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if
                     // clauses read the defending player from each expanded attack
                     // event — the batch-level event is the wrong context.
-                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks);
+                    //
+                    // CR 701.54a + CR 603.4: the Ring-bearer choice completes
+                    // AFTER the RingTemptsYou event is collected (the temptation
+                    // resolution pauses on `ChooseRingBearer`), so the
+                    // bearer-dependent intervening-if cannot be read here —
+                    // defer to the CR 603.4 resolution re-check, exactly like
+                    // the Attacks class defers to per-event expansion.
+                    let skip_early_condition = matches!(trig_def.mode, TriggerMode::Attacks)
+                        || matches!(condition, TriggerCondition::ChoseOtherRingBearer);
                     if !skip_early_condition
                         && !check_trigger_condition_with_source(
                             state,
@@ -2628,13 +2636,23 @@ fn collect_matching_triggers_inner(
                 // instead of the declaration that caused the trigger.
                 if !trig_def.batched {
                     if let Some(ref condition) = trig_def.condition {
-                        if !check_trigger_condition_with_source(
-                            state,
-                            condition,
-                            controller,
-                            Some(&source_context),
-                            Some(&trigger_event),
-                        ) {
+                        // CR 701.54a + CR 603.4: the Ring-bearer choice
+                        // completes AFTER the RingTemptsYou event is collected
+                        // (the temptation pauses on `ChooseRingBearer`), so the
+                        // bearer-dependent intervening-if cannot be read here —
+                        // defer to the CR 603.4 resolution re-check, mirroring
+                        // the sibling skip in the immediate-collection path.
+                        let skip_early_condition =
+                            matches!(condition, TriggerCondition::ChoseOtherRingBearer);
+                        if !skip_early_condition
+                            && !check_trigger_condition_with_source(
+                                state,
+                                condition,
+                                controller,
+                                Some(&source_context),
+                                Some(&trigger_event),
+                            )
+                        {
                             continue;
                         }
                     }
@@ -12872,6 +12890,12 @@ fn evaluate_trigger_condition_with_source(
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
+        // CR 701.54a + CR 603.4: the bearer choice precedes the batched
+        // observer-trigger drain, so this reads the freshly chosen bearer.
+        TriggerCondition::ChoseOtherRingBearer => {
+            let bearer = state.ring_bearer.get(&controller).copied().flatten();
+            bearer.is_some_and(|chosen| source_id != Some(chosen))
+        }
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
             source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
         }),

@@ -1,29 +1,30 @@
-//! Issue #7795 (Aragorn, Company Leader): a triggered ability with an
-//! intervening "if" whose body is "put your choice of a counter from among
-//! first strike, vigilance, deathtouch, and lifelink on ~" lowers through the
-//! AST imperative route, which used to swallow the clause as `Unimplemented`.
-//! Runtime proof over the real pipeline: trigger fires → the four-kind
-//! `ChooseOneOfBranch` is offered → exactly the chosen counter folds.
+//! Issue #7795 (Aragorn, Company Leader) — the REAL Ring-tempts pipeline:
+//! `Effect::RingTemptsYou` → `WaitingFor::ChooseRingBearer` →
+//! `state.ring_bearer` write → batched `TriggerMode::RingTemptsYou` observer
+//! drain → intervening-if `ChoseOtherRingBearer` → four-kind
+//! `ChooseOneOfBranch` → the picked counter folds onto Aragorn.
 //!
-//! The trigger here is a life-gain stand-in for the Ring-tempts head (same
-//! effect-body route — the head does not change the body's parse path; the
-//! intervening "if" does). REVERT DISCRIMINATOR: without the AST-route
-//! `try_parse_put_counter_choice` call the body parses as `Unimplemented`,
-//! the resolved trigger never pauses, and the `ChooseOneOfBranch` assertion
-//! fails.
+//! Aragorn's first printed line verbatim (the second line's counter
+//! reproduction is out of scope here). REVERT DISCRIMINATORS:
+//! - without the AST-route `try_parse_put_counter_choice` call the trigger
+//!   body is `Unimplemented` — no `ChooseOneOfBranch` ever appears;
+//! - without `TriggerCondition::ChoseOtherRingBearer` the intervening-if is
+//!   dropped — `choosing_aragorn_himself_offers_no_counter_choice` sees the
+//!   counter prompt it must not see.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 
-const BEARER: &str = "Whenever you gain life, if you control an artifact, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on ~.";
-const GAIN: &str = "You gain 3 life.";
+const ARAGORN: &str = "Whenever the Ring tempts you, if you chose a creature other than Aragorn as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.";
+const TEMPT: &str = "The Ring tempts you.";
 
-fn counter_count(runner: &GameRunner, object: ObjectId, kind: KeywordKind) -> u32 {
+fn keyword_counter(runner: &GameRunner, object: ObjectId, kind: KeywordKind) -> u32 {
     runner
         .state()
         .objects
@@ -32,107 +33,127 @@ fn counter_count(runner: &GameRunner, object: ObjectId, kind: KeywordKind) -> u3
         .unwrap_or(0)
 }
 
-fn cast_spell(runner: &mut GameRunner, spell: ObjectId) {
-    let card_id = runner
-        .state()
-        .objects
-        .get(&spell)
-        .expect("spell object exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast must be accepted");
-}
-
-/// Drive to stack-empty; when the counter choice appears, pick `index` after
-/// asserting all four kinds are offered. Returns whether a choice was offered.
-fn drive_and_choose(runner: &mut GameRunner, index: usize) -> bool {
-    let mut chosen = false;
+/// Drive the temptation to a settled board. Every prompt is answered or the
+/// test dies: an unexpected prompt and a rejected action both panic, and the
+/// loop must REACH the empty-stack terminal — falling off the iteration bound
+/// is a failure, so "no counter choice offered" can never be misreported.
+fn drive_temptation(runner: &mut GameRunner, bearer: ObjectId, counter_index: usize) -> bool {
+    let mut counter_choice_seen = false;
     for _ in 0..64 {
-        let wf = runner.state().waiting_for.clone();
-        match wf {
-            WaitingFor::ChooseOneOfBranch { branches, .. } => {
-                assert_eq!(branches.len(), 4, "all four counter kinds offered");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseRingBearer { candidates, .. } => {
+                assert!(
+                    candidates.contains(&bearer),
+                    "intended bearer must be a legal candidate, got {candidates:?}"
+                );
                 runner
-                    .act(GameAction::ChooseBranch { index })
+                    .act(GameAction::ChooseRingBearer { target: bearer })
+                    .expect("the Ring-bearer choice must be accepted");
+            }
+            WaitingFor::ChooseOneOfBranch { branches, .. } => {
+                assert_eq!(branches.len(), 4, "all four counter kinds must be offered");
+                runner
+                    .act(GameAction::ChooseBranch {
+                        index: counter_index,
+                    })
                     .expect("choosing a counter kind must succeed");
-                chosen = true;
+                counter_choice_seen = true;
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
-                    break;
+                    return counter_choice_seen;
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority must be accepted mid-drive");
             }
-            other => panic!("unexpected prompt: {other:?}"),
+            other => panic!("unexpected prompt during the temptation: {other:?}"),
         }
     }
-    chosen
+    panic!("temptation never settled to an empty stack within 64 steps");
 }
 
-fn scenario_with_bearer(with_artifact: bool) -> (GameRunner, ObjectId, ObjectId) {
+fn tempted_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let bearer = scenario
-        .add_creature_from_oracle(P0, "Choice Bearer", 2, 2, BEARER)
+    let aragorn = scenario
+        .add_creature_from_oracle(P0, "Aragorn, Company Leader", 2, 2, ARAGORN)
         .id();
-    if with_artifact {
-        scenario.add_artifact_from_oracle(P0, "Plain Trinket", "");
-    }
-    let gain = scenario
-        .add_spell_to_hand_from_oracle(P0, "Restorative Draught", true, GAIN)
+    let companion = scenario.add_creature(P0, "Companion Hobbit", 1, 1).id();
+    let tempt = scenario
+        .add_spell_to_hand(P0, "Temptation Test", false)
+        .from_oracle_text(TEMPT)
+        .with_mana_cost(ManaCost::generic(0))
         .id();
-    (scenario.build(), bearer, gain)
+    scenario.with_mana_pool(P0, vec![]);
+    let mut runner = scenario.build();
+    runner.cast(tempt).resolve();
+    (runner, aragorn, companion, tempt)
 }
 
 #[test]
-fn the_resolved_trigger_offers_four_kinds_and_folds_the_pick() {
-    let (mut runner, bearer, gain) = scenario_with_bearer(true);
-    cast_spell(&mut runner, gain);
-    let chosen = drive_and_choose(&mut runner, 3);
+fn choosing_another_bearer_offers_the_choice_and_folds_the_pick() {
+    let (mut runner, aragorn, companion, _) = tempted_board();
 
-    assert!(chosen, "the counter-kind choice must be offered");
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::Lifelink), 1);
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::FirstStrike), 0);
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::Vigilance), 0);
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::Deathtouch), 0);
-    let obj = runner.state().objects.get(&bearer).expect("bearer exists");
-    assert!(obj.has_keyword(&Keyword::Lifelink));
-    assert!(
-        !obj.has_keyword(&Keyword::FirstStrike),
-        "unchosen kinds must not be granted"
+    let offered = drive_temptation(&mut runner, companion, 3);
+
+    assert!(offered, "the counter-kind choice must be offered");
+    assert_eq!(
+        runner.state().ring_bearer.get(&P0).copied().flatten(),
+        Some(companion),
+        "the chosen companion must be the Ring-bearer"
     );
+    assert_eq!(keyword_counter(&runner, aragorn, KeywordKind::Lifelink), 1);
+    assert_eq!(
+        keyword_counter(&runner, aragorn, KeywordKind::FirstStrike),
+        0,
+        "unchosen kinds must not be folded"
+    );
+    let obj = runner
+        .state()
+        .objects
+        .get(&aragorn)
+        .expect("Aragorn exists");
+    assert!(obj.has_keyword(&Keyword::Lifelink));
+    assert!(!obj.has_keyword(&Keyword::FirstStrike));
 }
 
 #[test]
 fn a_different_pick_folds_only_that_kind() {
-    let (mut runner, bearer, gain) = scenario_with_bearer(true);
-    cast_spell(&mut runner, gain);
-    let chosen = drive_and_choose(&mut runner, 0);
+    let (mut runner, aragorn, companion, _) = tempted_board();
 
-    assert!(chosen, "the counter-kind choice must be offered");
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::FirstStrike), 1);
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::Lifelink), 0);
+    assert!(drive_temptation(&mut runner, companion, 0));
+    assert_eq!(
+        keyword_counter(&runner, aragorn, KeywordKind::FirstStrike),
+        1
+    );
+    assert_eq!(keyword_counter(&runner, aragorn, KeywordKind::Lifelink), 0);
 }
 
-/// Negative + reach-guard pair: with the intervening "if" unsatisfied (no
-/// artifact), the fired trigger must fizzle without offering the choice. The
-/// positive tests above prove the same fixture DOES reach the choice, so this
-/// cannot pass vacuously.
+/// CR 603.4 intervening-if negative + reach-guard pair: choosing ARAGORN
+/// himself must not offer the counter choice (the positive tests prove the
+/// same fixture DOES reach it for another bearer, so this cannot pass
+/// vacuously).
 #[test]
-fn an_unsatisfied_intervening_if_offers_no_choice() {
-    let (mut runner, bearer, gain) = scenario_with_bearer(false);
-    cast_spell(&mut runner, gain);
-    let chosen = drive_and_choose(&mut runner, 0);
+fn choosing_aragorn_himself_offers_no_counter_choice() {
+    let (mut runner, aragorn, _companion, _) = tempted_board();
 
-    assert!(!chosen, "no choice may be offered when the if fails");
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::FirstStrike), 0);
-    assert_eq!(counter_count(&runner, bearer, KeywordKind::Lifelink), 0);
+    let offered = drive_temptation(&mut runner, aragorn, 0);
+
+    assert!(
+        !offered,
+        "no counter choice may be offered when Aragorn is his own bearer"
+    );
+    assert_eq!(
+        runner.state().ring_bearer.get(&P0).copied().flatten(),
+        Some(aragorn)
+    );
+    for kind in [
+        KeywordKind::FirstStrike,
+        KeywordKind::Vigilance,
+        KeywordKind::Deathtouch,
+        KeywordKind::Lifelink,
+    ] {
+        assert_eq!(keyword_counter(&runner, aragorn, kind), 0);
+    }
 }

@@ -22618,6 +22618,14 @@ pub enum TriggerCondition {
     /// CR 400.7 + CR 508.1 + CR 603.4: True only when this exact source
     /// incarnation attacked during the current combat.
     SourceAttackedThisCombat,
+    /// CR 701.54a + CR 603.4: "if you chose a creature other than ~ as your
+    /// Ring-bearer" (Aragorn, Company Leader). True when the controller's
+    /// current Ring-bearer exists and is NOT the trigger source. The
+    /// temptation that fires the observer trigger completes its bearer choice
+    /// before the batched triggers drain (the `ChooseRingBearer` arm writes
+    /// `state.ring_bearer` first), so the trigger-time read sees the fresh
+    /// choice.
+    ChoseOtherRingBearer,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -23077,6 +23085,7 @@ impl TriggerCondition {
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
+            | TriggerCondition::ChoseOtherRingBearer
             | TriggerCondition::ControlsType { .. }
             | TriggerCondition::NoSpellsCastLastTurn
             | TriggerCondition::TwoOrMoreSpellsCastLastTurn

@@ -1943,6 +1943,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
+        | TriggerCondition::ChoseOtherRingBearer
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
         // CR 725.1: no `legacy_player_scope` classifier exists, and both scopes
@@ -6663,6 +6664,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastDuringPhase { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ChosenLabelIs { .. }
+        | TriggerCondition::ChoseOtherRingBearer
         | TriggerCondition::ExceptFirstDrawInDrawStep
         | TriggerCondition::PlacedByAbilitySource => RwProfile::empty(),
         // CR 903.3d: a LIVE battlefield census — see `commander_control_read`.

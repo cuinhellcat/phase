@@ -3237,6 +3237,8 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             projected: true,
         },
         TriggerCondition::Descended => Axes::NONE,
+        // CR 701.54a: reads the global Ring-bearer designation — no axes.
+        TriggerCondition::ChoseOtherRingBearer => Axes::NONE,
         TriggerCondition::ControlsType { filter } => {
             let mut acc = Axes {
                 event: false,
