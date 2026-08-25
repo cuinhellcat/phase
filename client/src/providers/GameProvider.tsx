@@ -37,6 +37,8 @@ import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore"
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
+import { resyncFromAdapter } from "../game/staleStateWatchdog";
+import { debugLog } from "../game/debugLog";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
 import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
@@ -768,7 +770,10 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              debugLog(`p2p remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              void resyncFromAdapter("delivery rejected");
+            });
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -1244,7 +1249,10 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+              debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              void resyncFromAdapter("delivery rejected");
+            });
             useMultiplayerStore.getState().setConnectionStatus("connected");
             const wsState = event.snapshot.state;
             if (
@@ -1680,7 +1688,10 @@ export function GameProvider({
               if (!useGameStore.getState().adapter && adapter) {
                 useGameStore.setState({ adapter });
               }
-              processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets);
+              processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
+              debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              void resyncFromAdapter("delivery rejected");
+            });
             }
             if (event.type === "gameOver") {
               useGameStore.setState({

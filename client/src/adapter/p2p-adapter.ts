@@ -2498,12 +2498,11 @@ export class P2PHostAdapter implements EngineAdapter {
             break;
           }
           await this.broadcastStateUpdate(result.events, result.log_entries);
-          // Wake the AI loop. After a guest's action lands, priority may have
-          // shifted to an AI seat — without this, the AI never gets a turn
-          // and the game stalls (same pattern as concedePlayer/host submit).
-          await this.runAiLoop();
-          this.persistAuthoritativeState();
-          // Emit local stateChanged so host UI updates for opponent actions.
+          // Emit local stateChanged so host UI updates for opponent actions —
+          // BEFORE the AI loop and persistence: the guests are already served
+          // above, so a throw in either later step must not cost the host its
+          // own update (#7836: host frozen on the mulligan-wait overlay while
+          // the guest played on).
           if (!this.nativeBridge) {
             this.emit({
               type: "stateChanged",
@@ -2512,6 +2511,11 @@ export class P2PHostAdapter implements EngineAdapter {
               logEntries: result.log_entries,
             });
           }
+          // Wake the AI loop. After a guest's action lands, priority may have
+          // shifted to an AI seat — without this, the AI never gets a turn
+          // and the game stalls (same pattern as concedePlayer/host submit).
+          await this.runAiLoop();
+          this.persistAuthoritativeState();
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           const session = this.guestSessions.get(pid);
@@ -2539,8 +2543,8 @@ export class P2PHostAdapter implements EngineAdapter {
             ? await this.nativeBridge.submitInteraction(msg.submission, pid)
             : await this.wasm.submitInteraction(msg.submission, pid);
           await this.broadcastStateUpdate(result.events, result.log_entries);
-          await this.runAiLoop();
-          this.persistAuthoritativeState();
+          // Local emit before the fallible steps — same reasoning as the
+          // "action" case above (#7836).
           if (!this.nativeBridge) {
             this.emit({
               type: "stateChanged",
@@ -2549,6 +2553,8 @@ export class P2PHostAdapter implements EngineAdapter {
               logEntries: result.log_entries,
             });
           }
+          await this.runAiLoop();
+          this.persistAuthoritativeState();
         } catch (err) {
           void this.send(session, {
             type: "action_rejected",

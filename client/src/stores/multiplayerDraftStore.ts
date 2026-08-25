@@ -26,6 +26,8 @@ import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from ".
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
+import { resyncFromAdapter } from "../game/staleStateWatchdog";
+import { debugLog } from "../game/debugLog";
 import { useGameStore } from "./gameStore";
 import {
   DraftPodHostAdapter,
@@ -882,7 +884,12 @@ export const useMultiplayerDraftStore = create<
             resolveRoomFull();
           }
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              // A rejected delivery is otherwise gone and the screen freezes
+              // on the previous state — surface it and re-sync immediately.
+              debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              void resyncFromAdapter("delivery rejected");
+            });
           }
           if (event.type === "stateChanged") {
             const wf = event.snapshot.state?.waiting_for;
@@ -968,7 +975,12 @@ export const useMultiplayerDraftStore = create<
 
         matchAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            void processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries).catch((err) => {
+              // A rejected delivery is otherwise gone and the screen freezes
+              // on the previous state — surface it and re-sync immediately.
+              debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+              void resyncFromAdapter("delivery rejected");
+            });
           }
           if (event.type === "stateChanged") {
             const wf = event.snapshot.state?.waiting_for;
