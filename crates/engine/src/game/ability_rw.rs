@@ -1441,6 +1441,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -2274,14 +2275,25 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
 fn legacy_player_filter(x: &PlayerFilter) -> bool {
     match x {
         PlayerFilter::TriggeringPlayer => true,
-        PlayerFilter::ControlsCount { count, .. } => legacy_quantity_expr(count),
+        // The nested population is part of this filter's graph — a
+        // legacy ref inside "a player who controls <filter>" is still a legacy
+        // ref. `ability_scan::scan_player_filter` is the reference traversal.
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            legacy_target_filter(filter) || legacy_quantity_expr(count)
+        }
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
         PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
+        // The damage-source narrowing is a nested object population.
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_deref().is_some_and(legacy_target_filter)
+        }
+        // The per-member narrowing is a nested object population;
+        // the membership ledger itself stays non-legacy (see the group below).
+        PlayerFilter::TrackedSetPossessor { filter, .. } => legacy_target_filter(filter),
         PlayerFilter::OpponentLostLife
         | PlayerFilter::OpponentGainedLife
-        | PlayerFilter::OpponentDealtDamage { .. }
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
@@ -2299,9 +2311,6 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         | PlayerFilter::PerformedActionThisWay { .. }
         | PlayerFilter::OwnersOfCardsExiledBySource
         | PlayerFilter::VotedFor { .. }
-        // Per-resolution chain ledger read, like `ZoneChangedThisWay` and the
-        // `TrackedSetSize` quantity refs — not one of the retained legacy refs.
-        | PlayerFilter::TrackedSetPossessor { .. }
         | PlayerFilter::ChosenPlayer { .. } => false,
     }
 }
@@ -2336,6 +2345,11 @@ fn legacy_controller_ref(x: &ControllerRef) -> bool {
 /// serde oracle's whole-value walk). `ParentTargetSlot` is deliberately excluded.
 fn legacy_target_filter(f: &TargetFilter) -> bool {
     match f {
+        // CR 102.1: the player-axis crossing. `legacy_player_filter` is the
+        // authority for whether a player predicate carries a legacy-12 tag
+        // (`PlayerAttribute`'s quantity payloads can), so delegate rather than
+        // flattening this to `false`.
+        TargetFilter::PlayerMatching { player } => legacy_player_filter(player),
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -2647,6 +2661,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -6842,6 +6857,10 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         }
         // CR 607.2d / CR 607.2m (by analogy): durable per-player anchor-label reads.
         TargetFilter::PlayerWhoChoseLabel { label: _ } => reads_player_of(StateKind::Other),
+        // CR 102.1: an arbitrary player predicate reads whatever its payload
+        // reads (life totals, controlled-permanent counts, attack history), so
+        // delegate to the player-axis profiler instead of flattening it here.
+        TargetFilter::PlayerMatching { player } => rw_player_filter(player),
         // CR 608.2h + CR 113.7a: source-controller resolution follows the
         // source's exact live-or-LKI incarnation.
         TargetFilter::SourceController => reads_src_of(StateKind::Other),
@@ -6905,11 +6924,22 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
             reads_player_of(StateKind::JournalLife)
         }
+        // The life-journal read is this filter's own axis, but the
+        // optional damage-SOURCE narrowing is a nested object population that
+        // carries its own reads — fold it in rather than dropping it, matching
+        // how `ControlsCount` / `TrackedSetPossessor` fold their nested filters
+        // below and how `ability_scan::scan_player_filter` recurses.
         PlayerFilter::OpponentDealtDamage {
-            source: _,
+            source,
             kind: _,
             min_sources: _,
-        } => reads_player_of(StateKind::JournalLife),
+        } => {
+            let mut p = reads_player_of(StateKind::JournalLife);
+            if let Some(source) = source.as_deref() {
+                p.merge(rw_target_filter(source));
+            }
+            p
+        }
         // D5 carrier.
         PlayerFilter::TriggeringPlayer => legacy_ref(),
         PlayerFilter::OpponentOtherThanTriggering
