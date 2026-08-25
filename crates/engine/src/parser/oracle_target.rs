@@ -2501,7 +2501,9 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += color_len;
     }
 
-    // CR 205.4b: Parse one or more comma-separated negation prefixes.
+    // CR 109.3: Parse one or more comma-separated negation prefixes. A `non-`
+    // prefix negates exactly one characteristic — card type, subtype, supertype,
+    // or color — and `classify_negation` routes it to the layer that owns it.
     // "noncreature, nonland permanent" → [Non(Creature), Non(Land)] in type_filters
     // "nonartifact, nonblack creature" → Non(Artifact) in type_filters, NotColor("Black") in properties
     //
@@ -3141,7 +3143,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
+    // CR 205.3: "that isn't a <Subtype>" relative-clause negation.
     // Checked before `parse_that_clause_suffix` so the subtype exclusion short-circuits
     // the generic that-clause branch (which does not recognize subtype negation).
     if let Some((neg_tfs, consumed)) = parse_that_isnt_subtype_suffix(&lower[pos..]) {
@@ -3910,7 +3912,9 @@ enum NegationResult {
     Prop(FilterProp),
 }
 
-/// CR 205.4b: Classify a negated word by semantic layer.
+/// CR 109.3: Classify a negated word by semantic layer. Card type, subtype,
+/// supertype, and color are distinct characteristics, so each negation must be
+/// routed to the one it belongs to.
 /// `parse_non_prefix` strips "non"/"non-" and lowercases, so `negated` is e.g. "black", "basic", "creature".
 fn classify_negation(negated: &str) -> NegationResult {
     if tag::<_, _, OracleError<'_>>("token")
@@ -3955,7 +3959,7 @@ fn classify_negation(negated: &str) -> NegationResult {
         "snow" => NegationResult::Prop(FilterProp::NotSupertype {
             value: Supertype::Snow,
         }),
-        // CR 205.4b: Type/subtype negation → TypeFilter::Non
+        // CR 205.2a + CR 205.3: Card-type / subtype negation → TypeFilter::Non
         _ => {
             let inner = match negated {
                 "creature" => TypeFilter::Creature,
@@ -4017,7 +4021,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             return true;
         }
     }
-    // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent",
+    // CR 205.2a + CR 205.3: Negated type prefix: "noncreature spell", "nonland permanent",
     // "non-Saga token" (Good King Mog XII chapter II — issue #3294), and
     // negated-adjective compounds like "nontoken modified creature" (Akki
     // Ember-Keeper / issue #3677 class) or "nontoken legendary permanent"
@@ -5639,6 +5643,16 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
         return Some((prop, text.len() - rest.len()));
     }
 
+    // CR 508.5: the defending-player anaphor is a separate axis from the printed
+    // defender nouns enumerated in the table below, so it is tried as its own
+    // composed combinator rather than appended as another literal row. It runs on
+    // `trimmed`, after the "that's "/"that is "/"that are " relative-clause intro
+    // has already been stripped, which is what makes Ordruun Mentor's and Echoing
+    // Assault's "that's attacking that player" work with no extra grammar.
+    if let Ok((rest, prop)) = parse_attacking_defender_anaphor(trimmed) {
+        return Some((prop, text.len() - rest.len()));
+    }
+
     for (pattern, defender) in [
         (
             "attacking you or a planeswalker you control",
@@ -5702,6 +5716,101 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
     let (input, _) = (tag("attacking"), space1, tag("alone")).parse(input)?;
     let (_, _) = parse_attacking_status_clause_boundary(input)?;
     Ok((input, FilterProp::AttackingAlone))
+}
+
+/// CR 608.2c: "attacking that player" — the attacked-player ANAPHOR in an
+/// object-filter position ("other creatures you control attacking that player",
+/// "target creature that's attacking that player"). Lowers to
+/// `ControllerRef::DefendingPlayer` and resolves at runtime through
+/// `combat::defending_player_cr508_5`.
+///
+/// # Which rule supplies the referent depends on the enclosing trigger
+///
+/// The anaphor is ONE grammar, but its antecedent is bound by two different
+/// rules, and the runtime authority answers both because each supplies its
+/// answer through a different tier of the same lookup:
+///
+/// - **CR 508.5 / CR 508.5a — the source is the attacking creature.** Namor and
+///   Owlbear Cub are CR 508.3a triggers ("Whenever [this creature] attacks a
+///   player"), so "that player" is the player THAT creature is attacking, taken
+///   from the source's own entry in the bound attack event.
+/// - **CR 508.3e — the source need not be attacking at all.** Ordruun Mentor
+///   and Echoing Assault are "Whenever you attack a player" triggers; CR 508.5
+///   cannot supply their referent, because it speaks only to "an ability of an
+///   attacking creature" and Echoing Assault is an Enchantment that can never
+///   attack. Their antecedent is the attacked player the CR 508.3e trigger
+///   fired for, carried on the firing's own synthesized event by
+///   `trigger_matchers::matching_you_attack_events_by_attacked_player` and read
+///   back as that event's `defending_player`.
+///
+/// So a CR 508.5-shaped name on the runtime helper does not mean CR 508.5 binds
+/// every caller — for the CR 508.3e lane it is the per-firing event, not the
+/// asker's combat status, that decides the answer.
+///
+/// NOT `ControllerRef::TriggeringPlayer`: for `GameEvent::AttackersDeclared`,
+/// `targeting::extract_player_from_event` returns the ATTACKING player, which is
+/// the opposite referent.
+///
+/// A distinct AXIS from the `(pattern, defender)` table in
+/// `parse_attacking_defender_suffix` (which enumerates printed defender NOUNS:
+/// "you", "your opponents", ...); this arm is the anaphor, so it is a composed
+/// combinator rather than another row in that table.
+///
+/// # Targeted consumers need `ability_utils::filter_needs_trigger_source`
+///
+/// This is the first value of `FilterProp::Attacking { defender }` that resolves
+/// through `trigger_source`. Two of the three cards this arm unlocks — Ordruun
+/// Mentor and Echoing Assault — place it in a TARGET filter, whose slot-build
+/// door (`targeting::find_legal_targets`) builds a context with
+/// `trigger_source: None` and would enumerate ZERO legal targets on any
+/// multi-attacker declaration (CR 603.3d would then remove the ability from the
+/// stack). `ability_utils::filter_needs_trigger_source` routes them to the
+/// context-carrying door; do not ship this combinator without it.
+///
+/// # Why this cannot steal the token-spec / battlefield-entry corpus
+///
+/// Most of the 52 corpus cards containing "attacking that player" sit in a
+/// token-spec, battlefield-entry, continuation-sentence, copy-token, or
+/// predicative-state-change position, and many of them terminate with a bare "."
+/// immediately after the phrase (Ainok Strike Leader, The Vast Scrier, Owlbear
+/// Cub), which SATISFIES `parse_attacking_status_clause_boundary` rather than
+/// being rejected by it. The boundary guard is therefore NOT what keeps them
+/// safe. What keeps them safe is that none of those positions ever routes the
+/// phrase through `parse_type_phrase`'s suffix chain, because each consuming
+/// path removes or absorbs the clause first:
+///
+/// 1. Inline token specs — `oracle_effect::token` scans word boundaries for the
+///    `that's|that is|that are` + `tapped and attacking|attacking` clause and
+///    TRUNCATES the token body at that byte offset; the trailing "that player"
+///    is discarded with the clause.
+/// 2. Battlefield-entry tails — `parse_battlefield_entry_qualifiers` matches
+///    " tapped and attacking" and its qualifier boundary absorbs the trailing
+///    player phrase; only `(enter_tapped, enters_attacking)` flags come back.
+/// 3. Continuation sentences ("It/The token enters tapped and attacking that
+///    player.") — dispatched at sentence level in `oracle_effect::sequence` into
+///    a continuation that patches the PRECEDING effect's flags. No filter built.
+/// 4. Copy-token modifiers — `parse_copy_token_entry_modifiers` consumes
+///    "tapped and attacking " as a `value(...)` tag before the noun.
+///
+/// Predicative state-change sentences (Portal Manipulator "Those creatures are
+/// now attacking that player.", Tahngarth "Tahngarth is attacking that player or
+/// planeswalker.") are also unreachable: the suffix chain is offered the
+/// remainder AFTER a type-phrase noun, and there that remainder begins with a
+/// copula ("are now ", "is "), not with `tag("attacking")`.
+///
+/// "attacking that opponent" is deliberately EXCLUDED: a corpus scan shows it
+/// occurs only in the positions enumerated above (Kaalia of the Vast, Adeline,
+/// Mardu Siegebreaker, ...), never as an object-filter suffix, so accepting it
+/// here would add zero coverage.
+fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, _) = (tag("attacking"), space1, tag("that player")).parse(input)?;
+    let (_, _) = parse_attacking_status_clause_boundary(rest)?;
+    Ok((
+        rest,
+        FilterProp::Attacking {
+            defender: Some(ControllerRef::DefendingPlayer),
+        },
+    ))
 }
 
 fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
@@ -8101,7 +8210,7 @@ fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, u
     ))
 }
 
-/// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
+/// CR 205.3: "that isn't a <Subtype>" / "that's not a <Subtype>"
 /// relative-clause negation suffix. Returns negated type filters to append to
 /// the enclosing target's `neg_type_filters`. Mirrors the `non-<Subtype>`
 /// prefix pattern but expressed as a trailing relative clause
@@ -14280,7 +14389,7 @@ mod tests {
 
     #[test]
     fn nonartifact_nonblack_creature() {
-        // CR 205.4b: "nonartifact" → Non(Artifact) in type_filters, "nonblack" → NotColor in properties
+        // CR 205.2a + CR 105.2: "nonartifact" → Non(Artifact) in type_filters, "nonblack" → NotColor in properties
         let (f, rest) = parse_type_phrase("nonartifact, nonblack creature");
         assert_eq!(
             f,
@@ -17940,7 +18049,7 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
-    /// CR 205.2a + CR 205.4b: "noncreature artifact" — negation followed by a
+    /// CR 205.2a: "noncreature artifact" — negation followed by a
     /// concrete core type. The Non(Creature) negation should land in
     /// type_filters alongside Artifact.
     #[test]
@@ -18435,7 +18544,7 @@ mod tests {
         ));
     }
 
-    /// CR 205.3 + CR 205.4b: "target attacking Vampire that isn't a Demon" — the
+    /// CR 205.3: "target attacking Vampire that isn't a Demon" — the
     /// subtype-negation relative clause must append `Non(Subtype("Demon"))` to
     /// the target's type filters so a Vampire Demon is rejected.
     #[test]

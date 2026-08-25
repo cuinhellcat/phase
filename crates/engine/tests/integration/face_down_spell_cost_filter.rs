@@ -418,7 +418,6 @@ fn an_unpayable_exile_raise_withholds_the_face_down_offer() {
         "with the {{5}} unpayable the legal cast is the FACE-UP foretell one"
     );
 }
-
 /// CR 702.37b (Megamorph) + CR 601.2f: the keyword-sibling coverage for the
 /// COST path — Kadena's reduction must reach a Megamorph card's face-down
 /// cast exactly as it reaches Morph. Discriminating through the real cast:

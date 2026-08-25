@@ -2535,6 +2535,41 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
+                && super::trigger_matchers::you_attack_binds_attacked_player(trig_def)
+            {
+                // CR 508.3e: "Whenever you attack a player" triggers once for
+                // EACH attacked player, each firing bound to its own attacked
+                // player. The printed rulings on Echoing Assault, Soaring
+                // Lightbringer, and Horizon Explorer all state this outright —
+                // and Horizon Explorer has no "that player" anaphor at all,
+                // which is what proves the cardinality belongs to the trigger
+                // CONDITION rather than to the ability's body.
+                //
+                // Ordered against the two arms it sits between, both of which
+                // are MORE specific and must keep winning:
+                //
+                // - `trig_def.batched` (above): a batched trigger's events must
+                //   keep flowing through `matching_batched_trigger_events`,
+                //   which is where static trigger suppression and the
+                //   per-candidate intervening-if are applied.
+                // - the event-source force-block arm (immediately above): its
+                //   attacker demonstrative ("that creature") has no referent in
+                //   a plural event, so it needs one event per ATTACKER. This
+                //   arm groups per attacked PLAYER, which can carry several
+                //   attackers, and would strand that demonstrative.
+                //
+                // No card currently reaches this arm and either of those, so
+                // both are precedence guarantees rather than live tiebreaks.
+                super::trigger_matchers::matching_you_attack_events_by_attacked_player(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::Blocks) {
                 super::trigger_matchers::matching_block_events(
                     event,
@@ -10853,6 +10888,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         TargetFilter::StackAbility { controller, .. } => controller
             .as_ref()
             .is_some_and(controller_ref_binding_diverges),
+        // CR 109.4: a player-identity population whose ONLY re-scopable part is
+        // the nested predicate, so it defers to the classifier that owns the
+        // `PlayerFilter` axis — the same delegation `StackAbility` makes for its
+        // controller narrowing. Adjudicating it here directly would fork from
+        // that authority.
+        TargetFilter::PlayerMatching { player } => player_filter_binding_diverges(player),
 
         // ---- ABILITY-BOUND: reads the resolving ability, which is `None` at
         // ---- fire time. Always diverges.
@@ -12872,6 +12913,20 @@ fn evaluate_trigger_condition_with_source(
             player_field(state, controller, |p| p.life_lost_this_turn > 0)
         }
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
+        // CR 701.54a + CR 701.54d + CR 603.4: read the bearer chosen as part
+        // of THE TRIGGERING TEMPTATION from the event record — never the
+        // mutable `state.ring_bearer`, which a later temptation can overwrite
+        // between this trigger's firing and its resolution. Fails closed
+        // without the event context or without a completed choice.
+        TriggerCondition::ChoseOtherRingBearer => match trigger_event {
+            Some(GameEvent::RingTemptsYou {
+                chosen_bearer: Some(bearer),
+                ..
+            // CR 603.4: "a creature other than ~" — without a source identity
+            // the bearer cannot be proven OTHER, so fail closed.
+            }) => source_id.is_some_and(|source| source != *bearer),
+            _ => false,
+        },
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
             source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
         }),
@@ -45324,6 +45379,54 @@ pub mod tests {
             !trigger_event_unreachable_in_phase(&combat_only, Phase::CombatDamage),
             "X2-4b: `CombatOnly` is reachable IN the combat damage step (CR 510.2)"
         );
+    }
+    /// CR 603.4 + CR 701.54a: "a creature other than ~" — the event-snapshotted
+    /// bearer proves OTHER only against a known source identity; without one
+    /// the condition fails closed (review #7820 round 5).
+    #[test]
+    fn chose_other_ring_bearer_fails_closed_without_a_source_identity() {
+        let mut state = setup();
+        let aragorn = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(0),
+            "Aragorn Source".to_string(),
+            Zone::Battlefield,
+        );
+        let companion = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Companion".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::RingTemptsYou {
+            player_id: PlayerId(0),
+            chosen_bearer: Some(companion),
+        };
+        let condition = TriggerCondition::ChoseOtherRingBearer;
+
+        // Positive twin: with the source identity, OTHER is provable.
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&aragorn).expect("source exists"),
+        );
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(&source_context),
+            Some(&event),
+        ));
+
+        // Fail closed without the identity.
+        assert!(!check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
     }
 }
 

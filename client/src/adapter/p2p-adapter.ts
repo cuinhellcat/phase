@@ -1507,6 +1507,40 @@ export class P2PHostAdapter implements EngineAdapter {
       identified = true;
       unsub();
 
+      // Host-side wire-version gate. A guest that stamps a version unequal
+      // to ours cannot be paired, so refuse it here — before a seat or a deck
+      // is allocated — through the rejection affordance this gate already
+      // has. `reconnect_rejected` is `{ type, reason }` only, so even a guest
+      // on an older bundle can decode it.
+      //
+      // ABSENT MEANS ADMIT. The version is bumped only on a
+      // non-backward-compatible change, so {guests on an older bundle}
+      // strictly contains {guests that are wire-incompatible}: an absent
+      // field reports bundle age, not incompatibility, and refusing on it
+      // would drop guests that pair fine today with a reason that is
+      // factually false for them. The consequence, stated rather than
+      // implied: this host cannot distinguish a compatible old bundle from
+      // an incompatible one. `P2PGuestAdapter.handleHostMessage` is the
+      // authority for the latter. This mirrors the call `acceptsHostAuthority`
+      // already makes for its own additive stamp. What this gate buys is
+      // prospective: once both sides ship, every future bump is caught
+      // host-side at first contact.
+      const guestVersion =
+        msg.type === "guest_deck" || msg.type === "reconnect" ? msg.wireProtocolVersion : undefined;
+      if (guestVersion !== undefined && guestVersion !== WIRE_PROTOCOL_VERSION) {
+        // Reaches the refused guest's user RAW, the same way the guest-side
+        // reason at `handleHostMessage` does. `i18n/README.md` asks for `t()`
+        // on frontend-authored strings; this one is new text on that raw path
+        // and is written unkeyed deliberately, to match the incumbent
+        // wording rather than split the pair. Noted, not fixed: the raw-string
+        // path is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: guest sent v${guestVersion}, this host speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+        traceAdapter("Host", "first-message-version-mismatch", { type: msg.type, guestVersion });
+        void this.send(session, { type: "reconnect_rejected", reason });
+        session.close("Wire protocol mismatch");
+        return;
+      }
+
       if (msg.type === "reconnect") {
         traceAdapter("Host", "first-message", { type: msg.type });
         this.handleReconnect(session, msg.playerToken, msg.sessionKey);
@@ -2895,6 +2929,8 @@ export class P2PGuestAdapter implements EngineAdapter {
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
   >();
   private session: PeerSession | null = null;
+  /** The current transport becomes authenticated only after its setup ACK. */
+  private authenticatedSession: PeerSession | null = null;
   private playerToken: string | null = null;
   private assignedPlayerId: PlayerId | null = null;
   /** Current host lease accepted from game_setup/reconnect_ack. */
@@ -2970,6 +3006,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       this.send({
         type: "reconnect",
         playerToken: this.playerToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
         ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
       });
     } else {
@@ -2979,19 +3016,32 @@ export class P2PGuestAdapter implements EngineAdapter {
         deckData: this.deckData,
         displayName: this.displayName,
         reservationToken: this.reservationToken,
+        wireProtocolVersion: WIRE_PROTOCOL_VERSION,
       });
     }
   }
 
   private attachSession(conn: DataConnection): void {
+    if (this.terminated) {
+      conn.close();
+      return;
+    }
     traceAdapter("Guest", "attach-session", { connOpen: conn.open });
     const session = createPeerSession(conn, {
       onSessionEnd: () => {
-        this.handleHostDisconnect();
+        this.handleHostDisconnect(session);
       },
     });
+    this.rejectPendingSubmission(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),
+    );
     this.session = session;
-    session.onMessage((msg) => this.handleHostMessage(msg));
+    this.authenticatedSession = null;
+    this.matchConcedeSent = false;
+    session.onMessage((msg) => this.handleHostMessage(session, msg));
   }
 
   async initializeGame(): Promise<SubmitResult> {
@@ -3006,20 +3056,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     // as the engine `actor`. If this client were malicious and claimed
     // another identity, the host would detect the mismatch and drop the
     // action before touching the engine.
-    if (!this.session) {
-      throw new AdapterError(
-        "P2P_ERROR",
-        "Not connected to host",
-        true,
-      );
-    }
-    if (this.assignedPlayerId === null) {
-      throw new AdapterError(
-        "P2P_ERROR",
-        "Not yet assigned a player ID",
-        true,
-      );
-    }
+    this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
@@ -3035,12 +3072,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     submission: InteractionSubmission,
     _actor: PlayerId,
   ): Promise<SubmitResult> {
-    if (!this.session) {
-      throw new AdapterError("P2P_ERROR", "Not connected to host", true);
-    }
-    if (this.assignedPlayerId === null) {
-      throw new AdapterError("P2P_ERROR", "Not yet assigned a player ID", true);
-    }
+    this.requireAuthenticatedSession();
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
@@ -3053,12 +3085,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
-    if (!this.session) {
-      throw new AdapterError("P2P_ERROR", "Not connected to host", true);
-    }
-    if (this.assignedPlayerId === null) {
-      throw new AdapterError("P2P_ERROR", "Not yet assigned a player ID", true);
-    }
+    this.requireAuthenticatedSession();
 
     const requestId = this.nextManaPaymentPreviewRequestId++;
     return new Promise<ObjectId[]>((resolve, reject) => {
@@ -3093,8 +3120,10 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   private async acceptTerminalResult(
+    session: PeerSession,
     message: Extract<P2PMessage, { type: "terminal_result" }>,
   ): Promise<void> {
+    if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
     const { result } = message;
     if (
       !isValidP2PTerminalResult(result)
@@ -3116,6 +3145,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.emit({ type: "terminalUnavailable", message: "P2P terminal result did not match the final state" });
         return;
       }
+      if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
       if (!(await commitP2PTerminalResult(result))) {
         this.emit({ type: "terminalUnavailable", message: "Conflicting P2P terminal result" });
         return;
@@ -3127,7 +3157,8 @@ export class P2PGuestAdapter implements EngineAdapter {
       });
       return;
     }
-    this.terminated = true;
+    if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
+    this.terminate();
     void clearP2PSession(this.sessionKey ?? this.hostPeerId);
     this.emit({ type: "terminalResult", result });
   }
@@ -3145,13 +3176,14 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   sendConcede(): void {
-    if (!this.session) return;
+    if (!this.currentAuthenticatedSession()) return;
     this.send({ type: "concede" });
   }
 
   /** Requests settlement from the authenticated host-side match authority. */
   sendMatchConcede(): void {
-    if (!this.supportsMatchConcede || this.matchConcedeSent || !this.session) return;
+    if (!this.currentAuthenticatedSession()) return;
+    if (!this.supportsMatchConcede || this.matchConcedeSent) return;
     this.matchConcedeSent = true;
     this.send({ type: "match_concede" });
   }
@@ -3160,26 +3192,32 @@ export class P2PGuestAdapter implements EngineAdapter {
     // Mark terminal BEFORE closing the session so the session's
     // `onSessionEnd` → `handleHostDisconnect` short-circuit fires and skips
     // the auto-reconnect loop.
-    this.terminated = true;
-    if (this.session) {
-      this.session.close();
-      this.session = null;
-    }
+    this.terminate(new AdapterError("P2P_ERROR", "Adapter disposed", true));
     try {
       this.hostPeer.destroy();
     } catch {
       /* best-effort */
     }
     this.snapshot = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
-    this.rejectPendingManaPaymentPreviews(
-      new AdapterError("P2P_ERROR", "Adapter disposed during mana-payment preview", true),
-    );
     this.listeners = [];
   }
 
-  private handleHostMessage(msg: P2PMessage): void {
+  private handleHostMessage(session: PeerSession, msg: P2PMessage): void {
+    if (session !== this.session) return;
+    if (this.terminated) return;
+    if (
+      this.authenticatedSession !== session
+      && msg.type !== "game_setup"
+      && msg.type !== "reconnect_ack"
+      && msg.type !== "reconnect_rejected"
+      && msg.type !== "kick"
+      // The host broadcasts this to both joined and still-lobbying guests
+      // before it closes their sessions, so it must stop reconnecting even
+      // before this connection has delivered its setup handshake.
+      && msg.type !== "host_left"
+    ) {
+      return;
+    }
     traceAdapter("Guest", "host-message", { type: msg.type });
     // First-contact protocol-version check. `game_setup` and `reconnect_ack`
     // both carry `wireProtocolVersion`; if a future host bumps the version
@@ -3189,11 +3227,29 @@ export class P2PGuestAdapter implements EngineAdapter {
     // PEER_ID_PREFIX bump prevents *room discovery* across mismatched
     // bundles, but a same-version-prefix-different-message-shape change
     // would slip past it — that's what this guards.
+    //
+    // This is the SOLE guest-side enforcement point for the rule.
+    // `validateMessage` once checked it too, one layer lower: it threw from
+    // inside `decodeWireMessage`, and `peer.ts` warns-and-drops on a decode
+    // throw, so the frame died in the transport and this branch was dead code
+    // for the case it was written for. A lower layer cannot surface the
+    // mismatch — rejecting `gameSetupPromise` and emitting `reconnectFailed`
+    // both need adapter state the transport has no access to.
     if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
-      if (msg.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
-        const reason = `Wire protocol mismatch: host sent v${msg.wireProtocolVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
+      // Read through a widened local: these two messages DECLARE the field at
+      // the literal `typeof WIRE_PROTOCOL_VERSION`, so comparing `msg.…`
+      // directly narrows `msg` to `never` in the mismatch branch and the
+      // interpolation below stops compiling. The runtime value is whatever the
+      // host actually sent, which is the entire point of the check.
+      const hostVersion: number = msg.wireProtocolVersion;
+      if (hostVersion !== WIRE_PROTOCOL_VERSION) {
+        // This reason reaches the user RAW: rejectGameSetup → AdapterError
+        // → GameProvider's error toast. `i18n/README.md` asks for `t()` on
+        // frontend-authored strings; this path predates that and is left as
+        // found — the violation is pre-existing and out of scope here.
+        const reason = `Wire protocol mismatch: host sent v${hostVersion}, this client speaks v${WIRE_PROTOCOL_VERSION}. Refresh both windows.`;
         console.error("[P2PGuestAdapter]", reason);
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(reason);
         this.emit({ type: "reconnectFailed", reason });
         return;
@@ -3202,6 +3258,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (!this.acceptsHostAuthority(msg)) return;
     switch (msg.type) {
       case "game_setup": {
+        this.authenticatedSession = session;
         this.assignedPlayerId = msg.assignedPlayerId;
         this.playerToken = msg.playerToken;
         if (msg.authority) {
@@ -3219,6 +3276,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "reconnect_ack": {
+        this.authenticatedSession = session;
         this.assignedPlayerId = msg.assignedPlayerId;
         if (this.playerToken && msg.authority) {
           this.authority = msg.authority;
@@ -3245,14 +3303,14 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "reconnect_rejected": {
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(msg.reason);
         this.emit({ type: "reconnectFailed", reason: msg.reason });
         this.emit({ type: "gameOver", winner: null, reason: msg.reason });
         break;
       }
       case "kick": {
-        this.terminated = true;
+        this.terminate();
         const kickFormat = (msg as { format?: string }).format;
         const isDeckRejection = msg.reason.startsWith("Deck rejected:");
         this.rejectGameSetup(
@@ -3264,13 +3322,13 @@ export class P2PGuestAdapter implements EngineAdapter {
         break;
       }
       case "host_left": {
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup(msg.reason);
         this.emit({ type: "gameOver", winner: null, reason: msg.reason });
         break;
       }
       case "terminal_result": {
-        void this.acceptTerminalResult(msg);
+        void this.acceptTerminalResult(session, msg);
         break;
       }
       case "ai_driver_fault": {
@@ -3280,15 +3338,13 @@ export class P2PGuestAdapter implements EngineAdapter {
           break;
         }
         this.acceptedAiDriverFaultIds.add(msg.id);
-        this.terminated = true;
         const error = new AdapterError("P2P_ERROR", msg.message, false);
-        this.pendingReject?.(error);
-        this.pendingResolve = null;
-        this.pendingReject = null;
+        this.terminate(error);
         this.emit({ type: "error", message: msg.message });
         break;
       }
       case "state_update": {
+        if (this.authenticatedSession !== session) return;
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         if (this.pendingResolve) {
@@ -3422,6 +3478,12 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.pendingManaPaymentPreviews.clear();
   }
 
+  private rejectPendingSubmission(error: Error): void {
+    this.pendingReject?.(error);
+    this.pendingResolve = null;
+    this.pendingReject = null;
+  }
+
   private acceptsHostAuthority(msg: P2PMessage): boolean {
     if (!msg.authority) {
       // Old room peers cannot emit a lease stamp. Hosts from this build always
@@ -3433,7 +3495,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     if (msg.type === "reconnect_ack") {
       // A legitimate same-key resume intentionally has a new incarnation.
       if (this.authority && msg.authority.sessionKey !== this.authority.sessionKey) {
-        this.terminated = true;
+        this.terminate();
         this.rejectGameSetup("Host changed the P2P session key");
         return false;
       }
@@ -3453,10 +3515,37 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.session.send({ ...message, ...(this.authority ? { authority: this.authority } : {}) });
   }
 
-  private handleHostDisconnect(): void {
+  private currentAuthenticatedSession(): PeerSession | null {
+    if (
+      this.terminated
+      || this.session === null
+      || this.authenticatedSession !== this.session
+      || this.assignedPlayerId === null
+    ) {
+      return null;
+    }
+    return this.session;
+  }
+
+  private requireAuthenticatedSession(): PeerSession {
+    const session = this.currentAuthenticatedSession();
+    if (session) return session;
+    if (this.session === null) {
+      throw new AdapterError("P2P_ERROR", "Not connected to host", true);
+    }
+    throw new AdapterError("P2P_ERROR", "Not yet assigned a player ID", true);
+  }
+
+  private handleHostDisconnect(session: PeerSession): void {
+    if (session !== this.session) return;
+    this.rejectPendingSubmission(
+      new AdapterError("P2P_ERROR", "Host disconnected while submitting an action", true),
+    );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("P2P_ERROR", "Host disconnected during mana-payment preview", true),
     );
+    this.authenticatedSession = null;
+    this.matchConcedeSent = false;
     this.session = null;
     // Suppress auto-reconnect in terminal states (kicked, explicitly rejected,
     // or adapter disposed). Without this, a kicked guest would spin the
@@ -3464,6 +3553,16 @@ export class P2PGuestAdapter implements EngineAdapter {
     // token.
     if (this.terminated) return;
     void this.attemptReconnect(0);
+  }
+
+  private terminate(error = new AdapterError("P2P_ERROR", "Host session terminated", true)): void {
+    this.terminated = true;
+    this.authenticatedSession = null;
+    this.rejectPendingSubmission(error);
+    this.rejectPendingManaPaymentPreviews(error);
+    const session = this.session;
+    this.session = null;
+    session?.close();
   }
 
   private async attemptReconnect(attemptIndex: number): Promise<void> {
@@ -3479,6 +3578,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       : RECONNECT_STEADY_STATE_MS;
     this.emit({ type: "reconnecting", attempt: attemptIndex + 1 });
     await new Promise((r) => setTimeout(r, delay));
+    if (this.terminated) return;
 
     try {
       const conn = this.hostPeer.connect(this.hostPeerId);
@@ -3493,15 +3593,22 @@ export class P2PGuestAdapter implements EngineAdapter {
           reject(err);
         });
       });
+      if (this.terminated) {
+        conn.close();
+        return;
+      }
       this.attachSession(conn);
+      if (this.terminated) return;
       if (this.playerToken) {
         this.send({
           type: "reconnect",
           playerToken: this.playerToken,
+          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
           ...(this.authority ? { sessionKey: this.authority.sessionKey } : {}),
         });
       }
     } catch (err) {
+      if (this.terminated) return;
       console.warn(
         `[P2PGuest] reconnect attempt ${attemptIndex + 1} failed:`,
         err,
