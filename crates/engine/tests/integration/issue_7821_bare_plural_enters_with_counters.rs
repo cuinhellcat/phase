@@ -147,3 +147,47 @@ fn a_cast_colorless_creature_enters_with_two_counters() {
         "a cast colorless creature must enter with the two counters"
     );
 }
+
+/// The direct guard against the reported self-anchoring symptom: a SECOND
+/// Curator Beastie cast through the real entry pipeline (GU — colored) gets
+/// nothing from the first one's static. The manifest test proves the same
+/// fixture DOES reach a colorless entry, so this cannot pass vacuously.
+#[test]
+fn a_second_cast_beastie_enters_bare() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Curator Beastie", 4, 5, BEASTIE);
+    let second = scenario
+        .add_creature_to_hand_from_oracle(P0, "Curator Beastie", 4, 5, BEASTIE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner.cast(second).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .get(&second)
+            .expect("second Beastie exists")
+            .zone,
+        Zone::Battlefield
+    );
+    assert_eq!(
+        plus_counters(&runner, second),
+        0,
+        "a cast GU Beastie must not match the colorless filter nor self-anchor"
+    );
+}

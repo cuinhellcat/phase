@@ -2449,6 +2449,20 @@ pub fn matches_target_filter_for_zone(
     }
 }
 
+/// The object a battlefield entry is about to deliver, as currently staged:
+/// the liminal projection when one exists, otherwise the live object. Shared
+/// by every entry-projection arm below so the resolution logic cannot drift.
+fn entering_object_projection(
+    state: &GameState,
+    object_id: &ObjectId,
+) -> Option<crate::game::game_object::GameObject> {
+    state
+        .liminal_entries
+        .get(object_id)
+        .map(|entry| entry.object.projected().clone())
+        .or_else(|| state.objects.get(object_id).cloned())
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -2463,23 +2477,18 @@ pub fn matches_target_filter_on_battlefield_entry(
             face_down_profile,
             ..
         } if *to == Zone::Battlefield => {
-            if let Some(copy) = enter_as_copy {
-                let Some(mut obj) = state
-                    .liminal_entries
-                    .get(object_id)
-                    .map(|entry| entry.object.projected().clone())
-                    .or_else(|| state.objects.get(object_id).cloned())
-                else {
+            if let Some(profile) = face_down_profile {
+                // CR 708.2a + CR 708.3 + CR 614.12: an object entering face
+                // down IS the profile's body (a colorless 2/2 creature for
+                // manifest/morph/cloak) — checked BEFORE the copy arm, because
+                // a co-occurring enter-as-copy keeps the permanent face down
+                // and only its copiable underside changes; the observable
+                // entry characteristics stay the face-down profile.
+                let Some(mut obj) = entering_object_projection(state, object_id) else {
                     return false;
                 };
-                crate::game::effects::token::apply_copiable_values_to_liminal_object(
-                    &mut obj,
-                    &copy.values,
-                    copy.display_source,
-                    copy.printed_ref.clone(),
-                    copy.token_image_ref.clone(),
-                );
-                filter_inner_for_object(
+                crate::game::morph::apply_face_down_creature_characteristics(&mut obj, profile);
+                return filter_inner_for_object(
                     state,
                     &obj,
                     *object_id,
@@ -2491,25 +2500,19 @@ pub fn matches_target_filter_on_battlefield_entry(
                     ctx.recipient_id,
                     ctx.scoped_iteration_player,
                     ControllerLookup::LiveOrLki,
-                )
-            } else if let Some(profile) = face_down_profile {
-                // CR 708.2a + CR 614.12: the object would enter as the
-                // face-down profile's body (a colorless 2/2 creature for
-                // manifest/morph/cloak), so entry-scoped filters must be
-                // evaluated against that projection, not the card's face-up
-                // characteristics — Curator Beastie's "colorless creatures you
-                // control enter with two additional +1/+1 counters" must see
-                // the manifested 2/2 (issue #7821), and a face-up card's types
-                // must not leak into entry matching.
-                let Some(mut obj) = state
-                    .liminal_entries
-                    .get(object_id)
-                    .map(|entry| entry.object.projected().clone())
-                    .or_else(|| state.objects.get(object_id).cloned())
-                else {
+                );
+            }
+            if let Some(copy) = enter_as_copy {
+                let Some(mut obj) = entering_object_projection(state, object_id) else {
                     return false;
                 };
-                crate::game::morph::apply_face_down_creature_characteristics(&mut obj, profile);
+                crate::game::effects::token::apply_copiable_values_to_liminal_object(
+                    &mut obj,
+                    &copy.values,
+                    copy.display_source,
+                    copy.printed_ref.clone(),
+                    copy.token_image_ref.clone(),
+                );
                 filter_inner_for_object(
                     state,
                     &obj,
