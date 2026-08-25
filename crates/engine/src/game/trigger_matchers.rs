@@ -4334,7 +4334,7 @@ pub(super) fn match_ring_tempts_you(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::RingTemptsYou { player_id } = event {
+    if let GameEvent::RingTemptsYou { player_id, .. } = event {
         // The trigger fires for the controller of the source that has this trigger.
         *player_id == source_context.source_read(state).controller()
     } else {
