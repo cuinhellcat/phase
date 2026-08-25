@@ -3366,6 +3366,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc
         }
         TriggerCondition::AttackedThisTurn => Axes::NONE,
+        // CR 701.54a + CR 701.54d: the condition reads the triggering
+        // temptation's immutable chosen bearer.
+        TriggerCondition::ChoseOtherRingBearer => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TriggerCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
             sibling: false,
