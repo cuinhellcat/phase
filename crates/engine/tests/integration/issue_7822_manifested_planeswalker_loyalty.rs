@@ -42,8 +42,15 @@ fn a_manifested_planeswalker_card_has_no_loyalty() {
     {
         let obj = runner.state_mut().objects.get_mut(&walker).unwrap();
         obj.card_types.core_types.push(CoreType::Planeswalker);
+        // Review (#7827): initialize EVERY loyalty/defense field including the
+        // base twins, so a hidden base value restored by a layer reset cannot
+        // slip through.
         obj.loyalty = Some(4);
         obj.printed_loyalty = Some(PrintedLoyalty::Fixed(4));
+        obj.base_loyalty = Some(4);
+        obj.base_printed_loyalty = Some(PrintedLoyalty::Fixed(4));
+        obj.defense = Some(3);
+        obj.base_defense = Some(3);
     }
     runner.cast(spell).resolve();
     let WaitingFor::ManifestDreadChoice { .. } = runner.state().waiting_for.clone() else {
@@ -76,13 +83,91 @@ fn a_manifested_planeswalker_card_has_no_loyalty() {
         "the face-down permanent has no loyalty characteristic to display"
     );
     assert_eq!(obj.defense, None);
-    // The real card survives underneath for turn-up restoration.
-    let back = obj.back_face.as_ref().expect("back face snapshot exists");
+    assert_eq!(obj.counters.get(&CounterType::Defense), None);
+
+    // Review (#7827): force a layer re-derive — a base twin left set would be
+    // written back into the live fields here.
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let obj = runner
+        .state()
+        .objects
+        .get(&walker)
+        .expect("manifested object exists");
+    assert_eq!(obj.loyalty, None, "no base twin may resurrect loyalty");
+    assert_eq!(obj.printed_loyalty, None);
+    assert_eq!(obj.base_loyalty, None);
+    assert_eq!(obj.base_printed_loyalty, None);
+    assert_eq!(obj.defense, None);
+    assert_eq!(obj.base_defense, None);
+
+    // The real card survives underneath. Manifest cannot legally turn a
+    // planeswalker card face up (CR 701.34), so the restore pair is verified
+    // at its authority: `apply_back_face_to_object` — the single restore path
+    // every legal turn-up routes through.
+    let back = obj.back_face.clone().expect("back face snapshot exists");
     assert_eq!(
         back.loyalty,
         Some(4),
         "the snapshot keeps the printed value"
     );
+    let mut restored = obj.clone();
+    engine::game::printed_cards::apply_back_face_to_object(&mut restored, back);
+    assert_eq!(restored.loyalty, Some(4), "turn-up restores loyalty");
+    assert_eq!(restored.defense, Some(3), "turn-up restores defense");
+}
+
+/// Review (#7827): the battle sibling — a manifested BATTLE card must not
+/// enter with defense counters nor keep a defense characteristic (CR 310.4b
+/// seeds defense only for a battle entering as one; CR 708.2a).
+#[test]
+fn a_manifested_battle_card_has_no_defense() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let battle = scenario.add_card_to_library_top(P0, "Buried Siege");
+    scenario.add_card_to_library_top(P0, "Second Top");
+    let spell = scenario
+        .add_spell_to_hand(P0, "Dread Test", false)
+        .from_oracle_text(MANIFEST_DREAD)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(P0, vec![]);
+
+    let mut runner = scenario.build();
+    {
+        let obj = runner.state_mut().objects.get_mut(&battle).unwrap();
+        obj.card_types.core_types.push(CoreType::Battle);
+        obj.defense = Some(5);
+        obj.base_defense = Some(5);
+    }
+    runner.cast(spell).resolve();
+    let WaitingFor::ManifestDreadChoice { .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "manifest dread must pause for a card choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![battle],
+        })
+        .expect("manifest choice must be accepted");
+    runner.advance_until_stack_empty();
+
+    let obj = runner
+        .state()
+        .objects
+        .get(&battle)
+        .expect("manifested object exists");
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.face_down);
+    assert_eq!(
+        obj.counters.get(&CounterType::Defense),
+        None,
+        "no defense counters may be seeded on a face-down entry"
+    );
+    assert_eq!(obj.defense, None);
+    assert_eq!(obj.base_defense, None);
 }
 
 /// Review regression (#7827): an EXPLICITLY instructed entry counter is a
