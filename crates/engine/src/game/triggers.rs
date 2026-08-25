@@ -12881,7 +12881,9 @@ fn evaluate_trigger_condition_with_source(
             Some(GameEvent::RingTemptsYou {
                 chosen_bearer: Some(bearer),
                 ..
-            }) => source_id != Some(*bearer),
+            // CR 603.4: "a creature other than ~" — without a source identity
+            // the bearer cannot be proven OTHER, so fail closed.
+            }) => source_id.is_some_and(|source| source != *bearer),
             _ => false,
         },
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
@@ -45336,6 +45338,54 @@ pub mod tests {
             !trigger_event_unreachable_in_phase(&combat_only, Phase::CombatDamage),
             "X2-4b: `CombatOnly` is reachable IN the combat damage step (CR 510.2)"
         );
+    }
+    /// CR 603.4 + CR 701.54a: "a creature other than ~" — the event-snapshotted
+    /// bearer proves OTHER only against a known source identity; without one
+    /// the condition fails closed (review #7820 round 5).
+    #[test]
+    fn chose_other_ring_bearer_fails_closed_without_a_source_identity() {
+        let mut state = setup();
+        let aragorn = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(0),
+            "Aragorn Source".to_string(),
+            Zone::Battlefield,
+        );
+        let companion = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Companion".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::RingTemptsYou {
+            player_id: PlayerId(0),
+            chosen_bearer: Some(companion),
+        };
+        let condition = TriggerCondition::ChoseOtherRingBearer;
+
+        // Positive twin: with the source identity, OTHER is provable.
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&aragorn).expect("source exists"),
+        );
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(&source_context),
+            Some(&event),
+        ));
+
+        // Fail closed without the identity.
+        assert!(!check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
     }
 }
 

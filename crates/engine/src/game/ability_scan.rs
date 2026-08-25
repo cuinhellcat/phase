@@ -3237,8 +3237,15 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             projected: true,
         },
         TriggerCondition::Descended => Axes::NONE,
-        // CR 701.54a: reads the global Ring-bearer designation — no axes.
-        TriggerCondition::ChoseOtherRingBearer => Axes::NONE,
+        // CR 701.54a + CR 701.54d: reads the triggering event's snapshotted
+        // bearer (`RingTemptsYou.chosen_bearer`) — event-bound, so ordering /
+        // conflict analysis cannot model two distinct temptations as
+        // independent.
+        TriggerCondition::ChoseOtherRingBearer => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TriggerCondition::ControlsType { filter } => {
             let mut acc = Axes {
                 event: false,
@@ -8102,6 +8109,21 @@ mod tests {
             ScanMode::Conservative,
         );
         assert!(axes.event);
+        assert!(!axes.sibling);
+        assert!(!axes.projected);
+    }
+    /// Review #7820 round 5: the condition consumes the triggering event's
+    /// snapshotted bearer — event-bound, so two distinct temptations are never
+    /// modeled as independent by ordering/conflict analysis.
+    #[test]
+    fn chose_other_ring_bearer_is_event_bound() {
+        use crate::types::ability::TriggerCondition;
+
+        let axes = scan_trigger_condition(
+            &TriggerCondition::ChoseOtherRingBearer,
+            ScanMode::Conservative,
+        );
+        assert!(axes.event, "must be event-bound");
         assert!(!axes.sibling);
         assert!(!axes.projected);
     }
