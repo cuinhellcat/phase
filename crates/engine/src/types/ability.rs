@@ -22691,6 +22691,12 @@ pub enum TriggerCondition {
     /// controller's mutable `state.ring_bearer`. This retains the trigger-time
     /// choice if a later Ring temptation changes the current Ring-bearer.
     ChoseOtherRingBearer,
+    /// CR 701.54a/d: "Whenever you choose a creature as your Ring-bearer"
+    /// (Call of the Ring). True when the triggering
+    /// `GameEvent::RingTemptsYou` carries a `chosen_bearer` — a temptation
+    /// with no legal candidates chooses nothing and must not fire this —
+    /// and the chooser is the trigger's controller.
+    ChoseRingBearer,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -23151,6 +23157,7 @@ impl TriggerCondition {
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
             | TriggerCondition::ChoseOtherRingBearer
+            | TriggerCondition::ChoseRingBearer
             | TriggerCondition::ControlsType { .. }
             | TriggerCondition::NoSpellsCastLastTurn
             | TriggerCondition::TwoOrMoreSpellsCastLastTurn

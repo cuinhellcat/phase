@@ -1945,6 +1945,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::ChoseOtherRingBearer
+        | TriggerCondition::ChoseRingBearer
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
         // CR 725.1: no `legacy_player_scope` classifier exists, and both scopes
@@ -6690,6 +6691,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // bearer — an event-live read, so the profile mirrors the other
         // event-consuming intervening-ifs.
         TriggerCondition::ChoseOtherRingBearer => reads_event_live(),
+        TriggerCondition::ChoseRingBearer => reads_event_live(),
     }
 }
 
@@ -9101,6 +9103,17 @@ mod tests {
 
         assert_eq!(
             rw_trigger_condition(&TriggerCondition::ChoseOtherRingBearer),
+            reads_event_live()
+        );
+    }
+
+    /// #7816: the sibling choice gate consumes the same live event.
+    #[test]
+    fn chose_ring_bearer_reads_the_event_live() {
+        use crate::types::ability::TriggerCondition;
+
+        assert_eq!(
+            rw_trigger_condition(&TriggerCondition::ChoseRingBearer),
             reads_event_live()
         );
     }
