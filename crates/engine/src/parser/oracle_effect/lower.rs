@@ -2901,6 +2901,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::ScopedPlayer
             | TargetFilter::AttachedTo

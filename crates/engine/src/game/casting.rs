@@ -2682,6 +2682,10 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
+        // CR 118.9: a player-identity filter selects PLAYERS, so it can never
+        // carry a constraint on a spell's ORIGIN ZONE — same as every other
+        // player variant in this group.
+        | TargetFilter::PlayerMatching { .. }
         | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
@@ -8148,6 +8152,7 @@ fn target_ref_matches_cost_filter(
             filter,
             *player_id,
             Some(source_controller),
+            Some(static_source_id),
         ),
     }
 }
