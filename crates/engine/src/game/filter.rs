@@ -2460,6 +2460,7 @@ pub fn matches_target_filter_on_battlefield_entry(
             object_id,
             to,
             enter_as_copy,
+            face_down_profile,
             ..
         } if *to == Zone::Battlefield => {
             if let Some(copy) = enter_as_copy {
@@ -2478,6 +2479,37 @@ pub fn matches_target_filter_on_battlefield_entry(
                     copy.printed_ref.clone(),
                     copy.token_image_ref.clone(),
                 );
+                filter_inner_for_object(
+                    state,
+                    &obj,
+                    *object_id,
+                    filter,
+                    ctx.source_id,
+                    ctx.source_controller,
+                    ctx.ability,
+                    ctx.trigger_source,
+                    ctx.recipient_id,
+                    ctx.scoped_iteration_player,
+                    ControllerLookup::LiveOrLki,
+                )
+            } else if let Some(profile) = face_down_profile {
+                // CR 708.2a + CR 614.12: the object would enter as the
+                // face-down profile's body (a colorless 2/2 creature for
+                // manifest/morph/cloak), so entry-scoped filters must be
+                // evaluated against that projection, not the card's face-up
+                // characteristics — Curator Beastie's "colorless creatures you
+                // control enter with two additional +1/+1 counters" must see
+                // the manifested 2/2 (issue #7821), and a face-up card's types
+                // must not leak into entry matching.
+                let Some(mut obj) = state
+                    .liminal_entries
+                    .get(object_id)
+                    .map(|entry| entry.object.projected().clone())
+                    .or_else(|| state.objects.get(object_id).cloned())
+                else {
+                    return false;
+                };
+                crate::game::morph::apply_face_down_creature_characteristics(&mut obj, profile);
                 filter_inner_for_object(
                     state,
                     &obj,
