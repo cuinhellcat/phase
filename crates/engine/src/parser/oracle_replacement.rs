@@ -4219,7 +4219,7 @@ fn parse_enters_with_counters(
             .then_some((work_text, SubjectScope::Distributive))
         })
         .and_then(|(subject_text, scope)| {
-            // CR 105.2a + CR 105.2b: peel a leading color-quality word ("colorless "/
+            // CR 105.2a-105.2c: peel a leading color-quality word ("colorless "/
             // "monocolored "/"multicolored ") so the type detector sees the
             // noun and the quality survives as a filter property.
             let (after_color, color_prop) =
