@@ -4279,7 +4279,20 @@ fn execute_zone_move_with_applied_terminal(
     // counters" replacement when a planeswalker or battle enters the
     // battlefield from any source (effect-driven entry — bounce-return,
     // reanimate, blink, etc.). Spell-cast entry is handled in stack.rs.
-    if dest_zone == Zone::Battlefield {
+    //
+    // CR 708.2a + CR 708.3: NOT for a face-down entry — the object enters as
+    // the profile's body (a 2/2 creature) with no loyalty/defense/lore
+    // characteristic, so a manifested planeswalker card must not enter with
+    // loyalty counters (issue #7822). The gate reads the proposed event, on
+    // which the profile was just stamped above.
+    let enters_face_down = matches!(
+        &proposed,
+        ProposedEvent::ZoneChange {
+            face_down_profile: Some(_),
+            ..
+        }
+    );
+    if dest_zone == Zone::Battlefield && !enters_face_down {
         if let Some(obj) = state
             .liminal_entries
             .get(&obj_id)
