@@ -44565,6 +44565,52 @@ fn normal_cost_static_exile_permission_keeps_face_down_authority() {
     );
 }
 
+/// CR 118.9a (#7948 review round 2): with TWO active statics — a free one
+/// ordered FIRST and a `PayNormalCost` one after it — the face-down
+/// admission must find the normal-cost authority. A first-match scan whose
+/// result is merely filtered lets the earlier free source hide it.
+#[test]
+fn a_free_static_ordered_first_does_not_hide_a_normal_cost_static() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let free_source =
+        add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+    let normal_source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Matrix",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Cast,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::ThisTurn,
+        ExileCastTiming::AnyTime,
+    );
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(free_source, vec![exiled]);
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(normal_source, vec![exiled]);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "the later PayNormalCost static must be found despite the earlier free source"
+    );
+    assert!(
+        face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare accepts the normal-cost authority"
+    );
+}
+
 /// Free-cast grant permission as `cast_from_zone` installs it (Dauthi-class).
 fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::ExileWithAltCost {

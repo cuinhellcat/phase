@@ -3184,10 +3184,17 @@ fn has_exile_cast_permission(
         // CR 118.9a + CR 601.2b: a free static (Maralen-class
         // `WithoutPayingManaCost`) is itself an alternative cost and lends the
         // face-down cast no authority; a `PayNormalCost` static (The Matrix of
-        // Time class) stays a normal-cost route for every variant.
-        || exile_cast_permission_source(state, player, obj.id).is_some_and(|(_, _, cost)| {
-            !face_down || matches!(cost, ExileCastCost::PayNormalCost)
-        })
+        // Time class) stays a normal-cost route. The face-down case SEARCHES
+        // for an eligible normal-cost source — an earlier free source must
+        // not hide a later normal-cost authority (first-match hazard).
+        || if face_down {
+            exile_cast_permission_source_matching(state, player, obj.id, |cost| {
+                matches!(cost, ExileCastCost::PayNormalCost)
+            })
+            .is_some()
+        } else {
+            exile_cast_permission_source(state, player, obj.id).is_some()
+        }
 }
 
 /// CR 305.1 + CR 601.2a: Lands in exile may be played by permissions that say
@@ -4451,6 +4458,23 @@ pub(crate) fn exile_cast_permission_source(
     player: PlayerId,
     exiled_id: ObjectId,
 ) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
+    exile_cast_permission_source_matching(state, player, exiled_id, |_| true)
+}
+
+/// Cost-aware sibling of [`exile_cast_permission_source`]: returns the first
+/// authorizing static whose [`ExileCastCost`] satisfies `cost_ok`, applying
+/// the same source gates (frequency slot, your-turn timing, pool membership,
+/// affected filter). CR 118.9a: the face-down admission must SEARCH for a
+/// `PayNormalCost` source — filtering the result of a first-match scan lets
+/// an earlier free source hide a later normal-cost authority (the
+/// multi-source first-match hazard documented on
+/// [`exile_cast_permission_source_full`]).
+fn exile_cast_permission_source_matching(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+    cost_ok: impl Fn(&ExileCastCost) -> bool,
+) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
     let obj = state.objects.get(&exiled_id)?;
     if !exile_object_can_enter_cast_path(obj) {
         return None;
@@ -4478,6 +4502,9 @@ pub(crate) fn exile_cast_permission_source(
         let ctx =
             super::filter::FilterContext::from_source_with_controller(source.source_id, player);
         if !super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
+            return None;
+        }
+        if !cost_ok(&source.cost) {
             return None;
         }
         Some((source.source_id, source.frequency, source.cost))
