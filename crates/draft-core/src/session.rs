@@ -1524,6 +1524,99 @@ mod tests {
         );
     }
 
+    /// Crafted-history session for direct `generate_swiss_pairings` calls.
+    /// Distinct win counts put every player in a singleton bracket, so the
+    /// in-bracket shuffle is the identity and the pool order is exactly the
+    /// standings order — the scenarios below are deterministic in every rng.
+    fn crafted_swiss_session(
+        pod_size: u8,
+        wins: &[u8],
+        prior_round_one: &[[usize; 2]],
+    ) -> (DraftSession, Vec<PlayerId>) {
+        let (mut session, _) = test_session(pod_size);
+        let pids: Vec<PlayerId> = (0..pod_size)
+            .map(|seat| seat_player_id(&session, seat))
+            .collect();
+        for (pid, &w) in pids.iter().zip(wins) {
+            ensure_match_record(&mut session.match_records, *pid).match_wins = w;
+        }
+        session.pairings = prior_round_one
+            .iter()
+            .enumerate()
+            .map(|(t, &[x, y])| DraftPairing {
+                round: 1,
+                table: t as u8,
+                players: [pids[x], pids[y]],
+                match_id: format!("r1-t{t}"),
+                status: PairingStatus::Complete,
+                winner: Some(pids[x]),
+            })
+            .collect();
+        (session, pids)
+    }
+
+    fn unordered([x, y]: [PlayerId; 2]) -> (PlayerId, PlayerId) {
+        if x.0 <= y.0 {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    }
+
+    #[test]
+    fn swiss_backtracks_when_the_first_legal_partner_dead_ends() {
+        // Pool order A,B,C,D (wins 3/2/1/0); only C–D is prior. A's FIRST
+        // legal partner is B, but pairing A–B leaves C–D as a forced
+        // rematch — the search must back out and land on A–C / B–D. A
+        // first-legal-partner greedy without backtracking cannot reach
+        // this answer.
+        let (session, p) = crafted_swiss_session(4, &[3, 2, 1, 0], &[[2, 3]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        let got: HashSet<(PlayerId, PlayerId)> =
+            pairings.iter().map(|pr| unordered(pr.players)).collect();
+        let want = HashSet::from([unordered([p[0], p[2]]), unordered([p[1], p[3]])]);
+        assert_eq!(
+            got, want,
+            "the dead end behind A–B must back out to A–C / B–D"
+        );
+    }
+
+    #[test]
+    fn swiss_two_player_round_two_admits_the_unavoidable_rematch() {
+        // With two players every later round repeats the only possible
+        // pair — the rematch-free search fails and the fallback must still
+        // produce the pairing instead of an empty round.
+        let (session, p) = crafted_swiss_session(2, &[1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        assert_eq!(
+            pairings.len(),
+            1,
+            "the unavoidable rematch must be admitted"
+        );
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[1]]));
+    }
+
+    #[test]
+    fn swiss_bye_walks_up_when_the_bottom_bye_forces_a_rematch() {
+        // 3 players, wins 2/1/0, prior A–B. Handing the bye to bottom C
+        // leaves A–B as a forced rematch, so the bye must walk up to B and
+        // pair A–C fresh.
+        let (session, p) = crafted_swiss_session(3, &[2, 1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(
+            bye,
+            Some(p[1]),
+            "the bye walks past the bottom seat to keep the round rematch-free"
+        );
+        assert_eq!(pairings.len(), 1);
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[2]]));
+    }
+
     #[test]
     fn test_se_bracket_8_players() {
         let config = DraftConfig {
