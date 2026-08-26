@@ -24291,6 +24291,7 @@ mod tests {
         let grant = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    land_look_companion: false,
                     duration: Duration::Permanent,
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
@@ -28132,6 +28133,7 @@ mod tests {
         let grant = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    land_look_companion: false,
                     duration: Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },

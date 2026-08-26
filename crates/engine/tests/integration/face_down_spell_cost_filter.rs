@@ -339,6 +339,7 @@ fn exile_morph_with_competing_permissions(
     });
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: Duration::UntilEndOfTurn,
             granted_to: P0,
             frequency: CastFrequency::Unlimited,

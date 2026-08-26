@@ -1488,6 +1488,7 @@ fn record_lingering_permissions(
                 });
 
                 let play_permission = CastingPermission::PlayFromExile {
+                    land_look_companion: true,
                     duration: play_duration,
                     granted_to: ability.controller,
                     frequency: CastFrequency::Unlimited,

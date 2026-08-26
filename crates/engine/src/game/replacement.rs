@@ -5062,6 +5062,7 @@ fn bind_search_found_definition(
                         cast_cost_raise: None,
                         land_enter_tapped,
                         invalidation: None,
+                        land_look_companion: false,
                     },
                 target: TargetFilter::ParentTarget,
                 grantee: PermissionGrantee::AbilityController,

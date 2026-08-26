@@ -110,6 +110,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
         land_object
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1608,6 +1609,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1668,6 +1670,7 @@ fn add_play_from_exile_test_spell(
     ));
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: Duration::Permanent,
             granted_to,
             frequency: CastFrequency::Unlimited,
@@ -1957,6 +1960,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -2007,6 +2011,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
         obj.card_types.core_types.push(CoreType::Land);
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -11370,6 +11375,7 @@ fn undaunted_no_op_without_keyword() {
 
 fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> CastingPermission {
     CastingPermission::PlayFromExile {
+        land_look_companion: false,
         duration: Duration::Permanent,
         granted_to,
         frequency: CastFrequency::Unlimited,
@@ -18657,6 +18663,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -18758,6 +18765,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -18930,6 +18938,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -20237,6 +20246,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
         ));
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -20310,6 +20320,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
         ));
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -27239,6 +27250,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             enters_with_modifications: Vec::new(),
         },
         CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: Duration::UntilEndOfTurn,
             granted_to: PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -44477,6 +44489,201 @@ fn exile_cast_permission_surfaces_pool_card() {
     );
 }
 
+/// CR 118.9a + CR 601.2b (#7945): a FREE static exile permission
+/// (`WithoutPayingManaCost`, Maralen-class) is itself an alternative cost —
+/// it must not lend zone authority to the {{3}} face-down cast, while the
+/// plain (variant-less) authority stays intact.
+#[test]
+fn free_static_exile_permission_lends_no_face_down_authority() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source_id =
+        add_exile_cast_permission_source(&mut state, player, "Maralen", TargetFilter::Any);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(source_id, vec![exiled]);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        !has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "a free static must not admit the face-down cast (two alternative costs)"
+    );
+    assert!(
+        !face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare must reject a free-static-only route"
+    );
+    assert!(
+        has_exile_cast_permission(&state, &obj, player, state.turn_number, None),
+        "the plain free-cast authority itself must stay intact"
+    );
+}
+
+/// Counter-direction to the free-static gate: a `PayNormalCost` static
+/// (The Matrix of Time class) is a normal-cost route and keeps lending the
+/// face-down cast its zone authority.
+#[test]
+fn normal_cost_static_exile_permission_keeps_face_down_authority() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source_id = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Matrix",
+        TargetFilter::Any,
+        CastFrequency::OncePerTurn,
+        CardPlayMode::Cast,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::ThisTurn,
+        ExileCastTiming::AnyTime,
+    );
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(source_id, vec![exiled]);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "a normal-cost static remains face-down zone authority"
+    );
+    assert!(
+        face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare accepts the normal-cost static route"
+    );
+}
+
+/// Free-cast grant permission as `cast_from_zone` installs it (Dauthi-class).
+fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::ExileWithAltCost {
+        cost: ManaCost::zero(),
+        cast_transformed: false,
+        constraint: None,
+        granted_to: Some(player),
+        resolution_cleanup: None,
+        duration: None,
+        graveyard_replacement: None,
+        enters_with_counter: None,
+        enters_with_modifications: vec![],
+        mana_spend_permission: None,
+    }
+}
+
+/// Impulse-shape `PlayFromExile`; `companion` toggles the land/look marker.
+fn play_from_exile_grant(
+    player: PlayerId,
+    companion: bool,
+) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::PlayFromExile {
+        duration: crate::types::ability::Duration::Permanent,
+        granted_to: player,
+        frequency: CastFrequency::Unlimited,
+        source_id: None,
+        invalidation: None,
+        exiled_by_ability_controller: None,
+        mana_spend_permission: None,
+        card_filter: None,
+        single_use_group: None,
+        single_use: false,
+        cast_cost_raise: None,
+        land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        land_look_companion: companion,
+    }
+}
+
+/// CR 118.9a (#7948 review): elected-authority provenance — a genuine
+/// impulse `PlayFromExile` coexisting with an unrelated free-cast grant on
+/// the same exiled card remains a normal-cost route: the face-down cast
+/// keeps its zone authority (disguise supplies the single alternative cost).
+#[test]
+fn independent_impulse_grant_keeps_face_down_authority_beside_a_free_grant() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.casting_permissions.push(free_cast_grant(player));
+    obj.casting_permissions
+        .push(play_from_exile_grant(player, false));
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "an independent impulse grant is a normal-cost route — face-down stays legal"
+    );
+    assert!(
+        face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare accepts the impulse route beside the free grant"
+    );
+}
+
+/// The Dauthi shape: only the free grant plus its land/look companion — no
+/// impulse route exists, so the face-down cast has no authority, while the
+/// granted free cast itself stays intact.
+#[test]
+fn a_companion_grant_lends_no_face_down_authority() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Disguiser");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.casting_permissions.push(free_cast_grant(player));
+    obj.casting_permissions
+        .push(play_from_exile_grant(player, true));
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        !has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "the land/look companion is provenance, not cast authority (CR 601.2b)"
+    );
+    assert!(
+        !face_down_cast_is_permitted(&state, player, exiled),
+        "runtime admission: the face-down prepare must reject the companion-only route"
+    );
+    assert!(
+        has_exile_cast_permission(&state, &obj, player, state.turn_number, None),
+        "the granted free cast itself must stay available"
+    );
+}
+
+/// Serde both-forms pin: the default marker stays off the wire, so the
+/// emitted JSON IS the pre-marker legacy form — and reading it back yields a
+/// genuine impulse grant (`land_look_companion: false`).
+#[test]
+fn legacy_play_from_exile_form_round_trips_without_the_companion_marker() {
+    let grant = play_from_exile_grant(PlayerId(0), false);
+    let json = serde_json::to_string(&grant).expect("serialize");
+    assert!(
+        !json.contains("land_look_companion"),
+        "default marker must stay off the wire (legacy form): {json}"
+    );
+    let back: crate::types::ability::CastingPermission =
+        serde_json::from_str(&json).expect("deserialize legacy form");
+    assert_eq!(back, grant);
+}
+
 /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static
 /// from `spell_objects_available_to_cast` after a single cast through it
 /// this turn, then come back at turn cleanup.
@@ -44843,6 +45050,7 @@ fn add_impulse_exiled_card(
     obj.card_types.core_types = vec![core_type];
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -45130,6 +45338,7 @@ fn grant_object_exile_land_play_permission(
         .unwrap()
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -45381,6 +45590,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -51710,6 +51920,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         obj.mana_cost = ManaCost::zero();
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,

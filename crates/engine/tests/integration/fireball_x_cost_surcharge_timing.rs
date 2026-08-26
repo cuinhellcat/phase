@@ -335,6 +335,7 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
         .unwrap()
         .casting_permissions = vec![
         CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: Duration::Permanent,
             granted_to: P1,
             frequency: CastFrequency::Unlimited,
@@ -349,6 +350,7 @@ fn fireball_distribution_resume_preserves_elected_exile_permission() {
             land_enter_tapped: EtbTapState::Unspecified,
         },
         CastingPermission::PlayFromExile {
+            land_look_companion: false,
             duration: Duration::Permanent,
             granted_to: P0,
             frequency: CastFrequency::Unlimited,

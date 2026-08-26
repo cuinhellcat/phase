@@ -416,6 +416,7 @@ pub fn room_effects(
             let grant = simple(
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
+                        land_look_companion: false,
                         duration: Duration::UntilEndOfTurn,
                         // Placeholder — rewritten to ability.controller at
                         // grant time by `grant_permission::resolve`.

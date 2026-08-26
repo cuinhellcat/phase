@@ -3785,6 +3785,7 @@ fn junk_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
+                land_look_companion: false,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,

@@ -3733,6 +3733,19 @@ pub enum CastingPermission {
         /// printed invalidation event occurs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invalidation: Option<PlayPermissionInvalidation>,
+        /// CR 305.1 + CR 406.3b + CR 118.9a: `true` marks the land-play/look
+        /// companion that `cast_from_zone` installs ALONGSIDE an
+        /// alternative-cost grant (a "you may play it … without paying its
+        /// mana cost" sentence installs `ExileWithAltCost` for the cast half
+        /// and this grant for the land/look half). A companion is provenance,
+        /// not cast authority: the sibling alt-cost grant is the elected cast
+        /// route, so the companion is skipped by cast elections — it must not
+        /// masquerade as a normal-cost route (e.g. lend the {3} face-down
+        /// cast zone authority, CR 601.2b). `false` (default, and the value
+        /// every pre-existing serialized grant deserializes to) is a genuine
+        /// impulse-class permission with full cast authority.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        land_look_companion: bool,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.

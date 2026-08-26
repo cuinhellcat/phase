@@ -3124,24 +3124,35 @@ fn has_exile_cast_permission(
 ) -> bool {
     // CR 601.2b: the face-down cast may only ride a normal-cost route.
     let face_down = matches!(variant, Some(CastingVariant::FaceDown));
-    // CR 601.2b + CR 305.1: a `PlayFromExile` installed alongside an
-    // alternative-cost grant is the land/look companion of a "you may play it
-    // … without paying its mana cost" sentence (see `cast_from_zone.rs`), not
-    // a normal-cost cast route — while an alt-cost grant covers this player,
-    // it lends no face-down authority. Named limit: an independent impulse
-    // `PlayFromExile` coexisting with such a grant is suppressed too
-    // (conservative under CR 118.9a; the permissions carry no source link to
-    // tell the two apart).
-    let alt_cost_grant_covers_player = face_down
-        && obj.casting_permissions.iter().any(|p| match p {
-            crate::types::ability::CastingPermission::ExileWithAltCost { .. }
-            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
-                exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
-            }
-            _ => false,
-        });
-    (!alt_cost_grant_covers_player
-        && play_from_exile_permission_source(state, obj, player, turn_number).is_some())
+    // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
+    // land/look companion installed alongside an alt-cost grant
+    // (`land_look_companion`, see `cast_from_zone.rs`) is not cast authority,
+    // so the face-down cast accepts only a genuine impulse-class grant as its
+    // normal-cost route. Every other variant keeps the plain scan: where a
+    // companion exists, its alt-cost sibling authorizes those casts anyway.
+    let play_from_exile_route = if face_down {
+        obj.casting_permissions
+            .iter()
+            .enumerate()
+            .any(|(index, p)| {
+                !matches!(
+                    p,
+                    crate::types::ability::CastingPermission::PlayFromExile {
+                        land_look_companion: true,
+                        ..
+                    }
+                ) && play_from_exile_permission_source_at_index(
+                    state,
+                    obj,
+                    player,
+                    CastingPermissionIndex(index),
+                )
+                .is_some()
+            })
+    } else {
+        play_from_exile_permission_source(state, obj, player, turn_number).is_some()
+    };
+    play_from_exile_route
         || obj.casting_permissions.iter().any(|p| match p {
             crate::types::ability::CastingPermission::AdventureCreature => obj.owner == player,
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
@@ -3168,7 +3179,14 @@ fn has_exile_cast_permission(
         // per-turn pool + per-source filter; the helper performs the same checks
         // (per-turn frequency, pool membership, affected filter) used by
         // `exile_objects_castable_by_permission`.
-        || exile_cast_permission_source(state, player, obj.id).is_some()
+        //
+        // CR 118.9a + CR 601.2b: a free static (Maralen-class
+        // `WithoutPayingManaCost`) is itself an alternative cost and lends the
+        // face-down cast no authority; a `PayNormalCost` static (The Matrix of
+        // Time class) stays a normal-cost route for every variant.
+        || exile_cast_permission_source(state, player, obj.id).is_some_and(|(_, _, cost)| {
+            !face_down || matches!(cost, ExileCastCost::PayNormalCost)
+        })
 }
 
 /// CR 305.1 + CR 601.2a: Lands in exile may be played by permissions that say
@@ -3814,8 +3832,31 @@ fn selected_object_cast_permission_index(
         if !play_from_exile_can_authorize_variant {
             return None;
         }
-        play_from_exile_permission_source_with_index(state, obj, player, state.turn_number)
-            .map(|(index, _, _)| index)
+        // CR 118.9a: elected-authority provenance — the land/look companion
+        // of an alt-cost grant (`land_look_companion`) is never elected as a
+        // cast authority; the sibling alt-cost grant is that sentence's cast
+        // route. A genuine impulse grant further down the vector still wins.
+        obj.casting_permissions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                !matches!(
+                    p,
+                    CastingPermission::PlayFromExile {
+                        land_look_companion: true,
+                        ..
+                    }
+                )
+            })
+            .find_map(|(index, _)| {
+                play_from_exile_permission_source_at_index(
+                    state,
+                    obj,
+                    player,
+                    CastingPermissionIndex(index),
+                )
+                .map(|_| CastingPermissionIndex(index))
+            })
     })
 }
 
