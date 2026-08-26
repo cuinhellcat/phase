@@ -211,7 +211,7 @@ pub fn resolve_exile(
             if let Some(obj) = state.objects.get_mut(&obj_id) {
                 obj.casting_permissions
                     .push(CastingPermission::PlayFromExile {
-                        land_look_companion: false,
+                        provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                         duration: crate::types::ability::Duration::Permanent,
                         granted_to: controller,
                         frequency: CastFrequency::Unlimited,

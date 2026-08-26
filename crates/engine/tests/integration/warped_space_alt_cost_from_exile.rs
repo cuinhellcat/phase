@@ -27,7 +27,7 @@ const WARPED_SPACE_TEXT: &str = "Once each turn, you may pay {0} rather than pay
 
 fn exile_permission() -> CastingPermission {
     CastingPermission::PlayFromExile {
-        land_look_companion: false,
+        provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
         duration: Duration::UntilEndOfTurn,
         granted_to: P0,
         frequency: CastFrequency::Unlimited,

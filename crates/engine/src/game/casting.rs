@@ -3126,7 +3126,7 @@ fn has_exile_cast_permission(
     let face_down = matches!(variant, Some(CastingVariant::FaceDown));
     // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
     // land/look companion installed alongside an alt-cost grant
-    // (`land_look_companion`, see `cast_from_zone.rs`) is not cast authority,
+    // (`PlayFromExileProvenance::LandLookCompanion`, see `cast_from_zone.rs`) is not cast authority,
     // so the face-down cast accepts only a genuine impulse-class grant as its
     // normal-cost route. Every other variant keeps the plain scan: where a
     // companion exists, its alt-cost sibling authorizes those casts anyway.
@@ -3138,7 +3138,8 @@ fn has_exile_cast_permission(
                 !matches!(
                     p,
                     crate::types::ability::CastingPermission::PlayFromExile {
-                        land_look_companion: true,
+                        provenance:
+                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
                         ..
                     }
                 ) && play_from_exile_permission_source_at_index(
@@ -3833,7 +3834,7 @@ fn selected_object_cast_permission_index(
             return None;
         }
         // CR 118.9a: elected-authority provenance — the land/look companion
-        // of an alt-cost grant (`land_look_companion`) is never elected as a
+        // of an alt-cost grant (`PlayFromExileProvenance::LandLookCompanion`) is never elected as a
         // cast authority; the sibling alt-cost grant is that sentence's cast
         // route. A genuine impulse grant further down the vector still wins.
         obj.casting_permissions
@@ -3843,7 +3844,8 @@ fn selected_object_cast_permission_index(
                 !matches!(
                     p,
                     CastingPermission::PlayFromExile {
-                        land_look_companion: true,
+                        provenance:
+                            crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
                         ..
                     }
                 )

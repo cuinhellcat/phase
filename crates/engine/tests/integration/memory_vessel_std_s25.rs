@@ -50,7 +50,7 @@ const P2: PlayerId = PlayerId(2);
 /// activator via `exiled_by_ability_controller`.
 fn play_from_exile_grant() -> CastingPermission {
     CastingPermission::PlayFromExile {
-        land_look_companion: false,
+        provenance: engine::types::ability::PlayFromExileProvenance::Impulse,
         duration: Duration::UntilNextTurnOf {
             player: PlayerScope::Controller,
         },

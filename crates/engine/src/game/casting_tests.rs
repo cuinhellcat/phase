@@ -110,7 +110,7 @@ fn priority_land_play_omits_an_exile_land_blocked_by_a_play_restriction() {
         land_object
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1609,7 +1609,7 @@ fn spell_auto_tap_honors_exile_any_color_permission() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -1670,7 +1670,7 @@ fn add_play_from_exile_test_spell(
     ));
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
-            land_look_companion: false,
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to,
             frequency: CastFrequency::Unlimited,
@@ -1960,7 +1960,7 @@ fn cast_permanent_from_granted_permission_enters_under_caster_control() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -2011,7 +2011,7 @@ fn play_land_from_granted_permission_enters_under_player_control() {
         obj.card_types.core_types.push(CoreType::Land);
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -11375,7 +11375,7 @@ fn undaunted_no_op_without_keyword() {
 
 fn play_from_exile_raise(granted_to: PlayerId, raise: Option<ManaCost>) -> CastingPermission {
     CastingPermission::PlayFromExile {
-        land_look_companion: false,
+        provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
         duration: Duration::Permanent,
         granted_to,
         frequency: CastFrequency::Unlimited,
@@ -18663,7 +18663,7 @@ fn cast_with_keyword_convoke_honors_from_exile_filter() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -18765,7 +18765,7 @@ fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: crate::types::ability::Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -18938,7 +18938,7 @@ fn play_from_exile_grant_binds_to_grantee_and_carries_any_mana_permission() {
         };
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -20246,7 +20246,7 @@ fn once_per_turn_collection_counter_play_permission_requires_live_source_static(
         ));
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -20320,7 +20320,7 @@ fn collection_counter_play_permission_is_once_per_turn() {
         ));
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -27250,7 +27250,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             enters_with_modifications: Vec::new(),
         },
         CastingPermission::PlayFromExile {
-            land_look_companion: false,
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::UntilEndOfTurn,
             granted_to: PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -44599,7 +44599,11 @@ fn play_from_exile_grant(
         single_use: false,
         cast_cost_raise: None,
         land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        land_look_companion: companion,
+        provenance: if companion {
+            crate::types::ability::PlayFromExileProvenance::LandLookCompanion
+        } else {
+            crate::types::ability::PlayFromExileProvenance::Impulse
+        },
     }
 }
 
@@ -44670,13 +44674,13 @@ fn a_companion_grant_lends_no_face_down_authority() {
 
 /// Serde both-forms pin: the default marker stays off the wire, so the
 /// emitted JSON IS the pre-marker legacy form — and reading it back yields a
-/// genuine impulse grant (`land_look_companion: false`).
+/// genuine impulse grant (`PlayFromExileProvenance::Impulse`).
 #[test]
 fn legacy_play_from_exile_form_round_trips_without_the_companion_marker() {
     let grant = play_from_exile_grant(PlayerId(0), false);
     let json = serde_json::to_string(&grant).expect("serialize");
     assert!(
-        !json.contains("land_look_companion"),
+        !json.contains("provenance"),
         "default marker must stay off the wire (legacy form): {json}"
     );
     let back: crate::types::ability::CastingPermission =
@@ -45050,7 +45054,7 @@ fn add_impulse_exiled_card(
     obj.card_types.core_types = vec![core_type];
     obj.casting_permissions
         .push(CastingPermission::PlayFromExile {
-            land_look_companion: false,
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -45338,7 +45342,7 @@ fn grant_object_exile_land_play_permission(
         .unwrap()
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
-            land_look_companion: false,
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -45590,7 +45594,7 @@ fn impulse_play_from_exile_land_uses_play_path_not_cast_path() {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::PlayFromExile {
-            land_look_companion: false,
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: crate::types::ability::Duration::UntilEndOfNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             },
@@ -51920,7 +51924,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         obj.mana_cost = ManaCost::zero();
         obj.casting_permissions
             .push(CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,

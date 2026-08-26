@@ -3540,6 +3540,36 @@ pub enum RestrictionPlayerScope {
 // 500+ byte variant; the permissions are short-lived per-object grants, not
 // hot-path bulk collections, so the size is intentional. Mirrors the documented
 // allow on `Effect`.
+/// CR 118.9a: Provenance of a [`CastingPermission::PlayFromExile`] grant.
+///
+/// An `Impulse` grant is a self-standing "you may play it" permission with
+/// full cast authority (impulse draw, Warp returns, mill-to-graveyard play
+/// grants). A `LandLookCompanion` is the land-play/look half that
+/// `cast_from_zone` installs ALONGSIDE an alternative-cost grant (a "you may
+/// play it … without paying its mana cost" sentence installs
+/// `ExileWithAltCost` for the cast half and the companion for CR 305.1 land
+/// plays and the CR 406.3b face-down-exile look): provenance, not cast
+/// authority — the sibling alt-cost grant is the elected cast route, so cast
+/// elections skip companions and they lend the {3} face-down cast no zone
+/// authority (CR 601.2b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayFromExileProvenance {
+    /// Self-standing play permission with full cast authority (the default,
+    /// and what every pre-marker serialized grant deserializes to).
+    #[default]
+    Impulse,
+    /// Land/look companion of an alternative-cost grant — never elected as a
+    /// cast authority.
+    LandLookCompanion,
+}
+
+impl PlayFromExileProvenance {
+    /// Serde gate: the default `Impulse` stays off the wire.
+    pub fn is_impulse(&self) -> bool {
+        matches!(self, PlayFromExileProvenance::Impulse)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3733,19 +3763,15 @@ pub enum CastingPermission {
         /// printed invalidation event occurs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invalidation: Option<PlayPermissionInvalidation>,
-        /// CR 305.1 + CR 406.3b + CR 118.9a: `true` marks the land-play/look
-        /// companion that `cast_from_zone` installs ALONGSIDE an
-        /// alternative-cost grant (a "you may play it … without paying its
-        /// mana cost" sentence installs `ExileWithAltCost` for the cast half
-        /// and this grant for the land/look half). A companion is provenance,
-        /// not cast authority: the sibling alt-cost grant is the elected cast
-        /// route, so the companion is skipped by cast elections — it must not
-        /// masquerade as a normal-cost route (e.g. lend the {3} face-down
-        /// cast zone authority, CR 601.2b). `false` (default, and the value
-        /// every pre-existing serialized grant deserializes to) is a genuine
-        /// impulse-class permission with full cast authority.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        land_look_companion: bool,
+        /// CR 305.1 + CR 406.3b + CR 118.9a: what kind of grant this is — a
+        /// self-standing impulse-class permission or the land-play/look
+        /// companion of an alternative-cost grant. See
+        /// [`PlayFromExileProvenance`]. The default (`Impulse`, and the value
+        /// every pre-existing serialized grant deserializes to) is full cast
+        /// authority; the companion is skipped by cast elections and lends
+        /// the face-down cast no zone authority (CR 601.2b).
+        #[serde(default, skip_serializing_if = "PlayFromExileProvenance::is_impulse")]
+        provenance: PlayFromExileProvenance,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.

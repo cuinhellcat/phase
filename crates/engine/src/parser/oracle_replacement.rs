@@ -1080,7 +1080,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
         AbilityKind::Spell,
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
-                land_look_companion: false,
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: parsed.play_permission.duration,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::Unlimited,
