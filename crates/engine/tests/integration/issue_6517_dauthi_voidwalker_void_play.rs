@@ -18,7 +18,10 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
+
+const P2: PlayerId = PlayerId(2);
 
 const VOIDWALKER: &str = "If a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.\n{T}, Sacrifice this creature: Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.";
 const MURDER: &str = "Destroy target creature.";
@@ -228,5 +231,55 @@ fn with_two_void_cards_the_pick_is_offered_and_the_choice_plays_free() {
         zone_of(&runner, grunt),
         Zone::Exile,
         "the unchosen card stays exiled"
+    );
+}
+
+#[test]
+fn a_later_opponents_card_is_offered_in_three_player() {
+    // CR 102.3: in multiplayer every player not on the controller's team is
+    // an opponent, so the pool must span ALL opponents' exile partitions.
+    // P1 (the first opponent) owns nothing eligible; P2 owns the only
+    // void-countered card. REVERT DISCRIMINATOR: a single-owner scope
+    // (`ZoneOwner::Opponent`) resolves to `players::opponents(...).next()`
+    // = P1 alone, finds zero candidates, and silently skips the pick — this
+    // test then fails at the prompt assertion.
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let walker = scenario
+        .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, VOIDWALKER)
+        .id();
+    let far_orc = scenario.add_creature(P2, "Far Orc", 2, 2).id();
+    let murder = scenario
+        .add_spell_to_hand(P0, "Test Murder", false)
+        .from_oracle_text(MURDER)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_mana_pool(P0, vec![]);
+    let mut runner = scenario.build();
+    runner.cast(murder).target_object(far_orc).resolve();
+    assert_eq!(
+        zone_of(&runner, far_orc),
+        Zone::Exile,
+        "the replacement must exile the later opponent's dying creature"
+    );
+    assert_eq!(void_counters(&runner, far_orc), 1);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: walker,
+            ability_index: 0,
+        })
+        .expect("activating the {T}+sacrifice ability must succeed");
+    let pick_seen = drive_activation(&mut runner, walker, far_orc);
+    assert!(
+        pick_seen,
+        "the later opponent's card must be offered — a first-opponent-only \
+         scan finds zero candidates and silently skips the pick"
+    );
+    runner.cast(far_orc).resolve();
+    assert_eq!(
+        zone_of(&runner, far_orc),
+        Zone::Battlefield,
+        "the later opponent's card must be playable for free"
     );
 }
