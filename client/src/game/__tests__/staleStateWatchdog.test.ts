@@ -3,13 +3,42 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineAdapter, EngineSnapshot, GameState, LegalActionsResult } from "../../adapter/types";
 import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { debugLog } from "../debugLog";
 import { processRemoteUpdate } from "../dispatch";
 import {
   WATCHDOG_ARM_DELAY_MS,
   createStaleStateWatchdog,
   resyncFromAdapter,
+  resyncFromAdapterSafely,
   stateFingerprint,
 } from "../staleStateWatchdog";
+
+// Failure injection for the commit pipeline: when set, every
+// `processRemoteUpdate` rejects with this error instead of committing.
+const harness = vi.hoisted(() => ({
+  failRemoteUpdate: null as Error | null,
+}));
+
+vi.mock("../dispatch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../dispatch")>();
+  return {
+    ...actual,
+    processRemoteUpdate: (
+      ...args: Parameters<typeof actual.processRemoteUpdate>
+    ) =>
+      harness.failRemoteUpdate
+        ? Promise.reject(harness.failRemoteUpdate)
+        : actual.processRemoteUpdate(...args),
+  };
+});
+
+vi.mock("../debugLog", () => ({ debugLog: vi.fn() }));
+
+function loggedLineIncluding(fragment: string): boolean {
+  return vi
+    .mocked(debugLog)
+    .mock.calls.some(([message]) => String(message).includes(fragment));
+}
 
 // These tests prove the healing mechanism and its causality: each commit
 // arms exactly one deferred check, a clean check disarms until the next
@@ -69,6 +98,8 @@ describe("staleStateWatchdog", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     useGameStore.getState().reset();
+    harness.failRemoteUpdate = null;
+    vi.mocked(debugLog).mockClear();
   });
 
   afterEach(() => {
@@ -151,19 +182,64 @@ describe("staleStateWatchdog", () => {
     }
   });
 
-  it("resyncFromAdapter heals immediately and is a no-op when in agreement", async () => {
+  it("resyncFromAdapter recommits the adapter snapshot unconditionally", async () => {
     const screen = stateAt(1, 0);
     const ahead = stateAt(2, 1);
     await commitScreenState(screen);
 
-    let snapshot = snapshotOf(screen);
-    useGameStore.setState({ adapter: stubAdapter(() => snapshot) });
-    await resyncFromAdapter("test: agreement");
-    expect(committedFingerprint()).toBe(stateFingerprint(screen));
+    // Positive knowledge (a delivery rejected) must recommit even when the
+    // coarse fingerprint agrees — the lost update may live entirely outside
+    // it (a land play changes just a hand and the battlefield). The store
+    // commits by reference, so the swap is observable without the client
+    // deriving game-state equality.
+    const agreeing = snapshotOf(stateAt(1, 0));
+    useGameStore.setState({ adapter: stubAdapter(() => agreeing) });
+    await resyncFromAdapter("test: lost update outside the fingerprint");
+    expect(useGameStore.getState().gameState).toBe(agreeing.state);
 
-    snapshot = snapshotOf(ahead);
+    const diverged = snapshotOf(ahead);
+    useGameStore.setState({ adapter: stubAdapter(() => diverged) });
     await resyncFromAdapter("test: divergence");
     expect(committedFingerprint()).toBe(stateFingerprint(ahead));
+  });
+
+  it("a rejected deferred check logs, re-arms, and heals after recovery", async () => {
+    const screen = stateAt(1, 0);
+    const ahead = stateAt(2, 1);
+    await commitScreenState(screen);
+    useGameStore.setState({ adapter: stubAdapter(() => snapshotOf(ahead)) });
+
+    const watchdog = createStaleStateWatchdog();
+    watchdog.start();
+    try {
+      harness.failRemoteUpdate = new Error("commit pipeline down");
+      await elapse(WATCHDOG_ARM_DELAY_MS);
+      // The recommit rejected: nothing committed, nothing escaped unhandled …
+      expect(committedFingerprint()).toBe(stateFingerprint(screen));
+      // … and the failure is on the record.
+      expect(loggedLineIncluding("watchdog check failed")).toBe(true);
+      // No commit happened, so no store subscription fired — only the
+      // rejection path's own re-arm can drive this heal.
+      harness.failRemoteUpdate = null;
+      await elapse(WATCHDOG_ARM_DELAY_MS);
+      expect(committedFingerprint()).toBe(stateFingerprint(ahead));
+    } finally {
+      watchdog.stop();
+    }
+  });
+
+  it("resyncFromAdapterSafely absorbs and logs a rejected resync", async () => {
+    const screen = stateAt(1, 0);
+    await commitScreenState(screen);
+    useGameStore.setState({
+      adapter: stubAdapter(() => snapshotOf(stateAt(2, 1))),
+    });
+
+    harness.failRemoteUpdate = new Error("commit pipeline down");
+    resyncFromAdapterSafely("test: rejected resync");
+    await elapse(0); // flush the rejection's microtask chain
+    expect(loggedLineIncluding("stale-screen resync failed")).toBe(true);
+    expect(committedFingerprint()).toBe(stateFingerprint(screen));
   });
 
   it("does nothing without an adapter or committed state", async () => {

@@ -34,6 +34,13 @@ export const WATCHDOG_ARM_DELAY_MS = 10_000;
  * The slice of the state a viewer can see go stale. `waiting_for` carries the
  * pending-decision sets (the frozen overlay's data source); the rest pins the
  * game's coarse position so a stall outside any decision point still differs.
+ *
+ * Heuristic for the DEFERRED check only: a lost update that changes none of
+ * these fields (a land play alters just a hand and the battlefield) is
+ * invisible here. The positive-knowledge path (`resyncFromAdapter`) therefore
+ * recommits without consulting this. The complete detector is an engine-owned
+ * state revision surfaced through every transport — an engine + protocol
+ * change, tracked as follow-up work.
  */
 export function stateFingerprint(state: GameState): string {
   return JSON.stringify({
@@ -58,18 +65,34 @@ async function readAdapterSnapshot(): Promise<EngineSnapshot | null> {
 }
 
 /**
- * One comparison + (on divergence) one recommit. Exported for the
+ * One unconditional recommit of the adapter's current snapshot. For the
  * delivery-failure handlers: a caught rejection is positive knowledge that
- * exactly one update was lost, so they re-sync immediately, no arm delay.
+ * exactly one update was lost, so they re-sync immediately, no arm delay —
+ * and without the fingerprint gate: the lost update may have changed only
+ * state outside the coarse fingerprint, and the display layer must not judge
+ * game-state equality. The store's commit gate still orders the commit.
  */
 export async function resyncFromAdapter(reason: string): Promise<void> {
   const snapshot = await readAdapterSnapshot();
   if (!snapshot) return;
-  const committed = useGameStore.getState().gameState;
-  if (!committed) return;
-  if (stateFingerprint(snapshot.state) === stateFingerprint(committed)) return;
+  if (!useGameStore.getState().gameState) return;
   debugLog(`stale-screen resync (${reason})`, "warn");
   await processRemoteUpdate(snapshot, [], undefined);
+}
+
+/**
+ * Fire-and-forget form for the delivery-failure handlers: a resync that
+ * itself rejects must not become an unhandled rejection with the screen
+ * silently stale — log it; the armed watchdog (or the next successful
+ * delivery) is the retry path.
+ */
+export function resyncFromAdapterSafely(reason: string): void {
+  resyncFromAdapter(reason).catch((err) => {
+    debugLog(
+      `stale-screen resync failed (${reason}): ${err instanceof Error ? err.message : String(err)}`,
+      "warn",
+    );
+  });
 }
 
 export interface StaleStateWatchdog {
@@ -95,9 +118,20 @@ export function createStaleStateWatchdog(): StaleStateWatchdog {
       timer = null;
       if (checking) return; // a still-running check re-arms on its own
       checking = true;
-      void check().finally(() => {
-        checking = false;
-      });
+      check()
+        .catch((err) => {
+          // A rejected recommit committed nothing, so no store subscription
+          // re-arms — re-arm here (only while active) or the stale screen
+          // would outlive its own watchdog.
+          debugLog(
+            `stale-screen watchdog check failed: ${err instanceof Error ? err.message : String(err)}`,
+            "warn",
+          );
+          if (unsubscribe) arm();
+        })
+        .finally(() => {
+          checking = false;
+        });
     }, WATCHDOG_ARM_DELAY_MS);
   }
 

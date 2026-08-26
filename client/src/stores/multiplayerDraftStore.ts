@@ -26,7 +26,7 @@ import type { DraftMatchLaunch, DraftMatchSettlement, DraftPauseReason } from ".
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { createGameLoopController, type GameLoopController } from "../game/controllers/gameLoopController";
 import { processRemoteUpdate } from "../game/dispatch";
-import { resyncFromAdapter } from "../game/staleStateWatchdog";
+import { resyncFromAdapterSafely } from "../game/staleStateWatchdog";
 import { debugLog } from "../game/debugLog";
 import { useGameStore } from "./gameStore";
 import {
@@ -888,7 +888,7 @@ export const useMultiplayerDraftStore = create<
               // A rejected delivery is otherwise gone and the screen freezes
               // on the previous state — surface it and re-sync immediately.
               debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
-              void resyncFromAdapter("delivery rejected");
+              resyncFromAdapterSafely("delivery rejected");
             });
           }
           if (event.type === "stateChanged") {
@@ -979,7 +979,7 @@ export const useMultiplayerDraftStore = create<
               // A rejected delivery is otherwise gone and the screen freezes
               // on the previous state — surface it and re-sync immediately.
               debugLog(`draft-match remote update failed: ${err instanceof Error ? err.message : String(err)}`);
-              void resyncFromAdapter("delivery rejected");
+              resyncFromAdapterSafely("delivery rejected");
             });
           }
           if (event.type === "stateChanged") {
