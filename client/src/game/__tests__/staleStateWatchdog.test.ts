@@ -86,6 +86,24 @@ function stubAdapter(current: () => EngineSnapshot): EngineAdapter {
   return { getSnapshot: async () => current(), dispose: () => {} } as unknown as EngineAdapter;
 }
 
+/** Adapter whose `getSnapshot` stays pending until the test resolves it. */
+function deferredAdapter(): {
+  adapter: EngineAdapter;
+  resolve: (s: EngineSnapshot) => void;
+} {
+  let resolveFn: (s: EngineSnapshot) => void = () => {};
+  const pending = new Promise<EngineSnapshot>((res) => {
+    resolveFn = res;
+  });
+  return {
+    adapter: {
+      getSnapshot: () => pending,
+      dispose: () => {},
+    } as unknown as EngineAdapter,
+    resolve: resolveFn,
+  };
+}
+
 async function elapse(ms: number): Promise<void> {
   await vi.advanceTimersByTimeAsync(ms);
 }
@@ -226,6 +244,41 @@ describe("staleStateWatchdog", () => {
     } finally {
       watchdog.stop();
     }
+  });
+
+  it("stop() invalidates an in-flight check — no recommit after the lifecycle ended", async () => {
+    const screen = stateAt(1, 0);
+    const ahead = stateAt(2, 1);
+    await commitScreenState(screen);
+    const deferred = deferredAdapter();
+    useGameStore.setState({ adapter: deferred.adapter });
+
+    const watchdog = createStaleStateWatchdog();
+    watchdog.start();
+    // The check fires and is now awaiting the snapshot read …
+    await elapse(WATCHDOG_ARM_DELAY_MS);
+    // … the watchdog is stopped while that read is still in flight. The
+    // adapter identity is UNCHANGED, so only the lifecycle guard can veto.
+    watchdog.stop();
+    deferred.resolve(snapshotOf(ahead));
+    await elapse(0);
+    expect(committedFingerprint()).toBe(stateFingerprint(screen));
+  });
+
+  it("resyncFromAdapter drops a snapshot from a replaced adapter", async () => {
+    const screen = stateAt(1, 0);
+    const ahead = stateAt(2, 1);
+    await commitScreenState(screen);
+    const oldAdapter = deferredAdapter();
+    useGameStore.setState({ adapter: oldAdapter.adapter });
+
+    const pending = resyncFromAdapter("test: adapter swapped mid-read");
+    // The store swaps games while the old adapter's read is in flight; its
+    // late snapshot must not be committed over the new game.
+    useGameStore.setState({ adapter: stubAdapter(() => snapshotOf(screen)) });
+    oldAdapter.resolve(snapshotOf(ahead));
+    await pending;
+    expect(committedFingerprint()).toBe(stateFingerprint(screen));
   });
 
   it("resyncFromAdapterSafely absorbs and logs a rejected resync", async () => {

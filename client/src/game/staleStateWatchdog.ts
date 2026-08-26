@@ -73,9 +73,14 @@ async function readAdapterSnapshot(): Promise<EngineSnapshot | null> {
  * game-state equality. The store's commit gate still orders the commit.
  */
 export async function resyncFromAdapter(reason: string): Promise<void> {
+  const adapterBefore = useGameStore.getState().adapter;
   const snapshot = await readAdapterSnapshot();
   if (!snapshot) return;
-  if (!useGameStore.getState().gameState) return;
+  const { adapter, gameState } = useGameStore.getState();
+  // The await may cross a game teardown/swap — a snapshot from the old
+  // adapter must not be committed over the new game (same guard as the
+  // deferred check).
+  if (!gameState || adapter !== adapterBefore) return;
   debugLog(`stale-screen resync (${reason})`, "warn");
   await processRemoteUpdate(snapshot, [], undefined);
 }
@@ -104,6 +109,10 @@ export function createStaleStateWatchdog(): StaleStateWatchdog {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
   let checking = false;
+  // Lifecycle generation: stop() bumps it, and an in-flight check compares
+  // its captured value after every await — a check that outlives its own
+  // watchdog must neither recommit nor re-arm.
+  let generation = 0;
 
   function disarm(): void {
     if (timer != null) {
@@ -143,12 +152,15 @@ export function createStaleStateWatchdog(): StaleStateWatchdog {
       arm();
       return;
     }
+    const gen = generation;
     const adapterBefore = useGameStore.getState().adapter;
     const snapshot = await readAdapterSnapshot();
     const { adapter, gameState } = useGameStore.getState();
-    // The await may cross a game teardown/swap — a snapshot from the old
-    // adapter must not be compared to (or committed over) the new game.
+    // The await may cross a game teardown/swap or the watchdog's own
+    // stop() — a snapshot from the old adapter or a stopped lifecycle
+    // must not be compared to (or committed over) the live game.
     if (!snapshot || !gameState || adapter !== adapterBefore) return;
+    if (gen !== generation) return;
     if (!isDispatchIdle()) {
       arm();
       return;
@@ -170,6 +182,7 @@ export function createStaleStateWatchdog(): StaleStateWatchdog {
       arm();
     },
     stop(): void {
+      generation += 1;
       disarm();
       if (unsubscribe) {
         unsubscribe();
