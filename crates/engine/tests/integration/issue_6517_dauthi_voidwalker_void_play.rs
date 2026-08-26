@@ -54,7 +54,12 @@ fn voidwalker_board() -> (GameRunner, ObjectId, ObjectId) {
     let walker = scenario
         .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, VOIDWALKER)
         .id();
-    let orc = scenario.add_creature(P1, "Doomed Orc", 2, 2).id();
+    // Nonzero cost + P0's empty mana pool: the later cast from exile can
+    // only succeed through the free-play permission, not by paying (review).
+    let orc = scenario
+        .add_creature(P1, "Doomed Orc", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
     let murder = scenario
         .add_spell_to_hand(P0, "Test Murder", false)
         .from_oracle_text(MURDER)
@@ -190,8 +195,16 @@ fn with_two_void_cards_the_pick_is_offered_and_the_choice_plays_free() {
     let walker = scenario
         .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, VOIDWALKER)
         .id();
-    let orc = scenario.add_creature(P1, "Doomed Orc", 2, 2).id();
-    let grunt = scenario.add_creature(P1, "Doomed Grunt", 2, 2).id();
+    // Nonzero costs + P0's empty mana pool: only the free-play permission
+    // can carry the chosen cast (review).
+    let orc = scenario
+        .add_creature(P1, "Doomed Orc", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let grunt = scenario
+        .add_creature(P1, "Doomed Grunt", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
     let murder_a = scenario
         .add_spell_to_hand(P0, "Test Murder A", false)
         .from_oracle_text(MURDER)
@@ -248,7 +261,11 @@ fn a_later_opponents_card_is_offered_in_three_player() {
     let walker = scenario
         .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, VOIDWALKER)
         .id();
-    let far_orc = scenario.add_creature(P2, "Far Orc", 2, 2).id();
+    // Nonzero cost + P0's empty mana pool: the free play must carry the cast.
+    let far_orc = scenario
+        .add_creature(P2, "Far Orc", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
     let murder = scenario
         .add_spell_to_hand(P0, "Test Murder", false)
         .from_oracle_text(MURDER)
