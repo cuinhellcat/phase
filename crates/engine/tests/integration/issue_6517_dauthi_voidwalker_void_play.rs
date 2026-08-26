@@ -114,8 +114,13 @@ fn your_own_dying_creature_still_goes_to_the_graveyard() {
 }
 
 /// Drive the activation to a settled empty stack; answers cost and pick
-/// prompts, returns whether the interactive pick was offered.
-fn drive_activation(runner: &mut GameRunner, walker: ObjectId, pick: ObjectId) -> bool {
+/// prompts, and verifies every expected card was offered before selecting `pick`.
+fn drive_activation(
+    runner: &mut GameRunner,
+    walker: ObjectId,
+    expected_cards: &[ObjectId],
+    pick: ObjectId,
+) -> bool {
     let mut pick_seen = false;
     for _ in 0..64 {
         match runner.state().waiting_for.clone() {
@@ -127,10 +132,12 @@ fn drive_activation(runner: &mut GameRunner, walker: ObjectId, pick: ObjectId) -
                     .expect("paying the sacrifice cost must succeed");
             }
             WaitingFor::ChooseFromZoneChoice { cards, .. } => {
-                assert!(
-                    cards.contains(&pick),
-                    "the intended card must be offered, got {cards:?}"
-                );
+                for expected in expected_cards {
+                    assert!(
+                        cards.contains(expected),
+                        "every expected card must be offered, got {cards:?}"
+                    );
+                }
                 pick_seen = true;
                 runner
                     .act(GameAction::SelectCards { cards: vec![pick] })
@@ -166,7 +173,7 @@ fn a_sole_void_card_still_prompts_and_plays_for_free() {
             ability_index: 0,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
-    let pick_seen = drive_activation(&mut runner, walker, orc);
+    let pick_seen = drive_activation(&mut runner, walker, &[orc], orc);
     assert!(
         pick_seen,
         "the pick prompt must be offered even for a single legal candidate — \
@@ -228,7 +235,7 @@ fn with_two_void_cards_the_pick_is_offered_and_the_choice_plays_free() {
             ability_index: 0,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
-    let pick_seen = drive_activation(&mut runner, walker, orc);
+    let pick_seen = drive_activation(&mut runner, walker, &[orc, grunt], orc);
 
     assert!(
         pick_seen,
@@ -287,7 +294,7 @@ fn a_later_opponents_card_is_offered_in_three_player() {
             ability_index: 0,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
-    let pick_seen = drive_activation(&mut runner, walker, far_orc);
+    let pick_seen = drive_activation(&mut runner, walker, &[far_orc], far_orc);
     assert!(
         pick_seen,
         "the later opponent's card must be offered — a first-opponent-only \
