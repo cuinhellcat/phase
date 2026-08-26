@@ -997,6 +997,21 @@ export const useMultiplayerDraftStore = create<
       } else {
         const { WasmAdapter } = await import("../adapter/wasm-adapter");
         const matchAdapter = new WasmAdapter();
+        // #7920: a bot match installs no transport-side whole-match concede,
+        // so the menu's Concede was refused as unbound. Bind the capability
+        // to a plain game-level Concede for the local seat (game player 0 —
+        // the DRAFT_BOT_AI_SEAT authority): CR 104.3a ends the game as a
+        // loss, the game-over screen's existing pod effect settles the match,
+        // and "Back to pod" returns to the standings with any next round
+        // intact.
+        matchAdapter.bindMatchConcede(() => {
+          void useGameStore
+            .getState()
+            .dispatch({ type: "Concede", data: { player_id: 0 } })
+            .catch((err) => {
+              console.error("[multiplayerDraftStore] bot-match concede failed:", err);
+            });
+        });
         await matchAdapter.initialize();
         const initResult = await matchAdapter.initializeGame(
           matchPairing.deckPayload,

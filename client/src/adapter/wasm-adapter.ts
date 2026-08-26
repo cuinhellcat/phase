@@ -189,6 +189,20 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   private readonly tokenBySemanticOwner = new Map<PlayerId, string>();
   private readonly aiDecisionDiagnosticListeners = new Set<(receipt: AiDecisionDiagnosticReceipt) => void>();
 
+  // ── #7920: pod-issued whole-match concede ──────────────────────────────
+  // Mirrors the P2P adapters' conditional MatchConcedeCapability: the duck-
+  // typed `supportsMatchConcede(adapter)` guard passes only after a pod
+  // match binding installs the members. Plain AI games never bind it, so
+  // their menu keeps the engine-dispatch concede path.
+  supportsMatchConcede?: true;
+  sendMatchConcede?: () => void;
+
+  /** Installed only by a pod-issued bot-match binding (multiplayerDraftStore). */
+  bindMatchConcede(run: () => void): void {
+    this.supportsMatchConcede = true;
+    this.sendMatchConcede = run;
+  }
+
   /** Invalidate local observations whenever the WASM authority invalidates proposals. */
   private invalidateAiDecisionDiagnostics(): void {
     this.aiDecisionDiagnosticsEpoch += 1;
