@@ -17,7 +17,7 @@ use super::ability::{
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
-    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
     TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry,
 };
@@ -1146,6 +1146,14 @@ pub struct SpellCastRecord {
     /// the underlying object (which may have left the stack).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_x_in_cost: bool,
+    /// CR 715.2a: Whether the spell's cast-time object has the alternative
+    /// characteristics of an Adventure spell, even when the creature face is
+    /// the face being cast. This is false when the Adventure face itself is
+    /// being cast: its alternative characteristics are then the normal face.
+    /// Captured so filtered cast-history queries do not need to inspect the
+    /// spell object after it leaves the stack.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_adventure: bool,
     /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
     /// so per-turn spell-history conditions can answer "from your hand" after
     /// the spell has moved on from the stack. Per CR 601.2a every cast spell
@@ -1215,6 +1223,7 @@ impl Default for SpellCastRecord {
             colors: Vec::new(),
             mana_value: 0,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
@@ -8329,19 +8338,24 @@ pub enum PayCostKind {
         #[serde(default)]
         selection: CounterCostSelection,
     },
-    /// CR 601.2b: Tap creatures as a cost. `aggregate` distinguishes the two
-    /// `TapCreaturesRequirement` shapes at the interactive payment layer: `None`
-    /// is the fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
-    /// creatures; Conspire/Convoke), while `Some(aggregate)` is the aggregate
-    /// "tap any number satisfying the constraint" form (Crew CR 702.122a / Saddle
-    /// CR 702.171a / Teamwork) — the chosen set may be any size whose total
-    /// positive power (CR 208.1) satisfies `aggregate`'s comparator vs its value.
-    /// Carrying the full `TapCreaturesAggregate` (not just a threshold int) keeps
-    /// the payment validator honoring the advertised comparator instead of
-    /// hard-coding `>=`.
+    /// CR 601.2b: Tap creatures as a cost. `mode` is the single authority for
+    /// which of the three `TapCreaturesRequirement` selection semantics this
+    /// payment carries (CR 107.3a + CR 208.1), computed once at registration
+    /// time via `TapCreaturesRequirement::selection_mode`: `Fixed` is the
+    /// fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
+    /// creatures; Conspire/Convoke), `VariableX` is the "Tap X untapped … you
+    /// control" X-sentinel form whose chosen count *defines* the ability's X,
+    /// and `Aggregate(aggregate)` is the "tap any number satisfying the
+    /// constraint" form (Crew CR 702.122a / Saddle CR 702.171a / Teamwork
+    /// CR 702.194a) — the chosen set may be any size whose total positive power
+    /// (CR 208.1) satisfies `aggregate`'s comparator vs its value. Carrying the
+    /// full `TapCreaturesAggregate` inside the variant (not just a threshold
+    /// int) keeps the payment validator honoring the advertised comparator
+    /// instead of hard-coding `>=`; carrying the mode rather than an
+    /// `Option<TapCreaturesAggregate>` keeps `Fixed` and `VariableX` from
+    /// collapsing into one indistinguishable `None`.
     TapCreatures {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aggregate: Option<TapCreaturesAggregate>,
+        mode: TapCreaturesSelectionMode,
     },
     Behold {
         action: BeholdCostAction,
@@ -13080,15 +13094,21 @@ pub enum WaitingFor {
         eligible: Vec<TargetRef>,
         phase: TimeTravelPhase,
     },
-    /// CR 603.7e: The affected player of a `ChooseObjectsIntoTrackedSet` effect
-    /// selects any number of battlefield permanents from `eligible`. The
+    /// CR 608.2d: While applying `ChooseObjectsIntoTrackedSet`, the affected player
+    /// selects `min..=max` battlefield permanents from `eligible`. The
     /// chosen objects are written into a fresh tracked set so a downstream
     /// `PayCost { ScaledMana }` and `IfYouDo`/`Untap` reference the exact
-    /// selection. An empty selection is legal — the player declines.
+    /// selection. An empty selection is legal when `min == 0`.
     ChooseObjectsSelection {
         player: PlayerId,
         /// Eligible battlefield permanents matching the effect's filter.
         eligible: Vec<TargetRef>,
+        /// Minimum number of distinct eligible objects that must be selected.
+        #[serde(default)]
+        min: u32,
+        /// Maximum number selectable (`None` = all eligible objects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
         /// CR 608.2: triggering event of the ability whose `ChooseObjectsIntoTrackedSet`
         /// raised this prompt. Restored around the continuation drain so the stashed
         /// `PayCost { payer: TriggeringPlayer }` resolves to the correct player.
@@ -27934,6 +27954,74 @@ mod tests {
         );
     }
 
+    /// #7799 review follow-up (matthewevans, review 5012075716): `PayCostKind::
+    /// TapCreatures::mode` (added by the selection-mode-discriminator fix) has no
+    /// `#[serde(default)]`, replacing the prior `aggregate: Option<..>` field.
+    /// This is a deliberate wire-compatibility break, backed by
+    /// `lobby_broker::PROTOCOL_VERSION` 36 / `WIRE_PROTOCOL_VERSION` 27 (not a
+    /// backward-compatible decode shim) — the same convention entry 23
+    /// (`PayableResource::ManaGeneric`) established. This test proves the break
+    /// is a clean, non-silent deserialize failure through the actual production
+    /// restore path (`PersistedGameState`, the same type `server-core::session::
+    /// PersistedSession.state` uses), for BOTH prior `TapCreatures` shapes: the
+    /// fixed-count form (`aggregate` omitted/null) and the aggregate form
+    /// (`aggregate: {..}`) — proving the rejection isn't an artifact of one
+    /// particular legacy payload, and specifically that an aggregate-shaped
+    /// legacy payload cannot be silently admitted as a `Fixed` decode.
+    #[test]
+    fn tap_creatures_pre_mode_wire_shape_is_rejected() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
+            choices: vec![ObjectId(1)],
+            count: 1,
+            min_count: 0,
+            resume: CostResume::Resolution,
+        };
+        let base = serde_json::to_value(state).expect("fixture state serializes");
+
+        // Prior fixed-count wire shape: `aggregate` omitted (the old field was
+        // `#[serde(default, skip_serializing_if = "Option::is_none")]`).
+        let mut legacy_fixed = base.clone();
+        legacy_fixed["waiting_for"]["data"]["kind"]
+            .as_object_mut()
+            .expect("kind is a JSON object")
+            .remove("mode");
+        let fixed_error = serde_json::from_value::<PersistedGameState>(legacy_fixed)
+            .expect_err("pre-mode fixed-count TapCreatures payload must fail to deserialize");
+        assert!(
+            fixed_error.to_string().contains("mode"),
+            "expected a missing-`mode` deserialize error, got: {fixed_error}"
+        );
+
+        // Prior aggregate wire shape: `aggregate: {..}` present, `mode` absent.
+        let mut legacy_aggregate = base;
+        let kind = legacy_aggregate["waiting_for"]["data"]["kind"]
+            .as_object_mut()
+            .expect("kind is a JSON object");
+        kind.remove("mode");
+        kind.insert(
+            "aggregate".to_string(),
+            serde_json::json!({
+                "stat": "TotalPower",
+                "comparator": "GE",
+                "value": 3
+            }),
+        );
+        let aggregate_error = serde_json::from_value::<PersistedGameState>(legacy_aggregate)
+            .expect_err(
+                "pre-mode aggregate TapCreatures payload must fail to deserialize, \
+                 not silently decode as a Fixed-mode payment",
+            );
+        assert!(
+            aggregate_error.to_string().contains("mode"),
+            "expected a missing-`mode` deserialize error, got: {aggregate_error}"
+        );
+    }
+
     #[test]
     fn direct_current_raw_requires_canonical_trigger_firing_carriers() {
         let state = normal_trigger_firing_fixture();
@@ -31372,7 +31460,9 @@ mod tests {
         // variant here does not lose mid-cast tracking.
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
-            kind: PayCostKind::TapCreatures { aggregate: None },
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
@@ -31513,6 +31603,39 @@ mod tests {
         assert_eq!(wf, deserialized);
         // Verify tag format
         assert!(json.contains("\"TriggerTargetSelection\""));
+    }
+
+    #[test]
+    fn choose_objects_selection_serializes_bounds_and_defaults_legacy_shape() {
+        use crate::types::ability::TargetRef;
+
+        let waiting = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(ObjectId(1))],
+            min: 1,
+            max: Some(2),
+            trigger_event: None,
+        };
+        let json = serde_json::to_value(&waiting).expect("serialize bounded prompt");
+        assert_eq!(json["data"]["min"], 1);
+        assert_eq!(json["data"]["max"], 2);
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(json).expect("roundtrip bounded prompt"),
+            waiting
+        );
+
+        let legacy = r#"{
+            "type":"ChooseObjectsSelection",
+            "data":{"player":0,"eligible":[]}
+        }"#;
+        assert!(matches!(
+            serde_json::from_str::<WaitingFor>(legacy).expect("legacy prompt remains parseable"),
+            WaitingFor::ChooseObjectsSelection {
+                min: 0,
+                max: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -32883,6 +33006,7 @@ mod tests {
             colors: vec![],
             mana_value: 4,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Graveyard,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
@@ -32892,6 +33016,25 @@ mod tests {
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, original);
         assert_eq!(round_tripped.from_zone, Zone::Graveyard);
+    }
+
+    /// CR 715.2a + CR 715.2b: The Adventure snapshot field is backward
+    /// compatible, omitted when false, and preserved when true.
+    #[test]
+    fn spell_cast_record_adventure_field_serde_contract() {
+        let legacy_json = serde_json::to_string(&SpellCastRecord::default()).unwrap();
+        let legacy: SpellCastRecord = serde_json::from_str(&legacy_json).unwrap();
+        assert!(!legacy.has_adventure);
+        assert!(!legacy_json.contains("has_adventure"));
+
+        let adventure = SpellCastRecord {
+            has_adventure: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&adventure).unwrap();
+        assert!(json.contains("has_adventure"));
+        let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
+        assert!(round_tripped.has_adventure);
     }
 
     // ---- CR 117.3d priority-yield accessors ----

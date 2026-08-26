@@ -14702,6 +14702,121 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     Ok((input, pairs))
 }
 
+/// CR 608.2c/d + CR 701.8a: Whole-body recognizer for the battlefield
+/// "Choose up to N <permanents>, [then] destroy the rest" class (Duneblast,
+/// Mount Doom). The choice is made during resolution, so it publishes the
+/// spared objects into the chain's tracked set; the following mass destruction
+/// applies to the same typed battlefield filter minus that set.
+fn parse_choose_survivors_destroy_rest_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (max, after_count) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("choose up to ").parse(input)?;
+        let (input, max) = nom_primitives::parse_number.parse(input)?;
+        let (input, _) = space1.parse(input)?;
+        Ok((input, max))
+    })?;
+    let after_count_lower = &lower[lower.len() - after_count.len()..];
+
+    #[derive(Clone, Copy)]
+    enum DestroyRestConnector {
+        Then,
+        Sentence,
+    }
+
+    let ((filter_len, connector), _) = nom_on_lower(after_count, after_count_lower, |input| {
+        let (input, (filter, connector)) = alt((
+            map(
+                terminated(
+                    take_until(", then destroy the rest"),
+                    tag(", then destroy the rest"),
+                ),
+                |filter: &str| (filter, DestroyRestConnector::Then),
+            ),
+            map(
+                terminated(take_until(". destroy the rest"), tag(". destroy the rest")),
+                |filter: &str| (filter, DestroyRestConnector::Sentence),
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (filter.len(), connector)))
+    })?;
+
+    let filter_text = after_count.get(..filter_len)?.trim();
+    let mut filter_ctx = ctx.clone();
+    let filter = parse_choose_object_selection_filter(filter_text, &mut filter_ctx)?;
+    let TargetFilter::Typed(mut destroy_filter) = filter.clone() else {
+        return None;
+    };
+    destroy_filter.properties.push(FilterProp::Not {
+        prop: Box::new(FilterProp::InTrackedSet {
+            id: TrackedSetId(0),
+        }),
+    });
+
+    let prefix_len = text.len().checked_sub(after_count.len())?;
+    let choose_end = prefix_len.checked_add(filter_len)?;
+    let connector_prefix = match connector {
+        DestroyRestConnector::Then => ", then ",
+        DestroyRestConnector::Sentence => ". ",
+    };
+    let destroy_start = choose_end.checked_add(connector_prefix.len())?;
+    let destroy_end = destroy_start.checked_add("destroy the rest".len())?;
+    let choose_source = text.get(..choose_end)?;
+    let destroy_source = text.get(destroy_start..destroy_end)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            choose_source,
+            parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter,
+                min: 0,
+                max: Some(max),
+            }),
+            Some(match connector {
+                DestroyRestConnector::Then => ClauseBoundary::Then,
+                DestroyRestConnector::Sentence => ClauseBoundary::Sentence,
+            }),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    builder
+        .clause(
+            destroy_source,
+            parsed_clause(Effect::DestroyAll {
+                target: TargetFilter::Typed(destroy_filter),
+                cant_regenerate: false,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
+}
+
 /// CR 107.1 + CR 608.2e: Whole-chain recognizer for the Balance equalization
 /// class (Balance, Restore Balance, Balancing Act).
 ///
@@ -31192,6 +31307,9 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_choose_survivors_destroy_rest_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
         return ir;
     }

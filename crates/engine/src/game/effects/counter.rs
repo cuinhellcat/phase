@@ -200,7 +200,11 @@ pub fn resolve(
                         }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                        super::super::stack::restore_alternative_spell_normal_face(
+                            state,
+                            obj_id,
+                            casting_variant,
+                        );
                     }
                     // CR 701.6a + CR 614.6: route the stack -> graveyard/exile
                     // move through the zone-change pipeline so `Moved` redirects
@@ -404,7 +408,11 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             if casting_variant.restores_front_face_after_stack_exit() {
-                super::super::stack::restore_alternative_spell_normal_face(state, obj_id);
+                super::super::stack::restore_alternative_spell_normal_face(
+                    state,
+                    obj_id,
+                    casting_variant,
+                );
             }
             // CR 701.6a + CR 614.6: route through the pipeline so graveyard
             // redirects (Rest in Peace / Leyline of the Void) fire — same

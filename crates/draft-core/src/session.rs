@@ -253,6 +253,40 @@ fn apply_generate_pairings(session: &mut DraftSession) -> Result<Vec<DraftDelta>
     ])
 }
 
+/// Backtracking search for a perfect matching of `pool` in standings order.
+///
+/// The first unpaired player tries partners in pool order (same-bracket
+/// first, since the pool is flattened bracket-by-bracket); a dead end
+/// backtracks instead of settling for a rematch. With `allow_rematch: false`
+/// it succeeds iff a rematch-free perfect matching exists; with `true` it is
+/// an always-succeeding first-fit (even pool). `prior` holds both
+/// orientations of every earlier pairing. Recursion depth is bounded by the
+/// pod size (≤ 8 seats → ≤ 4 frames), not by game input.
+fn pair_pool_avoiding_rematches(
+    pool: &[PlayerId],
+    prior: &HashSet<(PlayerId, PlayerId)>,
+    allow_rematch: bool,
+    out: &mut Vec<(PlayerId, PlayerId)>,
+) -> bool {
+    let Some((&first, candidates)) = pool.split_first() else {
+        return true;
+    };
+    for (i, &partner) in candidates.iter().enumerate() {
+        if !allow_rematch && prior.contains(&(first, partner)) {
+            continue;
+        }
+        let mut rest: Vec<PlayerId> = Vec::with_capacity(candidates.len() - 1);
+        rest.extend_from_slice(&candidates[..i]);
+        rest.extend_from_slice(&candidates[i + 1..]);
+        out.push((first, partner));
+        if pair_pool_avoiding_rematches(&rest, prior, allow_rematch, out) {
+            return true;
+        }
+        out.pop();
+    }
+    false
+}
+
 /// Returns the round's pairings plus the bye player, if any. An odd pod leaves one player
 /// unpaired; in Swiss that player takes a bye, which counts as a match win — the caller
 /// credits it (`Some(pid)`). `None` when every player was paired.
@@ -305,35 +339,50 @@ fn generate_swiss_pairings(
         .flat_map(|p| [(p.players[0], p.players[1]), (p.players[1], p.players[0])])
         .collect();
 
-    // Greedy pair within brackets, carrying unpaired to next bracket
+    // Flatten the shuffled brackets into standings order. Partners are tried
+    // in this order, so same-bracket pairings are still preferred — but a
+    // dead end now backtracks instead of accepting an avoidable rematch
+    // (the old head-first greedy's `unwrap_or(0)` paired a 4-pod's round 3
+    // as two rematches even though the round-robin completion existed).
+    let pool: Vec<PlayerId> = brackets
+        .iter()
+        .flat_map(|bracket| bracket.iter().map(|(pid, _)| *pid))
+        .collect();
+
     let mut paired: Vec<(PlayerId, PlayerId)> = Vec::new();
-    let mut carry: Option<(PlayerId, u8)> = None;
+    let mut bye: Option<PlayerId> = None;
 
-    for bracket in &brackets {
-        let mut pool: Vec<(PlayerId, u8)> = bracket.clone();
-        if let Some(c) = carry.take() {
-            pool.insert(0, c);
+    if pool.len().is_multiple_of(2) {
+        if !pair_pool_avoiding_rematches(&pool, &prior_pairs, false, &mut paired) {
+            // No rematch-free perfect matching exists (e.g. a 2-player pod
+            // from round 2 on) — admit rematches; first-fit always succeeds
+            // on an even pool.
+            paired.clear();
+            pair_pool_avoiding_rematches(&pool, &prior_pairs, true, &mut paired);
         }
-
-        while pool.len() >= 2 {
-            let first = pool.remove(0);
-            // Try to find a non-rematch partner
-            let partner_idx = pool
-                .iter()
-                .position(|(pid, _)| !prior_pairs.contains(&(first.0, *pid)))
-                .unwrap_or(0);
-            let partner = pool.remove(partner_idx);
-            paired.push((first.0, partner.0));
+    } else {
+        // Odd pod: the bye goes as far down the standings as a rematch-free
+        // matching of the remainder allows. Only if no candidate admits one
+        // does the bottom seat take the bye and the rest pair with rematches.
+        // The bye is reported to the caller so it can be credited as a
+        // match win.
+        for idx in (0..pool.len()).rev() {
+            let mut rest = pool.clone();
+            let cand = rest.remove(idx);
+            paired.clear();
+            if pair_pool_avoiding_rematches(&rest, &prior_pairs, false, &mut paired) {
+                bye = Some(cand);
+                break;
+            }
         }
-
-        if pool.len() == 1 {
-            carry = Some(pool[0]);
+        if bye.is_none() {
+            let mut rest = pool.clone();
+            let cand = rest.pop().expect("odd pool is non-empty");
+            paired.clear();
+            pair_pool_avoiding_rematches(&rest, &prior_pairs, true, &mut paired);
+            bye = Some(cand);
         }
     }
-
-    // An unpaired player (odd pod) takes a bye — reported to the caller so the bye can be
-    // credited as a match win. Common only in non-8-player pods.
-    let bye = carry.map(|(pid, _)| pid);
 
     // Generate DraftPairing structs
     let pairings = paired
@@ -1413,6 +1462,159 @@ mod tests {
             rematch_count, 0,
             "round 2 should avoid rematches with 8 players"
         );
+    }
+
+    #[test]
+    fn swiss_four_pod_round_three_completes_the_round_robin() {
+        // #7937: with 4 players and 3 rounds every rematch is avoidable —
+        // round 3 is exactly the two pairs that have not met yet. The
+        // history is CRAFTED (not driven through the rng) so the forcing
+        // shape holds in every shuffle order: the 2-win leader A has already
+        // faced both 1-win players, so any head-first pick without
+        // backtracking rematches deterministically. The only rematch-free
+        // completion is A–D / B–C.
+        let (mut session, _) = test_session(4);
+        let [a, b, c, d] = [0u8, 1, 2, 3].map(|seat| seat_player_id(&session, seat));
+
+        let mk = |round: u8, table: u8, players: [PlayerId; 2], winner: PlayerId| DraftPairing {
+            round,
+            table,
+            players,
+            match_id: format!("r{round}-t{table}"),
+            status: PairingStatus::Complete,
+            winner: Some(winner),
+        };
+        session.pairings = vec![
+            mk(1, 0, [a, b], a),
+            mk(1, 1, [c, d], c),
+            mk(2, 0, [a, c], a),
+            mk(2, 1, [b, d], b),
+        ];
+        for (pid, wins, losses) in [(a, 2, 0), (b, 1, 1), (c, 1, 1), (d, 0, 2)] {
+            let record = ensure_match_record(&mut session.match_records, pid);
+            record.match_wins = wins;
+            record.match_losses = losses;
+        }
+        session.current_round = 2;
+        session.status = DraftStatus::RoundComplete;
+
+        apply(&mut session, DraftAction::GeneratePairings, None).unwrap();
+
+        let round3: HashSet<(PlayerId, PlayerId)> = session
+            .pairings
+            .iter()
+            .filter(|p| p.round == 3)
+            .map(|p| {
+                let [x, y] = p.players;
+                if x.0 <= y.0 {
+                    (x, y)
+                } else {
+                    (y, x)
+                }
+            })
+            .collect();
+        let want: HashSet<(PlayerId, PlayerId)> = [(a, d), (b, c)]
+            .into_iter()
+            .map(|(x, y)| if x.0 <= y.0 { (x, y) } else { (y, x) })
+            .collect();
+        assert_eq!(
+            round3, want,
+            "round 3 must be the round-robin completion A–D / B–C — anything \
+             else contains an avoidable rematch"
+        );
+    }
+
+    /// Crafted-history session for direct `generate_swiss_pairings` calls.
+    /// Distinct win counts put every player in a singleton bracket, so the
+    /// in-bracket shuffle is the identity and the pool order is exactly the
+    /// standings order — the scenarios below are deterministic in every rng.
+    fn crafted_swiss_session(
+        pod_size: u8,
+        wins: &[u8],
+        prior_round_one: &[[usize; 2]],
+    ) -> (DraftSession, Vec<PlayerId>) {
+        let (mut session, _) = test_session(pod_size);
+        let pids: Vec<PlayerId> = (0..pod_size)
+            .map(|seat| seat_player_id(&session, seat))
+            .collect();
+        for (pid, &w) in pids.iter().zip(wins) {
+            ensure_match_record(&mut session.match_records, *pid).match_wins = w;
+        }
+        session.pairings = prior_round_one
+            .iter()
+            .enumerate()
+            .map(|(t, &[x, y])| DraftPairing {
+                round: 1,
+                table: t as u8,
+                players: [pids[x], pids[y]],
+                match_id: format!("r1-t{t}"),
+                status: PairingStatus::Complete,
+                winner: Some(pids[x]),
+            })
+            .collect();
+        (session, pids)
+    }
+
+    fn unordered([x, y]: [PlayerId; 2]) -> (PlayerId, PlayerId) {
+        if x.0 <= y.0 {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    }
+
+    #[test]
+    fn swiss_backtracks_when_the_first_legal_partner_dead_ends() {
+        // Pool order A,B,C,D (wins 3/2/1/0); only C–D is prior. A's FIRST
+        // legal partner is B, but pairing A–B leaves C–D as a forced
+        // rematch — the search must back out and land on A–C / B–D. A
+        // first-legal-partner greedy without backtracking cannot reach
+        // this answer.
+        let (session, p) = crafted_swiss_session(4, &[3, 2, 1, 0], &[[2, 3]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        let got: HashSet<(PlayerId, PlayerId)> =
+            pairings.iter().map(|pr| unordered(pr.players)).collect();
+        let want = HashSet::from([unordered([p[0], p[2]]), unordered([p[1], p[3]])]);
+        assert_eq!(
+            got, want,
+            "the dead end behind A–B must back out to A–C / B–D"
+        );
+    }
+
+    #[test]
+    fn swiss_two_player_round_two_admits_the_unavoidable_rematch() {
+        // With two players every later round repeats the only possible
+        // pair — the rematch-free search fails and the fallback must still
+        // produce the pairing instead of an empty round.
+        let (session, p) = crafted_swiss_session(2, &[1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(bye, None);
+        assert_eq!(
+            pairings.len(),
+            1,
+            "the unavoidable rematch must be admitted"
+        );
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[1]]));
+    }
+
+    #[test]
+    fn swiss_bye_walks_up_when_the_bottom_bye_forces_a_rematch() {
+        // 3 players, wins 2/1/0, prior A–B. Handing the bye to bottom C
+        // leaves A–B as a forced rematch, so the bye must walk up to B and
+        // pair A–C fresh.
+        let (session, p) = crafted_swiss_session(3, &[2, 1, 0], &[[0, 1]]);
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+        let (pairings, bye) = generate_swiss_pairings(&session, 2, &mut rng);
+        assert_eq!(
+            bye,
+            Some(p[1]),
+            "the bye walks past the bottom seat to keep the round rematch-free"
+        );
+        assert_eq!(pairings.len(), 1);
+        assert_eq!(unordered(pairings[0].players), unordered([p[0], p[2]]));
     }
 
     #[test]

@@ -1122,13 +1122,30 @@ fn pay_ability_cost_inner(
                 unreachable!("guarded above");
             };
             let eligible = find_eligible_tap_creatures_targets(state, player, ability, filter);
-            let (kind, count) = match requirement {
+            // CR 107.3a + CR 118.3 + CR 601.2h: Resolution-time TapCreatures costs
+            // use the same `u32::MAX` X-sentinel encoding as activation-time costs,
+            // so the payable range must come from the single bounds authority
+            // (`sacrifice_cost_bounds`) rather than a raw `as usize` cast on
+            // `count`. A fixed (non-X) count degrades to `(count, count)`,
+            // preserving the CR 601.2h exact-payment requirement for every
+            // existing card (Kitt Kanto's `count: 2`, Meanders Guide's
+            // `count: 1`) unchanged, while correcting the previously-hardcoded
+            // `min_count: 0` that silently allowed partial payment once the
+            // shared selection validator (`pay_tap_creatures_selection`)
+            // switched from an exact-match check to a `[min_count, count]`
+            // range check.
+            //
+            // CR 107.3a: compute the selection semantics once from the
+            // requirement and carry them verbatim to the completion handler.
+            let mode = requirement.selection_mode();
+            let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    let count = *count as usize;
-                    if eligible.len() < count {
+                    let (min_count, max_count) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    if eligible.len() < min_count {
                         return Ok(payment_failed("not enough creatures to tap"));
                     }
-                    (PayCostKind::TapCreatures { aggregate: None }, count)
+                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -1147,12 +1164,14 @@ fn pay_ability_cost_inner(
                             "eligible creatures do not satisfy tap-creatures aggregate cost",
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures {
-                            aggregate: Some(aggregate),
-                        },
-                        eligible.len(),
-                    )
+                    // CR 208.1 + CR 601.2f (Crew CR 702.122a / Saddle CR 702.171a /
+                    // Teamwork CR 702.194a): the aggregate form taps ANY number of
+                    // creatures whose total positive power satisfies the
+                    // comparator, so every subset size is admissible and the floor
+                    // stays 0. `pay_tap_creatures_selection`'s `Aggregate(_)`
+                    // branch validates the comparator instead of the
+                    // `[min_count, count]` range.
+                    (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
             if count == 0 {
@@ -1164,7 +1183,7 @@ fn pay_ability_cost_inner(
                 kind,
                 choices: eligible,
                 count,
-                min_count: 0,
+                min_count,
                 resume: CostResume::Resolution,
             };
             return Ok(PaymentOutcome::Paused {
@@ -2259,7 +2278,14 @@ fn can_pay_resolution(
             let eligible = find_eligible_tap_creatures_targets(state, payer, ability, filter);
             match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    eligible.len() >= *count as usize
+                    // CR 107.3a: route the floor through the single bounds
+                    // authority so the `u32::MAX` X-sentinel is not compared as a
+                    // literal minimum (which is unsatisfiable for any real board).
+                    // A fixed (non-X) count degrades to `(count, count)`, leaving
+                    // every existing card's payability verdict unchanged.
+                    let (min_count, _) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    eligible.len() >= min_count
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -2359,6 +2385,7 @@ mod tests {
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
         NinjutsuVariant, QuantityExpr, SacrificeCost, TapCreaturesRequirement,
+        TapCreaturesSelectionMode,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -3632,6 +3659,487 @@ mod tests {
         assert!(
             matches!(refused, Err(EngineError::ActionNotAllowed(_))),
             "a prevented counter-placement cost must refuse activation, got {refused:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Resolution-scope `AbilityCost::TapCreatures` payment bounds.
+    //
+    // The resolution registration site below (`pay_ability_cost_inner`'s
+    // `TapCreatures` @ `PaymentScope::Resolution` arm) emits the
+    // `WaitingFor::PayCost { count, min_count }` window that
+    // `casting_costs::pay_tap_creatures_selection` later validates against.
+    // That validator is SHARED with the activation/casting path, which moved
+    // from an exact-match check to a `[min_count, count]` range check to
+    // support the CR 107.3a X-sentinel ("Tap X untapped …"). The hardcoded
+    // `min_count: 0` here was harmless under exact-match and load-bearing
+    // (and wrong — CR 601.2h forbids partial payment) under the range check.
+    // ---------------------------------------------------------------------
+
+    /// Stub resolution ability for the tap-cost arm. The effect body is never
+    /// read by the `TapCreatures` arm (it only uses the ability for
+    /// `FilterContext`), so a trivial self-counter effect suffices.
+    fn tap_cost_stub_ability(src: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            src,
+            P0,
+        )
+    }
+
+    /// Drive the real resolution-time payment entry point
+    /// (`pay_ability_cost_inner` @ `PaymentScope::Resolution`, the path
+    /// `effects::pay` takes for a reflexive "you may tap N creatures" cost).
+    fn pay_tap_cost_at_resolution(
+        state: &mut GameState,
+        src: ObjectId,
+        ability: &ResolvedAbility,
+        requirement: TapCreaturesRequirement,
+    ) -> PaymentOutcome {
+        let cost = AbilityCost::TapCreatures {
+            requirement,
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+        pay_ability_cost_inner(
+            state,
+            P0,
+            src,
+            &cost,
+            &mut Vec::new(),
+            &PaymentScope::Resolution {
+                ability,
+                cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            },
+            None,
+        )
+        .expect("resolution-time tap-creatures payment must not error")
+    }
+
+    /// Read the emitted `[min_count, count]` payment window plus the offered
+    /// choices out of `state.waiting_for`, failing loudly if the arm did not
+    /// surface a `TapCreatures` PayCost prompt at all.
+    fn emitted_tap_cost_window(state: &GameState) -> (usize, usize, Vec<ObjectId>) {
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                choices,
+                count,
+                min_count,
+                resume: CostResume::Resolution,
+                ..
+            } => (*min_count, *count, choices.clone()),
+            other => panic!("expected a resolution TapCreatures PayCost prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2h ("Partial payments are not allowed") regression discriminator
+    /// for the resolution-scope registration site. Kitt-Kanto-shaped: a fixed
+    /// `count: 2` reflexive tap cost with exactly two eligible untapped
+    /// creatures.
+    ///
+    /// Reverting the `min_count` fix (back to the hardcoded `min_count: 0`)
+    /// flips BOTH assertions below: the emitted floor becomes `0`, and the
+    /// shared range validator then returns `Ok(())` for a one-creature
+    /// selection — silently letting a "tap two creatures" cost be paid by
+    /// tapping one.
+    #[test]
+    fn resolution_fixed_tap_cost_rejects_partial_payment() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Paused { .. }),
+            "a payable fixed tap cost must pause for the player's selection, got {outcome:?}"
+        );
+
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+        assert_eq!(choices.len(), 2, "both untapped creatures must be offered");
+
+        // Positive reach guard: the one-creature selection really is drawn from
+        // the offered choice set, so the rejection below is the range check
+        // firing and not the eligibility pre-check.
+        let partial = vec![choices[0]];
+        assert!(
+            choices.contains(&partial[0]),
+            "reach guard: the partial selection must be an eligible choice"
+        );
+
+        // BEHAVIORAL discriminator, asserted BEFORE the shape assertions so a
+        // revert fails here on the real consequence rather than on the window
+        // shape: the emitted `[min_count, count]` window is threaded verbatim
+        // into the shared validator exactly as `engine.rs`'s
+        // `CostResume::Resolution` handler threads it. With the hardcoded
+        // `min_count: 0` this call returns `Ok(())` and TAPS ONE CREATURE to
+        // pay a "tap two creatures" cost.
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &partial,
+            &mut Vec::new(),
+        )
+        .expect_err("CR 601.2h: tapping 1 of a required 2 creatures is a partial payment");
+        assert!(
+            matches!(err, EngineError::InvalidAction(_)),
+            "partial payment must be an InvalidAction, got {err:?}"
+        );
+        assert!(
+            !scenario.state.objects[&partial[0]].tapped,
+            "a rejected partial payment must not tap anything"
+        );
+
+        // Secondary shape pin on the emitted window itself.
+        assert_eq!(
+            count, 2,
+            "the fixed requirement's upper bound is the printed count"
+        );
+        assert_eq!(
+            min_count, 2,
+            "CR 601.2h: a fixed `count: 2` cost must advertise a floor of 2, not 0"
+        );
+    }
+
+    /// Sibling of the discriminator: full payment of the same fixed cost is
+    /// still accepted and actually taps both creatures (the fix narrows the
+    /// window, it must not break the legal payment).
+    #[test]
+    fn resolution_fixed_tap_cost_accepts_full_payment() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+
+        crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &choices,
+            &mut Vec::new(),
+        )
+        .expect("CR 601.2h: tapping exactly the required 2 creatures is a legal full payment");
+        assert!(
+            choices.iter().all(|id| scenario.state.objects[id].tapped),
+            "a full payment must tap every chosen creature"
+        );
+    }
+
+    /// `count: 1` boundary, the other real resolution-scope card shape today —
+    /// Meanders Guide ("you may tap another untapped Merfolk you control").
+    /// Only the COUNT axis is reproduced here; the card's `Merfolk`/`Another`
+    /// filter is orthogonal to the payment window under test, and the wider
+    /// `creature` filter deliberately offers TWO eligible creatures so the
+    /// `(1, 1)` window is proven to come from the requirement rather than from
+    /// coinciding with the eligible-set size.
+    ///
+    /// Reverting the fix makes the empty selection legal — a "tap an untapped
+    /// creature you control" cost paid by tapping nothing.
+    #[test]
+    fn resolution_single_tap_cost_rejects_empty_selection() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Meanders Guide", 1, 2).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(1),
+        );
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+
+        // BEHAVIORAL discriminator first: with the hardcoded `min_count: 0`
+        // this returns `Ok(())`, paying a "tap an untapped creature you
+        // control" cost by tapping nothing at all.
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &[],
+            &mut Vec::new(),
+        )
+        .expect_err(
+            "CR 601.2h: paying a `count: 1` tap cost with zero creatures is a partial payment",
+        );
+        assert!(
+            matches!(err, EngineError::InvalidAction(_)),
+            "empty selection must be an InvalidAction, got {err:?}"
+        );
+        assert!(
+            choices.iter().all(|id| !scenario.state.objects[id].tapped),
+            "a rejected empty payment must not tap anything"
+        );
+
+        // Secondary shape pin on the emitted window.
+        assert_eq!(
+            (min_count, count),
+            (1, 1),
+            "CR 601.2h: a `count: 1` cost is an exact-1 window even with 2 eligible creatures"
+        );
+
+        // The legal one-creature payment still works.
+        crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            TapCreaturesSelectionMode::Fixed,
+            &choices,
+            &choices[..1],
+            &mut Vec::new(),
+        )
+        .expect("tapping exactly 1 creature satisfies a `count: 1` cost");
+        assert!(
+            scenario.state.objects[&choices[0]].tapped,
+            "the chosen creature must be tapped by the accepted payment"
+        );
+    }
+
+    /// CR 208.1 + CR 601.2f (Crew CR 702.122a / Saddle CR 702.171a / Teamwork):
+    /// the aggregate (Crew/Saddle/Teamwork) shape taps ANY
+    /// number of creatures whose total positive power satisfies the comparator,
+    /// so its floor stays 0 — unchanged by this fix. This pins that the widened
+    /// `(kind, count, min_count)` binding did not leak the fixed-count floor
+    /// into the aggregate arm.
+    #[test]
+    fn resolution_aggregate_tap_cost_keeps_zero_floor() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Crewed Vehicle", 1, 1).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::total_power_at_least(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Paused { .. }),
+            "two 1-power creatures satisfy total power >= 2, got {outcome:?}"
+        );
+
+        match &scenario.state.waiting_for {
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::TapCreatures {
+                        mode: TapCreaturesSelectionMode::Aggregate(aggregate),
+                    },
+                count,
+                min_count,
+                ..
+            } => {
+                assert_eq!(
+                    *min_count, 0,
+                    "CR 601.2f: the aggregate form admits any subset size, so the floor is 0"
+                );
+                assert_eq!(*count, 2, "the aggregate ceiling is the eligible count");
+                assert_eq!(
+                    aggregate.value, 2,
+                    "the advertised comparator value is carried through"
+                );
+            }
+            other => panic!("expected an aggregate TapCreatures PayCost prompt, got {other:?}"),
+        }
+    }
+
+    /// CR 118.3 + CR 601.2h: the aggregate arm is the case the dedup guard
+    /// actually protects. `tap_creatures_total_power` sums `chosen` with NO
+    /// dedup, so a repeated id double-counts its power: `[c0, c0]` on a
+    /// 1-power creature sums to 2 and spuriously satisfies "total power >= 2"
+    /// with only ONE real creature. Without the guard in
+    /// `pay_tap_creatures_selection` this returns `Ok(())` and taps a single
+    /// 1-power creature to pay a 2-power crew-shaped cost.
+    #[test]
+    fn resolution_aggregate_tap_cost_rejects_duplicate_creature() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Crewed Vehicle", 1, 1).id();
+        scenario.add_creature(P0, "Helper", 1, 1);
+        let ability = tap_cost_stub_ability(src);
+
+        pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::total_power_at_least(2),
+        );
+
+        let (min_count, count, choices) = emitted_tap_cost_window(&scenario.state);
+        let mode = match &scenario.state.waiting_for {
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { mode },
+                ..
+            } => *mode,
+            other => panic!("expected a TapCreatures PayCost prompt, got {other:?}"),
+        };
+        assert!(
+            matches!(mode, TapCreaturesSelectionMode::Aggregate(_)),
+            "reach guard: this test must exercise the Aggregate arm, got {mode:?}"
+        );
+
+        // Positive reach guard: ONE creature's power alone does not satisfy the
+        // threshold, but the duplicated pair sums to exactly the threshold — so
+        // the aggregate check PASSES on this submission and the rejection below
+        // can only be the dedup guard firing, not "does not satisfy".
+        let single = [choices[0]];
+        assert_eq!(
+            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &single),
+            1,
+            "reach guard: one eligible creature contributes only 1 power"
+        );
+        let duplicated = vec![choices[0], choices[0]];
+        assert_eq!(
+            crate::game::casting_costs::tap_creatures_total_power(&scenario.state, &duplicated),
+            2,
+            "reach guard: the duplicate double-counts to exactly the threshold, so the aggregate \
+             check cannot be what rejects this submission"
+        );
+        assert!(
+            duplicated.iter().all(|id| choices.contains(id)),
+            "reach guard: the submitted id must be an eligible choice"
+        );
+
+        let err = crate::game::casting_costs::pay_tap_creatures_selection(
+            &mut scenario.state,
+            min_count,
+            count,
+            mode,
+            &choices,
+            &duplicated,
+            &mut Vec::new(),
+        )
+        .expect_err("CR 601.2h: one creature cannot pay an aggregate tap cost twice");
+        let EngineError::InvalidAction(message) = &err else {
+            panic!("a duplicate selection must be an InvalidAction, got {err:?}");
+        };
+        assert!(
+            message.contains("Cannot tap the same creature twice"),
+            "the dedup guard must reject this, not the aggregate comparator, got {message:?}"
+        );
+        assert!(
+            choices.iter().all(|id| !scenario.state.objects[id].tapped),
+            "a rejected duplicate payment must not tap anything"
+        );
+    }
+
+    /// Hostile fixture: fewer eligible creatures than the fixed requirement.
+    /// The `eligible.len() < min_count` pre-check (CR 118.3) must fail the
+    /// payment outright — no `WaitingFor::PayCost` prompt may be surfaced at
+    /// all, or the player would be handed an unsatisfiable selection window.
+    #[test]
+    fn resolution_fixed_tap_cost_fails_without_enough_eligible() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Kitt Kanto, Mayhem Diva", 2, 3)
+            .id();
+        // A creature controlled by the OPPONENT and a TAPPED one of P0's own are
+        // both ineligible, so only the source itself is a legal choice (1 < 2).
+        scenario.add_creature(PlayerId(1), "Opposing Bear", 2, 2);
+        let dozing = scenario.add_creature(P0, "Already Tapped", 1, 1).id();
+        scenario.state.objects.get_mut(&dozing).unwrap().tapped = true;
+        let ability = tap_cost_stub_ability(src);
+        let before = scenario.state.waiting_for.clone();
+
+        let outcome = pay_tap_cost_at_resolution(
+            &mut scenario.state,
+            src,
+            &ability,
+            TapCreaturesRequirement::count(2),
+        );
+        assert!(
+            matches!(outcome, PaymentOutcome::Failed { .. }),
+            "CR 118.3: 1 eligible creature cannot pay a `count: 2` tap cost, got {outcome:?}"
+        );
+        assert_eq!(
+            scenario.state.waiting_for, before,
+            "a failed tap cost must not surface an unsatisfiable PayCost prompt"
+        );
+    }
+
+    /// CR 107.3a: the resolution-scope payability ORACLE (`can_pay_resolution`,
+    /// reached in production through the `can_pay_cost` scope dispatcher) must
+    /// route the `u32::MAX` X-sentinel through `sacrifice_cost_bounds` like every
+    /// other checkpoint. X=0 is a legal announcement, so the cost is payable even
+    /// with ZERO eligible creatures on the battlefield.
+    ///
+    /// Reverting the `can_pay_resolution` fix restores
+    /// `eligible.len() >= *count as usize`, i.e. `0 >= u32::MAX as usize`, and
+    /// the first assertion below flips to `false`.
+    #[test]
+    fn resolution_x_sentinel_tap_cost_is_payable_with_zero_eligible() {
+        let mut scenario = GameScenario::new();
+        // The only permanent is a non-creature, so the creature-typed tap cost
+        // has an empty eligible set — the exact hostile shape the sentinel
+        // comparison used to fail on.
+        let src = scenario.add_artifact_from_oracle(P0, "Powerstone", "").id();
+        let ability = tap_cost_stub_ability(src);
+        let x_sentinel = AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::Count { count: u32::MAX },
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+        };
+
+        // Positive reach guard: prove the eligible set really is empty, so the
+        // verdict below is the sentinel bound and not an accidental hit.
+        assert!(
+            find_eligible_tap_creatures_targets(
+                &scenario.state,
+                P0,
+                &ability,
+                &TargetFilter::Typed(TypedFilter::creature()),
+            )
+            .is_empty(),
+            "reach guard: the fixture must have zero eligible creatures"
+        );
+
+        assert!(
+            can_pay_resolution(&scenario.state, P0, &x_sentinel, &ability),
+            "CR 107.3a: X=0 is a legal announcement, so an X-sentinel resolution \
+             tap cost is payable with no eligible creatures"
+        );
+
+        // Sibling/negative: a FIXED count is still gated by the eligible set, so
+        // the fix widens only the sentinel case.
+        assert!(
+            !can_pay_resolution(
+                &scenario.state,
+                P0,
+                &AbilityCost::TapCreatures {
+                    requirement: TapCreaturesRequirement::count(1),
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                &ability,
+            ),
+            "CR 601.2h: a fixed `count: 1` tap cost is NOT payable with zero eligible creatures"
         );
     }
 }

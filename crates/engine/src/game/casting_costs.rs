@@ -8,7 +8,7 @@ use crate::types::ability::{
     CounterCostSelection, Effect, KickerVariant, NotedManaPayment, ObjectProperty, QuantityExpr,
     QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
     SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
+    TapCreaturesSelectionMode, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -3811,34 +3811,42 @@ pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> 
 /// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
 pub(crate) fn pay_tap_creatures_selection(
     state: &mut GameState,
+    min_count: usize,
     count: usize,
-    aggregate: Option<TapCreaturesAggregate>,
+    mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
-    // `aggregate == None` is fixed-count (tap exactly `count`); `Some(a)` is the
-    // aggregate Crew/Saddle/Teamwork form (tap any number whose total positive
-    // power, CR 208.1, satisfies the advertised comparator vs `a.value`).
-    for id in chosen {
-        if !legal_creatures.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected creature not eligible for tapping".to_string(),
-            ));
-        }
-    }
-    match aggregate {
-        None => {
-            if chosen.len() != count {
+    // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
+    // [min_count, count]); `Aggregate(a)` is the Crew/Saddle/Teamwork form (tap
+    // any number whose total positive power, CR 208.1, satisfies the advertised
+    // comparator vs `a.value`). Bounds/aggregate-satisfaction is checked first,
+    // mirroring `handle_sacrifice_for_cost` and
+    // `handle_tap_creatures_for_mana_ability` — the same-mechanism sibling that
+    // validates this exact `TapCreaturesSelectionMode` type for the mana-ability
+    // leg of the same cost.
+    match mode {
+        // CR 107.3a: `min_count < count` only for the X-sentinel shape ("Tap X
+        // untapped [type] you control"), where X is chosen freely by the
+        // controller within [min_count, count]. A fixed (non-X) requirement
+        // still has min_count == count, so this subsumes the prior
+        // exact-match behavior unchanged for every existing card.
+        TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX => {
+            if chosen.len() < min_count || chosen.len() > count {
+                let requirement = if min_count == count {
+                    format!("exactly {count} creature(s)")
+                } else {
+                    format!("between {min_count} and {count} creature(s)")
+                };
                 return Err(EngineError::InvalidAction(format!(
-                    "Must tap exactly {} creature(s), got {}",
-                    count,
+                    "Must tap {requirement}, got {}",
                     chosen.len()
                 )));
             }
         }
-        Some(aggregate) => {
+        TapCreaturesSelectionMode::Aggregate(aggregate) => {
             let total_positive_power = tap_creatures_total_power(state, chosen);
             if !aggregate.satisfied_by(total_positive_power) {
                 return Err(EngineError::InvalidAction(format!(
@@ -3847,6 +3855,29 @@ pub(crate) fn pay_tap_creatures_selection(
                     aggregate.comparator, aggregate.value
                 )));
             }
+        }
+    }
+
+    // CR 118.3 + CR 601.2h: one creature can only pay for itself once — a
+    // creature already spent on this payment can't be spent again within the
+    // same payment. Checked unconditionally, for every `mode`, BEFORE the tap
+    // loop: the `Aggregate` arm above sums `chosen` with no dedup
+    // (`tap_creatures_total_power` — a duplicated id would double-count its
+    // power, letting `[a, a]` on a power-2 creature satisfy a "total power >=
+    // 4" requirement with only one real creature), so this loop is what
+    // actually protects the aggregate case, not the match arm's own check.
+    // Combined into a single pass with the membership check, mirroring
+    // `handle_tap_creatures_for_mana_ability`.
+    for (index, id) in chosen.iter().enumerate() {
+        if !legal_creatures.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected creature not eligible for tapping".to_string(),
+            ));
+        }
+        if chosen[..index].contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Cannot tap the same creature twice for a tap-creatures cost".to_string(),
+            ));
         }
     }
 
@@ -3864,14 +3895,33 @@ pub(crate) fn pay_tap_creatures_selection(
 pub(crate) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
+    min_count: usize,
     count: usize,
-    aggregate: Option<TapCreaturesAggregate>,
+    mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pay_tap_creatures_selection(state, count, aggregate, legal_creatures, chosen, events)?;
+    pay_tap_creatures_selection(
+        state,
+        min_count,
+        count,
+        mode,
+        legal_creatures,
+        chosen,
+        events,
+    )?;
+    // CR 107.3a: the selected payment count defines X for this activation while
+    // its ability is on the stack — but *only* for the X-sentinel shape. The
+    // mode is the single authority here: `min_count == 0` is not a usable X
+    // signal, because an aggregate (Crew/Saddle/Teamwork, CR 208.1) selection
+    // also has a zero floor and must never redefine the ability's X.
+    if matches!(mode, TapCreaturesSelectionMode::VariableX) {
+        pending
+            .ability
+            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
+    }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -4865,6 +4915,9 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     }
 
     if let Some((requirement, filter)) = super::casting::find_tap_creatures_cost(cost) {
+        // CR 107.3a: compute the selection semantics once from the
+        // requirement and carry them verbatim to the completion handler.
+        let mode = requirement.selection_mode();
         let count = requirement.fixed_count().ok_or_else(|| {
             EngineError::ActionNotAllowed(
                 "Aggregate-power tap cost is not valid for this activation".into(),
@@ -4873,7 +4926,12 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         let eligible = super::casting::find_eligible_tap_creatures_for_cost(
             state, player, source_id, cost, filter,
         );
-        if eligible.len() < count as usize {
+        // CR 107.3a + CR 601.2b: mirror the adjacent Sacrifice arm above —
+        // a "Tap X untapped [type] you control" cost uses the u32::MAX
+        // sentinel for X, bounding the choice to [0, eligible.len()], not a
+        // literal exact/minimum match on u32::MAX.
+        let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, eligible.len());
+        if eligible.len() < min_count {
             return Err(EngineError::ActionNotAllowed(
                 "Not enough eligible creatures to tap".into(),
             ));
@@ -4888,10 +4946,10 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         );
         return Ok(Some(WaitingFor::PayCost {
             player,
-            kind: PayCostKind::TapCreatures { aggregate: None },
+            kind: PayCostKind::TapCreatures { mode },
             choices: eligible,
-            count: count as usize,
-            min_count: 0,
+            count: max_count,
+            min_count,
             resume: CostResume::Spell {
                 spell: Box::new(pending),
             },
@@ -7631,23 +7689,30 @@ fn pay_additional_cost_with_source(
                     })
                 })
                 .collect();
-            // CR 601.2b: The two requirement shapes drive different prompts.
-            // Fixed-count taps exactly `count`; aggregate (Crew/Saddle/Teamwork)
+            // CR 601.2b: The requirement shapes drive different prompts.
+            // Fixed-count taps exactly `count`; the X-sentinel form (CR 107.3a)
+            // taps freely within [0, eligible]; aggregate (Crew/Saddle/Teamwork)
             // taps any number whose total positive power (CR 208.1) satisfies the
             // advertised comparator, so the player may select up to every
             // eligible creature.
+            //
+            // CR 107.3a: compute the selection semantics once from the
+            // requirement and carry them verbatim to the completion handler.
+            let mode = requirement.selection_mode();
             let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    if eligible.len() < *count as usize {
+                    // CR 601.2h: partial payments are not allowed — a fixed-count
+                    // additional cost has `min_count == count`, so an under-count
+                    // selection is refused by the shared validator. Only the
+                    // X-sentinel shape gets a zero floor (CR 107.3a).
+                    let (min_count, max_count) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    if eligible.len() < min_count {
                         return Err(EngineError::ActionNotAllowed(
                             "Not enough eligible creatures to tap".into(),
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures { aggregate: None },
-                        *count as usize,
-                        0,
-                    )
+                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -7669,13 +7734,11 @@ fn pay_additional_cost_with_source(
                             "Eligible creatures' total power does not satisfy this cost".into(),
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures {
-                            aggregate: Some(aggregate),
-                        },
-                        eligible.len(),
-                        0,
-                    )
+                    // CR 208.1: the aggregate form legitimately has a zero floor
+                    // — any subset satisfying the power threshold is a complete
+                    // payment — which is precisely why `min_count == 0` is not a
+                    // usable X signal downstream; `mode` carries that distinction.
+                    (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
             return Ok(WaitingFor::PayCost {

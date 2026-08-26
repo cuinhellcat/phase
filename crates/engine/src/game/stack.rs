@@ -724,10 +724,26 @@ pub(crate) fn effective_stack_ability<'a>(
     }
 }
 
-pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
+pub(crate) fn restore_alternative_spell_normal_face(
+    state: &mut GameState,
+    object_id: ObjectId,
+    casting_variant: crate::types::game_state::CastingVariant,
+) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         if let Some(normal_face) = obj.back_face.take() {
-            let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
+            let mut alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
+            // CR 715.2a + CR 715.4: Restoring the creature face after an
+            // Adventure spell leaves the stack must retain the card's
+            // alternative-characteristics identity for later casts from exile.
+            alternative_snapshot.layout_kind = match casting_variant {
+                crate::types::game_state::CastingVariant::Adventure => {
+                    Some(crate::types::card::LayoutKind::Adventure)
+                }
+                crate::types::game_state::CastingVariant::Omen => {
+                    Some(crate::types::card::LayoutKind::Omen)
+                }
+                _ => None,
+            };
             super::printed_cards::apply_back_face_to_object(obj, normal_face);
             obj.back_face = Some(alternative_snapshot);
         }
@@ -1284,7 +1300,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             .as_ref()
             .or(state.current_trigger_event.as_ref());
         super::triggers::seed_batched_attack_parent_targets(ability, event_ref);
-        super::triggers::seed_event_context_parent_targets(ability, event_ref);
+        super::triggers::seed_event_context_parent_targets(
+            ability,
+            event_ref,
+            super::triggers::EventContextSeedTiming::ResolutionFallback,
+        );
     }
 
     if ability
@@ -1478,7 +1498,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         Zone::Graveyard
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        restore_alternative_spell_normal_face(state, entry.id);
+                        restore_alternative_spell_normal_face(state, entry.id, casting_variant);
                     }
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects
@@ -2233,7 +2253,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         if casting_variant.restores_front_face_after_stack_exit()
             && !spell_in_zone(state, entry.id, Zone::Battlefield)
         {
-            restore_alternative_spell_normal_face(state, entry.id);
+            restore_alternative_spell_normal_face(state, entry.id, casting_variant);
         }
 
         // CR 715.3d: When an Adventure spell resolves to exile, grant

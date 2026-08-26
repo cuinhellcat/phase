@@ -7402,12 +7402,14 @@ pub(crate) fn seed_batched_attack_parent_targets(
         .collect();
 }
 
-/// CR 608.2c + CR 702.184a/702.122/702.171: Stationed/VehicleCrewed/Saddled
+/// CR 603.6 + CR 608.2c + CR 702.184a/702.122/702.171: Zone-change and
+/// Stationed/VehicleCrewed/Saddled
 /// triggers whose effect anaphorically binds `ParentTarget` ("that creature",
 /// "that Vehicle", "that Mount") inherit the event referent as propagated
 /// targets at stack-push time — mirroring `seed_batched_attack_parent_targets`
 /// for attack batches — so resolution does not depend on a live
-/// `current_trigger_event`.
+/// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
+/// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
     if ability.targets.is_empty() {
         return false;
@@ -7420,9 +7422,16 @@ fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
         .any(|t| !matches!(t, TargetRef::Object(id) if *id == ability.source_id))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EventContextSeedTiming {
+    StackPush,
+    ResolutionFallback,
+}
+
 pub(crate) fn seed_event_context_parent_targets(
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
+    timing: EventContextSeedTiming,
 ) {
     let Some(event) = trigger_event else {
         return;
@@ -7430,15 +7439,69 @@ pub(crate) fn seed_event_context_parent_targets(
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
         return;
     }
-    let parent_id = match event {
-        GameEvent::Stationed { creature_id, .. } => Some(*creature_id),
-        GameEvent::VehicleCrewed { vehicle_id, .. } => Some(*vehicle_id),
-        GameEvent::Saddled { mount_id, .. } => Some(*mount_id),
-        _ => None,
+    let (parent_id, zone_change_pin) = match event {
+        GameEvent::ZoneChanged { object_id, .. } => {
+            // CR 400.7: the exact post-change incarnation must come from the
+            // event authority when the trigger is put on the stack. A live-state
+            // lookup or resolution fallback may see a later same-id object.
+            if timing == EventContextSeedTiming::ResolutionFallback {
+                return;
+            }
+            let Some(pin) = zone_change_parent_target_pin(event) else {
+                return;
+            };
+            (Some(*object_id), Some(pin))
+        }
+        GameEvent::Stationed { creature_id, .. } => (Some(*creature_id), None),
+        GameEvent::VehicleCrewed { vehicle_id, .. } => (Some(*vehicle_id), None),
+        GameEvent::Saddled { mount_id, .. } => (Some(*mount_id), None),
+        _ => (None, None),
     };
     if let Some(id) = parent_id {
         ability.targets = vec![TargetRef::Object(id)];
+        // CR 400.7 + CR 603.6: a zone-change trigger refers to the exact
+        // post-change object. Pin that incarnation so leaving the destination
+        // zone and returning before resolution cannot retarget the ability to
+        // the new object that reuses the same storage id.
+        if let Some(pin) = zone_change_pin {
+            ability.set_target_incarnations_recursive(vec![pin]);
+        }
     }
+}
+
+/// Returns the destination incarnation recorded by the zone-change authority.
+/// Never consult live state here: trigger placement can be deferred until after
+/// the same storage id has already left and returned as a different object.
+fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return None;
+    };
+    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
+        return None;
+    }
+
+    let incarnation = if *to == Zone::Battlefield {
+        record.entered_incarnation?
+    } else {
+        let source = record.trigger_source_context()?;
+        if source.identity.reference.object_id != *object_id
+            || from.is_some_and(|zone| source.identity.expected_zone != zone)
+        {
+            return None;
+        }
+        if from.is_some_and(|zone| zone != *to) {
+            source.identity.reference.incarnation.checked_add(1)?
+        } else {
+            source.identity.reference.incarnation
+        }
+    };
+    Some(ObjectIncarnationRef::of(*object_id, incarnation))
 }
 
 fn effect_uses_parent_target(effect: &Effect) -> bool {
@@ -7536,7 +7599,11 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
     let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
     ability.bind_force_block_attacker_recursive(event_attacker);
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
-    seed_event_context_parent_targets(&mut ability, trigger_event.as_ref());
+    seed_event_context_parent_targets(
+        &mut ability,
+        trigger_event.as_ref(),
+        EventContextSeedTiming::StackPush,
+    );
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -12927,6 +12994,16 @@ fn evaluate_trigger_condition_with_source(
             }) => source_id.is_some_and(|source| source != *bearer),
             _ => false,
         },
+        TriggerCondition::ChoseRingBearer => match trigger_event {
+            // CR 701.54a: a temptation with no legal candidates chooses
+            // nothing — `chosen_bearer: None` must not fire "you choose a
+            // creature as your Ring-bearer".
+            Some(GameEvent::RingTemptsYou {
+                player_id,
+                chosen_bearer: Some(_),
+            }) => *player_id == controller,
+            _ => false,
+        },
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
             source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
         }),
@@ -16348,8 +16425,255 @@ pub mod tests {
             creature_id: creature,
             counters_added: 1,
         };
-        seed_event_context_parent_targets(&mut ability, Some(&event));
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(&event),
+            EventContextSeedTiming::StackPush,
+        );
         assert_eq!(ability.targets, vec![TargetRef::Object(creature)]);
+    }
+
+    #[test]
+    fn seed_event_context_parent_targets_binds_zone_changed_object() {
+        let source = ObjectId(999);
+        let mut state = GameState::new_two_player(1);
+        let entered = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Entered".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entered)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut entry_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut entry_events);
+        let event = entry_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("production entry emits a zone-change event");
+        let entered_pin = ObjectIncarnationRef::from_object(&state.objects[&entered]);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(event),
+            EventContextSeedTiming::StackPush,
+        );
+
+        assert_eq!(ability.targets, vec![TargetRef::Object(entered)]);
+        assert_eq!(ability.target_incarnations, vec![entered_pin]);
+    }
+
+    #[test]
+    fn resolution_fallback_does_not_pin_reentered_zone_change_object() {
+        let source = ObjectId(999);
+        let mut state = GameState::new_two_player(1);
+        let entered = make_creature(&mut state, PlayerId(0), "Entered", 2, 2);
+        let event = zone_changed_event(
+            entered,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec![],
+        );
+        let observed_incarnation = state.objects[&entered].incarnation;
+        let mut move_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Exile, &mut move_events);
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut move_events);
+        assert_ne!(state.objects[&entered].incarnation, observed_incarnation);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(&event),
+            EventContextSeedTiming::ResolutionFallback,
+        );
+
+        assert_eq!(ability.targets, vec![TargetRef::Object(source)]);
+        assert!(ability.target_incarnations.is_empty());
+    }
+
+    #[test]
+    fn stack_push_uses_event_incarnation_after_zone_change_reentry() {
+        let source = ObjectId(999);
+        let mut state = GameState::new_two_player(1);
+        let entered = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Entered".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&entered)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut entry_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut entry_events);
+        let event = entry_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("production entry emits a zone-change event");
+        let GameEvent::ZoneChanged { record, .. } = event else {
+            unreachable!();
+        };
+        let event_pin = ObjectIncarnationRef::of(
+            entered,
+            record
+                .entered_incarnation
+                .expect("battlefield entry records its destination incarnation"),
+        );
+
+        let mut later_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Exile, &mut later_events);
+        crate::game::zones::move_to_zone(&mut state, entered, Zone::Battlefield, &mut later_events);
+        assert_ne!(
+            ObjectIncarnationRef::from_object(&state.objects[&entered]),
+            event_pin
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(event),
+            EventContextSeedTiming::StackPush,
+        );
+        assert_eq!(ability.target_incarnations, vec![event_pin]);
+
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(event),
+            EventContextSeedTiming::ResolutionFallback,
+        );
+        assert_eq!(ability.target_incarnations, vec![event_pin]);
+    }
+
+    #[test]
+    fn production_ltb_stack_push_pins_recorded_destination_incarnation() {
+        let mut state = GameState::new_two_player(1);
+        let angel = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Avenging Angel".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.trigger_zones = vec![Zone::Graveyard];
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&angel)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut death_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, angel, Zone::Graveyard, &mut death_events);
+        let destination_pin = ObjectIncarnationRef::from_object(&state.objects[&angel]);
+        process_triggers(&mut state, &death_events);
+
+        let Some(StackEntryKind::TriggeredAbility { ability, .. }) =
+            state.stack.back().map(|entry| &entry.kind)
+        else {
+            panic!("production LTB trigger must reach the stack");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(angel)]);
+        assert_eq!(ability.target_incarnations, vec![destination_pin]);
+        assert!(destination_pin.is_current(&state));
+    }
+
+    #[test]
+    fn non_battlefield_zone_change_pin_rejects_later_same_id_incarnation() {
+        let source = ObjectId(999);
+        let mut state = GameState::new_two_player(1);
+        let object = make_creature(&mut state, PlayerId(0), "Departing", 2, 2);
+        let mut death_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Graveyard, &mut death_events);
+        let event = death_events
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("production departure emits a zone-change event");
+        let destination_pin = ObjectIncarnationRef::from_object(&state.objects[&object]);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        seed_event_context_parent_targets(
+            &mut ability,
+            Some(event),
+            EventContextSeedTiming::StackPush,
+        );
+
+        assert_eq!(ability.targets, vec![TargetRef::Object(object)]);
+        assert_eq!(ability.target_incarnations, vec![destination_pin]);
+        assert_eq!(
+            crate::game::targeting::resolved_targets(&ability, &TargetFilter::ParentTarget, &state,),
+            vec![TargetRef::Object(object)],
+            "the record-owned pre-change incarnation + 1 must name the graveyard object"
+        );
+
+        let mut reentry_events = Vec::new();
+        crate::game::zones::move_to_zone(
+            &mut state,
+            object,
+            Zone::Battlefield,
+            &mut reentry_events,
+        );
+        assert_ne!(
+            ObjectIncarnationRef::from_object(&state.objects[&object]),
+            destination_pin
+        );
+        assert!(
+            crate::game::targeting::resolved_targets(
+                &ability,
+                &TargetFilter::ParentTarget,
+                &state,
+            )
+            .is_empty(),
+            "the recorded graveyard object must not resolve to its later battlefield incarnation"
+        );
     }
 
     fn zone_changed_event(
@@ -18894,6 +19218,7 @@ pub mod tests {
             colors: Vec::new(),
             mana_value: 1,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
@@ -18908,6 +19233,7 @@ pub mod tests {
             colors: Vec::new(),
             mana_value: 1,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
@@ -25881,6 +26207,7 @@ pub mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -25895,6 +26222,7 @@ pub mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 3,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31605,6 +31933,7 @@ pub mod tests {
                 colors: vec![],
                 mana_value: 3,
                 has_x_in_cost: true,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
@@ -31628,6 +31957,7 @@ pub mod tests {
                 colors: vec![],
                 mana_value: 1,
                 has_x_in_cost: false,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
@@ -31652,6 +31982,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 2,
                     has_x_in_cost: true,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31666,6 +31997,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 4,
                     has_x_in_cost: true,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31693,6 +32025,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 2,
                     has_x_in_cost: true,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31707,6 +32040,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31732,6 +32066,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 2,
                     has_x_in_cost: true,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31746,6 +32081,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31760,6 +32096,7 @@ pub mod tests {
                     colors: vec![],
                     mana_value: 4,
                     has_x_in_cost: true,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -31785,6 +32122,7 @@ pub mod tests {
                 colors: vec![],
                 mana_value: 1,
                 has_x_in_cost: false,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
@@ -45426,6 +45764,54 @@ pub mod tests {
             PlayerId(0),
             None,
             Some(&event),
+        ));
+    }
+
+    /// CR 701.54a: "you choose a creature as your Ring-bearer" — fires only
+    /// for the controller's own choice, and only when a bearer was actually
+    /// chosen (#7816).
+    #[test]
+    fn chose_ring_bearer_requires_the_controllers_own_choice() {
+        let mut state = setup();
+        let bearer = create_object(
+            &mut state,
+            CardId(43),
+            PlayerId(0),
+            "Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        let condition = TriggerCondition::ChoseRingBearer;
+        let chosen = GameEvent::RingTemptsYou {
+            player_id: PlayerId(0),
+            chosen_bearer: Some(bearer),
+        };
+        // The controller's own choice fires — no source identity required.
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&chosen),
+        ));
+        // Another player's choice must not fire this controller's trigger.
+        assert!(!check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(1),
+            None,
+            Some(&chosen),
+        ));
+        // A temptation that chose nothing (no legal candidates) must not fire.
+        let unchosen = GameEvent::RingTemptsYou {
+            player_id: PlayerId(0),
+            chosen_bearer: None,
+        };
+        assert!(!check_trigger_condition_with_source(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            Some(&unchosen),
         ));
     }
 }

@@ -19,7 +19,7 @@ use crate::analysis::decision_template::{
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
     DoorLockOp, EffectKind, ObjectProperty, SearchSelectionConstraint, TapCreaturesAggregateStat,
-    TargetRef,
+    TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{
     AlternativeCastDecision, CastChoice, GameAction, MulliganChoice, OutsideGameSelection,
@@ -1271,10 +1271,15 @@ fn target_sequence_projection(
             action: TargetSequenceAction::SelectObjects,
             intent: InteractionIntentCode::Choose,
         },
-        WaitingFor::ChooseObjectsSelection { eligible, .. } => TargetSequenceProjection {
+        WaitingFor::ChooseObjectsSelection {
+            eligible, min, max, ..
+        } => TargetSequenceProjection {
             candidates: eligible.clone(),
-            min: 0,
-            max: eligible.len(),
+            min: *min as usize,
+            max: max
+                .map(|maximum| maximum as usize)
+                .unwrap_or(eligible.len())
+                .min(eligible.len()),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
             intent: InteractionIntentCode::Choose,
@@ -3209,7 +3214,7 @@ fn selection_projection(
         } => {
             let constraint = match kind {
                 PayCostKind::TapCreatures {
-                    aggregate: Some(aggregate),
+                    mode: TapCreaturesSelectionMode::Aggregate(aggregate),
                 } => match aggregate.stat {
                     TapCreaturesAggregateStat::TotalPower => SelectionConstraint::Aggregate {
                         function: InteractionAggregateFunction::Sum,
@@ -3230,7 +3235,12 @@ fn selection_projection(
                     comparator: comparator_dto(*comparator),
                     amount: *value,
                 },
-                PayCostKind::TapCreatures { aggregate: None }
+                // CR 107.3a: both count-bounded forms project as a plain
+                // `[min_count, count]` selection; the X-sentinel's freedom is
+                // already encoded in the bounds the registration site published.
+                PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
+                }
                 | PayCostKind::Discard
                 | PayCostKind::Reveal
                 | PayCostKind::Sacrifice
@@ -9909,6 +9919,26 @@ pub fn submit_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choose_objects_projection_preserves_runtime_cardinality() {
+        let waiting = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            min: 1,
+            max: Some(4),
+            trigger_event: None,
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("choose-objects is a target sequence");
+        assert_eq!((projection.min, projection.max), (1, 3));
+        assert!(projection.unique);
+    }
 
     /// F4 — the preview's entry list is budgeted like every other outbound list on the
     /// shortcut spec.

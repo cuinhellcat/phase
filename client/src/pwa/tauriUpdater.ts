@@ -8,7 +8,7 @@
 
 import type { Update } from "@tauri-apps/plugin-updater";
 
-import { isTauri } from "../services/platform";
+import { isDesktopTauri } from "../services/platform";
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
 import { markPendingAutoUpdate } from "./updateMarker";
 import {
@@ -171,7 +171,7 @@ async function performCheck(reason: "startup" | "interval" | "manual"): Promise<
  * or the updater hasn't been initialized yet.
  */
 export function checkForTauriUpdate(): boolean {
-  if (!isTauri() || !manualCheck) {
+  if (!isDesktopTauri() || !manualCheck) {
     pushUpdateDebug(
       "Manual Tauri update check ignored (not a Tauri build or updater not initialized).",
       "warn",
@@ -188,7 +188,7 @@ export function checkForTauriUpdate(): boolean {
  * `registerServiceWorker()` in `main.tsx`.
  */
 export function registerTauriUpdater(): void {
-  if (initialized || !isTauri()) return;
+  if (initialized || !isDesktopTauri()) return;
   initialized = true;
   pushUpdateDebug("Registering Tauri updater.");
 

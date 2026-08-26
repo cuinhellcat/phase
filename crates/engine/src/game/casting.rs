@@ -11683,6 +11683,11 @@ pub fn handle_cast_spell_with_payment_mode(
             // rejection stands (nothing downstream re-guards NoCost).
             if matches!(obj.mana_cost, ManaCost::NoCost)
                 && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
+                // CR 715.3a + CR 118.6a: A land-front Adventure card has no
+                // payable normal-face cost, but its instant/sorcery Adventure
+                // face may be cast for its own mana cost.
+                && !(alternative_spell_layout(obj).is_some()
+                    && can_cast_adventure_face_now(state, player, object_id, false))
                 && !(object_has_effective_face_down_keyword(state, object_id)
                     && can_afford_face_down_cast(
                         state,
@@ -19902,10 +19907,24 @@ pub fn handle_activate_ability(
             // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
             // activated abilities use the same WaitingFor flow as flashback tap
             // costs; completion resumes through `finish_pending_cost_or_cast`.
+            //
+            // UNREACHABLE (kept only for structural consistency). The
+            // `!has_effect_targets` block above calls
+            // `surface_next_unpaid_interactive_activation_cost` first and returns
+            // immediately when it yields a `WaitingFor`. That function's own
+            // `TapCreatures` arm uses this identical `find_tap_creatures_cost`
+            // matcher and unconditionally returns `Some(..)` (or propagates an
+            // `Err`) whenever a `TapCreatures` leg exists anywhere in the cost, so
+            // every such cost is intercepted there before this branch can run —
+            // structurally, for every card, not just for the X-sentinel ones.
+            // Deliberately left behaviorally as-is: its bounds are *not* corrected
+            // for the CR 107.3a X-sentinel, because an unreachable branch cannot
+            // carry a non-vacuous regression test.
             if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
                 // CR 602.1a: Activated-ability tap costs are fixed-count today
                 // (Convoke-style). The aggregate "total power N" form is reserved for
                 // Crew/Saddle/Teamwork, which are not dispatched through this path.
+                let mode = requirement.selection_mode();
                 let count = requirement.fixed_count().ok_or_else(|| {
                     EngineError::ActionNotAllowed(
                         "Aggregate-power tap cost is not valid for this activation".into(),
@@ -19924,7 +19943,7 @@ pub fn handle_activate_ability(
                 pending_tap.activation_ability_index = Some(ability_index);
                 return Ok(WaitingFor::PayCost {
                     player,
-                    kind: PayCostKind::TapCreatures { aggregate: None },
+                    kind: PayCostKind::TapCreatures { mode },
                     choices: eligible,
                     count: count as usize,
                     min_count: 0,
@@ -20277,7 +20296,11 @@ pub fn handle_cancel_cast(
         // CR 601.2i + CR 712.11a / CR 709.3: backing out of a cast with an
         // alternative spell face before it completes restores the card's normal
         // front face in its origin zone.
-        super::stack::restore_alternative_spell_normal_face(state, pending.object_id);
+        super::stack::restore_alternative_spell_normal_face(
+            state,
+            pending.object_id,
+            pending.casting_variant,
+        );
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             obj.modal_back_face = false;
         }

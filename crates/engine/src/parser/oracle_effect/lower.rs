@@ -1737,6 +1737,26 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
+        // Equip's attachment is always `SelfRef`, so it remains a stack-time
+        // target even though the keyword's reminder text isn't in this fragment.
+        Effect::Attach { attachment, .. } => !attachment.is_context_ref(),
+        Effect::CastFromZone { .. } => true,
+        _ => false,
+    };
+    if has_untargeted_resolution_choice {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.10a + CR 608.2d: "attach an Equipment" and "cast that card"
+        // choose an untargeted object while resolving. Their explicit "target"
+        // counterparts remain stack-time choices.
+        if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source

@@ -52784,6 +52784,88 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
     );
 }
 
+/// CR 608.2c/d + CR 701.8a: Duneblast's untargeted resolution choice publishes
+/// the creature(s) spared by the controller, then destroys every other creature.
+#[test]
+fn duneblast_lowers_choose_survivor_then_destroy_rest() {
+    let def = parse_effect_chain_with_context(
+        "Choose up to one creature. Destroy the rest.",
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tracked-set survivor choice, got {:?}", def.effect);
+    };
+    assert_eq!(*chooser, TargetFilter::Controller);
+    assert_eq!((*min, *max), (0, Some(1)));
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+
+    let destroy = def
+        .sub_ability
+        .as_deref()
+        .expect("survivor choice must be followed by destroy-rest");
+    let Effect::DestroyAll { target, .. } = destroy.effect.as_ref() else {
+        panic!("expected DestroyAll continuation, got {:?}", destroy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }),
+        }]))
+    );
+    assert!(!ability_chain_has_unimplemented(&def));
+}
+
+/// Same grammar class as Duneblast, with a comma/"then" connector and a
+/// different upper bound. This is the exact Mount Doom ability body.
+#[test]
+fn mount_doom_lowers_choose_two_then_destroy_rest() {
+    let def = parse_effect_chain_with_context(
+        "Choose up to two creatures, then destroy the rest.",
+        AbilityKind::Activated,
+        &mut ParseContext::default(),
+    );
+
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tracked-set survivor choice, got {:?}", def.effect);
+    };
+    assert_eq!(*chooser, TargetFilter::Controller);
+    assert_eq!((*min, *max), (0, Some(2)));
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+
+    let destroy = def
+        .sub_ability
+        .as_deref()
+        .expect("survivor choice must be followed by destroy-rest");
+    let Effect::DestroyAll { target, .. } = destroy.effect.as_ref() else {
+        panic!("expected DestroyAll continuation, got {:?}", destroy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }),
+        }]))
+    );
+    assert!(!ability_chain_has_unimplemented(&def));
+}
+
 /// The legacy bypass exposed the pile/shuffle/cloak recognizer only to the
 /// WithContext entry point. U3c routes it through `AbilityIr`, but retains that
 /// entry-point gate rather than making die-result (`Standalone`) callers newly

@@ -14,7 +14,7 @@ use crate::parser::oracle::{
     is_draft_matters_sentence,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
+use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
@@ -4347,6 +4347,7 @@ fn fmt_trigger_condition(cond: &crate::types::ability::TriggerCondition) -> Stri
         TC::LostLife => "lost life this turn".into(),
         TC::Descended => "descended this turn".into(),
         TC::ChoseOtherRingBearer => "chose a creature other than this as your Ring-bearer".into(),
+        TC::ChoseRingBearer => "you chose a creature as your Ring-bearer".into(),
         TC::ControlsType { filter } => format!("you control {}", fmt_target(filter)),
         TC::NoSpellsCastLastTurn => "no spells cast last turn".into(),
         TC::TwoOrMoreSpellsCastLastTurn => "two or more spells cast last turn".into(),
@@ -9422,73 +9423,9 @@ impl<'a> ParsedElement<'a> {
 /// Normalize Oracle text for description matching: replace card-name self-references
 /// with `~` so they match parsed descriptions (which use `~` normalization).
 fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
-    // Replace the full card name (or comma-truncated/word-prefix form) with ~
-    let mut result = lower.to_string();
-    if !card_name_lower.is_empty() {
-        // Try full name first
-        result = result.replace(card_name_lower, "~");
-        // Alchemy rebalance prefix: "a-armory veteran" → try "armory veteran"
-        if !result.contains('~') {
-            if let Some(stripped) = card_name_lower.strip_prefix("a-") {
-                result = result.replace(stripped, "~");
-            }
-        }
-        // Comma-truncated: "akiri, line-slinger" → "akiri"
-        if let Some(short) = card_name_lower.split(',').next() {
-            let short = short.trim();
-            if short.len() > 2 {
-                result = result.replace(short, "~");
-                // Also try with Alchemy prefix stripped: "a-alrund" → "alrund"
-                if !result.contains('~') {
-                    if let Some(stripped) = short.strip_prefix("a-") {
-                        if stripped.len() > 2 {
-                            result = result.replace(stripped, "~");
-                        }
-                    }
-                }
-            }
-        }
-        // "of"-based: "rosie cotton of south lane" → "rosie cotton"
-        if !result.contains('~') {
-            if let Some(of_pos) = card_name_lower.find(" of ") {
-                let short = &card_name_lower[..of_pos];
-                if short.len() >= 3 {
-                    result = result.replace(short, "~");
-                }
-            }
-        }
-        // First-word prefix: "bontu the glorified" → try "bontu the", "bontu"
-        // Mirrors the parser's normalize_card_name_refs short-name strategy.
-        // Always runs (even if `~` is already present from the parser) to ensure
-        // consistent normalization between oracle lines and parsed descriptions.
-        // Skips common MTG game terms that would cause false matches.
-        {
-            const GAME_TERM_BLOCKLIST: &[&str] = &[
-                "quest", "spirit", "heart", "edge", "wall", "lake", "dream", "herald", "champion",
-                "guardian", "master", "prophet", "bringer",
-            ];
-            let name_words: Vec<&str> = card_name_lower.split_whitespace().collect();
-            for len in (1..name_words.len()).rev() {
-                let candidate: String = name_words[..len].join(" ");
-                if candidate.len() >= 3 {
-                    // Skip single-word candidates that are common MTG game terms
-                    if len == 1 && GAME_TERM_BLOCKLIST.contains(&candidate.as_str()) {
-                        continue;
-                    }
-                    let replaced = result.replace(candidate.as_str(), "~");
-                    if replaced != result {
-                        result = replaced;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    // Normalize common self-reference phrases to ~
-    for phrase in SELF_REF_TYPE_PHRASES.iter().chain(["this spell"].iter()) {
-        result = result.replace(phrase, "~");
-    }
-    result
+    // Keep coverage matching byte-equivalent to the parser's self-reference
+    // authority. Coverage adds only its historical "this spell" alias.
+    normalize_card_name_refs(lower, card_name_lower).replace("this spell", "~")
 }
 
 fn split_trigger_variants(norm: &str) -> Option<Vec<String>> {
@@ -15189,6 +15126,42 @@ mod tests {
         assert_eq!(
             normalize_for_matching("when this battle enters", ""),
             "when ~ enters"
+        );
+    }
+
+    #[test]
+    fn test_normalize_for_matching_uses_parser_compound_short_name_authority() {
+        let cases = [
+            (
+                "whenever captain kirk enters or attacks, choose one.",
+                "captain james t. kirk",
+            ),
+            (
+                "whenever captain janeway or another creature you control enters, that creature explores.",
+                "captain kathryn janeway",
+            ),
+            (
+                "the minstrel's ballad — at the beginning of combat on your turn, create a token.",
+                "the wandering minstrel",
+            ),
+        ];
+        for (text, name) in cases {
+            assert_eq!(
+                normalize_for_matching(text, name),
+                normalize_card_name_refs(text, name),
+                "coverage and parser normalization must not drift for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_for_matching_strips_lowercase_alchemy_prefix() {
+        assert_eq!(
+            normalize_for_matching(
+                "whenever sprouting goblin attacks, create a token.",
+                "a-sprouting goblin",
+            ),
+            "whenever ~ attacks, create a token."
         );
     }
 

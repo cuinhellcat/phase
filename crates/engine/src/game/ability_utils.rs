@@ -2742,20 +2742,25 @@ fn collect_target_slots_inner(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
-        if attach_host_filter_needs_target_slot(target) {
-            let legal_targets =
-                legal_targets_for_ability_filter(state, ability, target, &acc.slots);
-            if legal_targets.is_empty() && !ability.optional_targeting {
-                return Err(no_legal_target_slots());
+        // CR 115.1 + CR 608.2d: an untargeted attachment choice occurs while
+        // resolving, so it must not claim a target slot when this ability is
+        // announced.
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            collect_attach_attachment_target_slots(state, ability, attachment, acc)?;
+            if attach_host_filter_needs_target_slot(target) {
+                let legal_targets =
+                    legal_targets_for_ability_filter(state, ability, target, &acc.slots);
+                if legal_targets.is_empty() && !ability.optional_targeting {
+                    return Err(no_legal_target_slots());
+                }
+                acc.push(TargetSelectionSlot {
+                    legal_targets,
+                    optional: ability.optional_targeting,
+                    chooser: None,
+                    effect_kind: acc.current_effect_kind,
+                    effect_detail: acc.current_effect_detail,
+                });
             }
-            acc.push(TargetSelectionSlot {
-                legal_targets,
-                optional: ability.optional_targeting,
-                chooser: None,
-                effect_kind: acc.current_effect_kind,
-                effect_detail: acc.current_effect_detail,
-            });
         }
     } else if let Effect::CreateDamageReplacement {
         recipient_object_filter,
@@ -4751,21 +4756,23 @@ fn collect_target_slot_specs(
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
-        collect_attach_attachment_target_slot_specs(
-            state,
-            ability,
-            attachment,
-            specs,
-            next_instance,
-        );
-        if attach_host_filter_needs_target_slot(target) {
-            let id = TargetInstanceId(*next_instance);
-            *next_instance += 1;
-            specs.push(TargetSlotSpec {
-                filter: target.clone(),
-                optional: ability.optional_targeting,
-                instance: id,
-            });
+        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+            collect_attach_attachment_target_slot_specs(
+                state,
+                ability,
+                attachment,
+                specs,
+                next_instance,
+            );
+            if attach_host_filter_needs_target_slot(target) {
+                let id = TargetInstanceId(*next_instance);
+                *next_instance += 1;
+                specs.push(TargetSlotSpec {
+                    filter: target.clone(),
+                    optional: ability.optional_targeting,
+                    instance: id,
+                });
+            }
         }
     } else if let Effect::CreateDamageReplacement {
         recipient_object_filter,
@@ -5846,23 +5853,17 @@ fn damage_any_target_legal_targets(
     )
 }
 
-/// CR 603.12: Check if a sub-ability represents a reflexive trigger whose targeting
-/// should be deferred to resolution time. Reflexive trigger conditions (WhenYouDo,
-/// QuantityCheck on CountersOnSelf) indicate the sub-ability fires as a separate
-/// triggered ability during resolution — targets are chosen then, not at stack time.
+/// CR 603.12 + CR 608.2d: Whether a chained sub-ability chooses its targets while
+/// resolving rather than as its parent goes on the stack. Ordinary conditional,
+/// optional, and additional-cost-paid clauses retain their announced targets
+/// (CR 601.2c / CR 603.3d).
 fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
-    matches!(
-        &sub.condition,
-        Some(AbilityCondition::WhenYouDo)
-            | Some(AbilityCondition::QuantityCheck { .. })
-            | Some(AbilityCondition::PreviousEffectAmount { .. })
-            | Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) || sub.target_choice_timing == TargetChoiceTiming::Resolution
-        // CR 608.2d + CR 601.2c: "You may" sub-instructions (Nahiri, the
-        // Lithomancer +2 attach) choose whether to perform the action at
-        // resolution; their targets are announced only if the controller
-        // accepts, not when the loyalty ability is activated.
-        || sub.optional
+    matches!(&sub.condition, Some(AbilityCondition::WhenYouDo))
+        || matches!(
+            &sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
+        )
+        || sub.target_choice_timing == TargetChoiceTiming::Resolution
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
@@ -6631,43 +6632,45 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        let attachment = attachment.clone();
-        let target = target.clone();
-        assign_attach_attachment_declared_targets(
-            state,
-            ability,
-            &attachment,
-            &target,
-            targets,
-            next_target,
-        )?;
-        if attach_host_filter_needs_target_slot(&target) {
-            if let Some(target) = targets.get(*next_target) {
-                ability.targets.push(target.clone());
-                *next_target += 1;
-            } else if !ability.optional_targeting {
-                return Err(EngineError::InvalidAction(
-                    "Missing required target".to_string(),
-                ));
-            }
-        }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_targets_after_deferred_effect(
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            let attachment = attachment.clone();
+            let target = target.clone();
+            assign_attach_attachment_declared_targets(
                 state,
-                ability.sub_ability.as_deref_mut(),
+                ability,
+                &attachment,
+                &target,
                 targets,
                 next_target,
             )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
+            if attach_host_filter_needs_target_slot(&target) {
+                if let Some(target) = targets.get(*next_target) {
+                    ability.targets.push(target.clone());
+                    *next_target += 1;
+                } else if !ability.optional_targeting {
+                    return Err(EngineError::InvalidAction(
+                        "Missing required target".to_string(),
+                    ));
+                }
+            }
+            if defers_sub_ability_target_selection(&ability.effect) {
+                assign_targets_after_deferred_effect(
+                    state,
+                    ability.sub_ability.as_deref_mut(),
+                    targets,
+                    next_target,
+                )?;
                 return Ok(());
             }
-            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            if let Some(sub_ability) = ability.sub_ability.as_mut() {
+                if defers_conditional_target_selection(sub_ability) {
+                    return Ok(());
+                }
+                assign_targets_recursive(state, sub_ability, targets, next_target)?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
@@ -6989,49 +6992,51 @@ fn assign_selected_slots_recursive(
         return Ok(());
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        let attachment = attachment.clone();
-        let target = target.clone();
-        assign_attach_attachment_selected_slots(
-            state,
-            ability,
-            &attachment,
-            selected_slots,
-            next_slot,
-        )?;
-        if attach_host_filter_needs_target_slot(&target) {
-            let Some(selected_slot) = selected_slots.get(*next_slot) else {
-                return Err(EngineError::InvalidAction(
-                    "Missing target selection".to_string(),
-                ));
-            };
-            match selected_slot {
-                Some(target) => ability.targets.push(target.clone()),
-                None if ability.optional_targeting => {}
-                None => {
-                    return Err(EngineError::InvalidAction(
-                        "Missing required target".to_string(),
-                    ));
-                }
-            }
-            *next_slot += 1;
-        }
-        if defers_sub_ability_target_selection(&ability.effect) {
-            assign_selected_slots_after_deferred_effect(
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            let attachment = attachment.clone();
+            let target = target.clone();
+            assign_attach_attachment_selected_slots(
                 state,
-                ability.sub_ability.as_deref_mut(),
+                ability,
+                &attachment,
                 selected_slots,
                 next_slot,
             )?;
-            return Ok(());
-        }
-        if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            if defers_conditional_target_selection(sub_ability) {
+            if attach_host_filter_needs_target_slot(&target) {
+                let Some(selected_slot) = selected_slots.get(*next_slot) else {
+                    return Err(EngineError::InvalidAction(
+                        "Missing target selection".to_string(),
+                    ));
+                };
+                match selected_slot {
+                    Some(target) => ability.targets.push(target.clone()),
+                    None if ability.optional_targeting => {}
+                    None => {
+                        return Err(EngineError::InvalidAction(
+                            "Missing required target".to_string(),
+                        ));
+                    }
+                }
+                *next_slot += 1;
+            }
+            if defers_sub_ability_target_selection(&ability.effect) {
+                assign_selected_slots_after_deferred_effect(
+                    state,
+                    ability.sub_ability.as_deref_mut(),
+                    selected_slots,
+                    next_slot,
+                )?;
                 return Ok(());
             }
-            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+            if let Some(sub_ability) = ability.sub_ability.as_mut() {
+                if defers_conditional_target_selection(sub_ability) {
+                    return Ok(());
+                }
+                assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     if let Effect::Fight { subject, target } = &ability.effect {
@@ -7445,11 +7450,13 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget);
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
-        if attach_side_needs_target_slot(attachment, true)
-            || attach_side_needs_target_slot(target, false)
-        {
-            return true;
+    if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if let Effect::Attach { attachment, target } = &ability.effect {
+            if attach_side_needs_target_slot(attachment, true)
+                || attach_side_needs_target_slot(target, false)
+            {
+                return true;
+            }
         }
     }
 
@@ -7634,6 +7641,13 @@ pub fn retarget_slot_violation(
 }
 
 fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
+    // CR 601.2c + CR 603.3d: only resolution-time choices avoid reserving slots
+    // from an earlier multi-target sibling. Ordinary conditional and paid-cost
+    // continuations still announce their targets while the ability is stacked.
+    if defers_conditional_target_selection(ability) {
+        return 0;
+    }
+
     let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
         if ability.optional_targeting {
             0
@@ -10849,6 +10863,22 @@ mod tests {
                 .targets
                 .is_empty());
         }
+
+        let mut optional_stack_timing = chain(SubAbilityLink::ContinuationStep);
+        optional_stack_timing
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .expect("counter continuation must exist")
+            .optional = true;
+        let slots = build_target_slots(&state, &optional_stack_timing)
+            .expect("optional stack-time target traversal should build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(creature)));
+        assert_eq!(minimum_targets_in_chain(&state, &optional_stack_timing), 1);
     }
 
     /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's

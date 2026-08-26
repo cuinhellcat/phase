@@ -14622,6 +14622,37 @@ fn trigger_coin_flip_rejects_partial_suffix() {
 }
 
 #[test]
+fn trigger_choose_ring_bearer_lowers_the_gated_temptation_mode() {
+    // Call of the Ring, second line (#7816): the same temptation event as
+    // "whenever the Ring tempts you", gated on a choice having been made.
+    let def = parse_trigger_line(
+        "Whenever you choose a creature as your Ring-bearer, you may pay 2 life. If you do, draw a card.",
+        "Call of the Ring",
+    );
+    assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    assert_eq!(
+        def.condition,
+        Some(crate::types::ability::TriggerCondition::ChoseRingBearer),
+        "the choice gate must ride in the trigger condition"
+    );
+    assert!(
+        def.execute.is_some(),
+        "the pay-life body must lower onto the trigger execute slot"
+    );
+}
+
+#[test]
+fn trigger_choose_ring_bearer_rejects_a_longer_suffix() {
+    // Regel 12: the head is all_consuming — trailing prose must fall through
+    // to Unknown, not silently truncate.
+    let def = parse_trigger_line(
+        "Whenever you choose a creature as your Ring-bearer or a food, draw a card.",
+        "Test Card",
+    );
+    assert!(matches!(def.mode, TriggerMode::Unknown(_)));
+}
+
+#[test]
 fn trigger_ring_tempts_you_whenever() {
     let def = parse_trigger_line(
         "Whenever the Ring tempts you, you may discard your hand.",

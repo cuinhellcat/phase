@@ -13017,6 +13017,22 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::RingTemptsYou;
         return Some((TriggerMode::RingTemptsYou, def));
     }
+
+    // CR 701.54a: "Whenever you choose a creature as your Ring-bearer" — the
+    // same temptation event, gated on a choice actually having been made
+    // (Call of the Ring). The gate rides in `def.condition`, which the
+    // caller ANDs with any additional intervening-if.
+    if all_consuming(pair(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("you choose a creature as your ring-bearer"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::RingTemptsYou;
+        def.condition = Some(TriggerCondition::ChoseRingBearer);
+        return Some((TriggerMode::RingTemptsYou, def));
+    }
     None
 }
 
@@ -17244,6 +17260,25 @@ pub(crate) fn extract_colored_mana_symbol_spell_qualifier(text: &str) -> Option<
 
 pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> {
     use crate::types::ability::{FilterProp, TypedFilter};
+
+    // CR 715.2a: The post-spell path recognizes only the Adventure qualifier.
+    // Other relative clauses must fall through to the existing type-phrase
+    // parsing path, which preserves its target-filter distribution.
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("that "),
+        alt((
+            tag::<_, _, OracleError<'_>>("has "),
+            tag::<_, _, OracleError<'_>>("have "),
+        )),
+        tag::<_, _, OracleError<'_>>("an adventure"),
+    ))
+    .parse(modifier)
+    .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::HasAdventure]),
+        ));
+    }
 
     // CR 608.2b: "that has the same name as a card in your graveyard"
     // (Pyromancer's Ascension). Reuse the search-filter name-reference suffix

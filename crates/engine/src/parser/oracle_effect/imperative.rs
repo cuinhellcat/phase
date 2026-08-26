@@ -3988,6 +3988,14 @@ pub(super) fn parse_choose_ast(
         return Some(ast);
     }
 
+    // CR 608.2d + CR 400.1 + CR 122.1: "choose an exiled card [owner] with a
+    // <kind> counter on it" (Dauthi Voidwalker) — a zone-implicit Exile
+    // selection like the suspended-card form above: the "exiled" participle
+    // carries the zone, so `try_parse_choose_from_zone` never claims it.
+    if let Some(ast) = try_parse_choose_exiled_card_with_counter(lower) {
+        return Some(ast);
+    }
+
     // CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: "choose a card [at random]
     // exiled this way / exiled with ~" — the impulse-exile choose anaphor. The
     // "exiled this way" referent is the chain's tracked set (the cards exiled by
@@ -4418,20 +4426,12 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
     let (rest, _) = alt((tag::<_, _, E>("suspended cards"), tag("suspended card")))
         .parse(rest)
         .ok()?;
-    // Parse optional ownership qualifier.  Supported forms:
-    //   "you own"            → Some(ControllerRef::You)
-    //   "an opponent owns"   → Some(ControllerRef::Opponent)
-    //   <no qualifier>       → None (any player's suspended card)
-    // Require the clause to end here: if a chain failed to split, an unparsed
-    // trailing continuation ("… and remove that many time counters from it") would
-    // be left over — bail so the line falls to a documented strict failure rather
-    // than a silent misparse that drops the counter clause.
-    let (rest, owner) = opt(alt((
-        value(ControllerRef::You, tag::<_, _, E>(" you own")),
-        value(ControllerRef::Opponent, tag(" an opponent owns")),
-    )))
-    .parse(rest)
-    .ok()?;
+    // Require the clause to end after the qualifier: if a chain failed to
+    // split, an unparsed trailing continuation ("… and remove that many time
+    // counters from it") would be left over — bail so the line falls to a
+    // documented strict failure rather than a silent misparse that drops the
+    // counter clause.
+    let (rest, owner) = parse_ownership_qualifier_suffix(rest)?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -4442,6 +4442,78 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
         zone_owner: ZoneOwner::Controller,
         // CR 108.3: ownership restricted by the parsed qualifier (None = any player).
         filter: crate::parser::oracle_quantity::suspended_card_filter(owner),
+        chooser: Chooser::Controller,
+        up_to: false,
+        // CR 608.2d: controller-directed selection, never random.
+        selection: CardSelectionMode::Chosen,
+    })
+}
+
+/// CR 108.3: shared grammar for the trailing ownership qualifier on
+/// zone-implicit card references. Supported forms:
+///   " you own"           → `Some(ControllerRef::You)`
+///   " an opponent owns"  → `Some(ControllerRef::Opponent)`
+///   <no qualifier>       → `None` (any player's card)
+/// Used by the suspended-card and exiled-card heads so the qualifier grammar
+/// lives in one place.
+fn parse_ownership_qualifier_suffix(input: &str) -> Option<(&str, Option<ControllerRef>)> {
+    type E<'a> = OracleError<'a>;
+    opt(alt((
+        value(ControllerRef::You, tag::<_, _, E>(" you own")),
+        value(ControllerRef::Opponent, tag(" an opponent owns")),
+    )))
+    .parse(input)
+    .ok()
+}
+
+/// CR 608.2d + CR 400.1 + CR 122.1: "choose a/an exiled card [you own | an
+/// opponent owns] with a <kind> counter on it" — an interactive selection of a
+/// card in exile bearing the named counter (Dauthi Voidwalker's void pick).
+/// No "in/from <zone>" connector, so `try_parse_choose_from_zone` does not
+/// claim it; the "exiled" participle carries the zone. Routes to the
+/// `ChooseFromZone { Exile }` seam so the runtime pauses for the pick before
+/// a chained "you may play it" continuation resolves. Composed from nom
+/// combinators; the counter suffix reuses `oracle_target::parse_counter_suffix`
+/// and the ownership qualifier mirrors `try_parse_choose_suspended_card`.
+fn try_parse_choose_exiled_card_with_counter(lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, _) = alt((tag::<_, _, E>("choose "), tag("you choose ")))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, E>("an "), tag("a "))).parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, E>("exiled card").parse(rest).ok()?;
+    let (rest, owner) = parse_ownership_qualifier_suffix(rest)?;
+    let (rest, _) = tag::<_, _, E>(" ").parse(rest).ok()?;
+    let (counter_prop, consumed) = crate::parser::oracle_target::parse_counter_suffix(rest)?;
+    // The counter suffix must consume the whole remainder — leftovers mean a
+    // chain failed to split; bail to the documented strict failure rather
+    // than silently dropping a continuation.
+    if !rest[consumed..].trim().is_empty() {
+        return None;
+    }
+
+    let mut properties = vec![
+        // CR 400.1: in the exile zone (mirrors `suspended_card_filter`).
+        FilterProp::InZone { zone: Zone::Exile },
+        counter_prop,
+    ];
+    // CR 400.1 + CR 108.3: exile is a zone shared by all players — scan every
+    // owner's partition (`AllOwners`) and let the ownership filter narrow.
+    // Any single-owner scope drops candidates: `ZoneOwner::Opponent` resolves
+    // to ONE opponent, but "an opponent owns" means any of them in multiplayer
+    // (and a Controller scope finds zero, silently no-opping the pick,
+    // CR 608.2d).
+    if let Some(o) = owner {
+        // CR 108.3: owned by the parsed player reference.
+        properties.push(FilterProp::Owned { controller: o });
+    }
+
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones: vec![Zone::Exile],
+        zone_owner: ZoneOwner::AllOwners,
+        filter: TargetFilter::Typed(TypedFilter::card().properties(properties)),
         chooser: Chooser::Controller,
         up_to: false,
         // CR 608.2d: controller-directed selection, never random.
@@ -18849,6 +18921,58 @@ mod tests {
         let text = "choose a suspended card you own and remove that many time counters from it";
         let lower = text.to_lowercase();
         assert!(super::try_parse_choose_suspended_card(&lower).is_none());
+    }
+
+    /// #6517 (Dauthi Voidwalker): "choose an exiled card an opponent owns with
+    /// a void counter on it" — the zone-implicit Exile pick with the counter
+    /// suffix and ownership qualifier.
+    #[test]
+    fn choose_exiled_card_with_void_counter_parses() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let lower = "choose an exiled card an opponent owns with a void counter on it";
+        match super::try_parse_choose_exiled_card_with_counter(lower) {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter: TargetFilter::Typed(tf),
+                up_to,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(
+                    zone_owner,
+                    ZoneOwner::AllOwners,
+                    "exile is shared — every owner's partition must be scanned; \
+                     any single-owner scope drops candidates (Controller finds \
+                     zero, Opponent only the first opponent in multiplayer)"
+                );
+                assert!(!up_to);
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }));
+                assert!(tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent
+                }));
+                assert!(tf.properties.contains(&FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("void".to_string())),
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                }));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    /// Anti-misparse guard (mirrors the suspended-card boundary test): a
+    /// trailing continuation must not be claimed and silently dropped.
+    #[test]
+    fn choose_exiled_card_with_counter_requires_clause_boundary() {
+        let lower =
+            "choose an exiled card an opponent owns with a void counter on it and sacrifice it";
+        assert!(super::try_parse_choose_exiled_card_with_counter(lower).is_none());
     }
 
     #[test]

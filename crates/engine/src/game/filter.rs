@@ -4843,6 +4843,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        // CR 715.2a + CR 715.2b: A spell-cast snapshot preserves the
+        // Adventure alternative-characteristics fact after the spell leaves
+        // the stack; this is distinct from casting the Adventure face.
+        FilterProp::HasAdventure => record.has_adventure,
         FilterProp::WasKicked => record.was_kicked,
         // CR 708.4: A face-down spell is a real spell on the stack, not a
         // battlefield-only state — a morph/megamorph/disguise card cast face down
@@ -4913,7 +4917,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Counters { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
-        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -7691,7 +7694,7 @@ mod tests {
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
         PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
-        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
+        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -8771,6 +8774,7 @@ mod tests {
             colors: vec![ManaColor::Blue],
             mana_value: 3,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
@@ -8886,6 +8890,7 @@ mod tests {
             colors: vec![],
             mana_value: 3,
             has_x_in_cost: true,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
@@ -8893,6 +8898,7 @@ mod tests {
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             ..x_record.clone()
         };
@@ -8968,6 +8974,7 @@ mod tests {
             colors: vec![],
             mana_value: 2,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
@@ -13377,6 +13384,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 0,
                 has_x_in_cost: false,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
@@ -13415,6 +13423,42 @@ mod tests {
         assert!(!spell_record_matches_property(
             &vanilla_record,
             &FilterProp::Historic,
+        ));
+    }
+
+    /// CR 715.2a: A spell-cast snapshot must preserve the distinction between
+    /// a creature spell with an Adventure and an ordinary creature spell.
+    #[test]
+    fn spell_record_adventure_property_matches_snapshot() {
+        use crate::types::game_state::SpellCastRecord;
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::HasAdventure],
+        });
+        let adventure_record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            has_adventure: true,
+            ..SpellCastRecord::default()
+        };
+        let ordinary_record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            has_adventure: false,
+            ..SpellCastRecord::default()
+        };
+
+        assert!(spell_record_matches_filter(
+            &adventure_record,
+            &filter,
+            PlayerId(0),
+            &[],
+        ));
+        assert!(!spell_record_matches_filter(
+            &ordinary_record,
+            &filter,
+            PlayerId(0),
+            &[],
         ));
     }
 
@@ -13867,6 +13911,7 @@ mod tests {
             colors: vec![],
             mana_value: 7,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
