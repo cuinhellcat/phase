@@ -4426,20 +4426,12 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
     let (rest, _) = alt((tag::<_, _, E>("suspended cards"), tag("suspended card")))
         .parse(rest)
         .ok()?;
-    // Parse optional ownership qualifier.  Supported forms:
-    //   "you own"            → Some(ControllerRef::You)
-    //   "an opponent owns"   → Some(ControllerRef::Opponent)
-    //   <no qualifier>       → None (any player's suspended card)
-    // Require the clause to end here: if a chain failed to split, an unparsed
-    // trailing continuation ("… and remove that many time counters from it") would
-    // be left over — bail so the line falls to a documented strict failure rather
-    // than a silent misparse that drops the counter clause.
-    let (rest, owner) = opt(alt((
-        value(ControllerRef::You, tag::<_, _, E>(" you own")),
-        value(ControllerRef::Opponent, tag(" an opponent owns")),
-    )))
-    .parse(rest)
-    .ok()?;
+    // Require the clause to end after the qualifier: if a chain failed to
+    // split, an unparsed trailing continuation ("… and remove that many time
+    // counters from it") would be left over — bail so the line falls to a
+    // documented strict failure rather than a silent misparse that drops the
+    // counter clause.
+    let (rest, owner) = parse_ownership_qualifier_suffix(rest)?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -4455,6 +4447,23 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
         // CR 608.2d: controller-directed selection, never random.
         selection: CardSelectionMode::Chosen,
     })
+}
+
+/// CR 108.3: shared grammar for the trailing ownership qualifier on
+/// zone-implicit card references. Supported forms:
+///   " you own"           → `Some(ControllerRef::You)`
+///   " an opponent owns"  → `Some(ControllerRef::Opponent)`
+///   <no qualifier>       → `None` (any player's card)
+/// Used by the suspended-card and exiled-card heads so the qualifier grammar
+/// lives in one place.
+fn parse_ownership_qualifier_suffix(input: &str) -> Option<(&str, Option<ControllerRef>)> {
+    type E<'a> = OracleError<'a>;
+    opt(alt((
+        value(ControllerRef::You, tag::<_, _, E>(" you own")),
+        value(ControllerRef::Opponent, tag(" an opponent owns")),
+    )))
+    .parse(input)
+    .ok()
 }
 
 /// CR 608.2d + CR 400.1 + CR 122.1: "choose a/an exiled card [you own | an
@@ -4474,12 +4483,7 @@ fn try_parse_choose_exiled_card_with_counter(lower: &str) -> Option<ChooseImpera
         .ok()?;
     let (rest, _) = alt((tag::<_, _, E>("an "), tag("a "))).parse(rest).ok()?;
     let (rest, _) = tag::<_, _, E>("exiled card").parse(rest).ok()?;
-    let (rest, owner) = opt(alt((
-        value(ControllerRef::You, tag::<_, _, E>(" you own")),
-        value(ControllerRef::Opponent, tag(" an opponent owns")),
-    )))
-    .parse(rest)
-    .ok()?;
+    let (rest, owner) = parse_ownership_qualifier_suffix(rest)?;
     let (rest, _) = tag::<_, _, E>(" ").parse(rest).ok()?;
     let (counter_prop, consumed) = crate::parser::oracle_target::parse_counter_suffix(rest)?;
     // The counter suffix must consume the whole remainder — leftovers mean a
@@ -4494,14 +4498,12 @@ fn try_parse_choose_exiled_card_with_counter(lower: &str) -> Option<ChooseImpera
         FilterProp::InZone { zone: Zone::Exile },
         counter_prop,
     ];
-    // CR 108.3: the searched exile partition follows the ownership qualifier —
-    // "an opponent owns" must enumerate the OPPONENTS' cards, not the
-    // controller's (a Controller-scoped search would find zero candidates and
-    // silently no-op the pick, CR 608.2d).
-    let zone_owner = match owner {
-        Some(ControllerRef::Opponent) => ZoneOwner::Opponent,
-        Some(_) | None => ZoneOwner::Controller,
-    };
+    // CR 400.1 + CR 108.3: exile is a zone shared by all players — scan every
+    // owner's partition (`AllOwners`) and let the ownership filter narrow.
+    // Any single-owner scope drops candidates: `ZoneOwner::Opponent` resolves
+    // to ONE opponent, but "an opponent owns" means any of them in multiplayer
+    // (and a Controller scope finds zero, silently no-opping the pick,
+    // CR 608.2d).
     if let Some(o) = owner {
         // CR 108.3: owned by the parsed player reference.
         properties.push(FilterProp::Owned { controller: o });
@@ -4510,7 +4512,7 @@ fn try_parse_choose_exiled_card_with_counter(lower: &str) -> Option<ChooseImpera
     Some(ChooseImperativeAst::FromZone {
         count: 1,
         zones: vec![Zone::Exile],
-        zone_owner,
+        zone_owner: ZoneOwner::AllOwners,
         filter: TargetFilter::Typed(TypedFilter::card().properties(properties)),
         chooser: Chooser::Controller,
         up_to: false,
@@ -18942,9 +18944,10 @@ mod tests {
                 assert_eq!(zones, vec![Zone::Exile]);
                 assert_eq!(
                     zone_owner,
-                    ZoneOwner::Opponent,
-                    "the opponents' exile partition must be searched — a \
-                     Controller scope finds zero candidates and no-ops the pick"
+                    ZoneOwner::AllOwners,
+                    "exile is shared — every owner's partition must be scanned; \
+                     any single-owner scope drops candidates (Controller finds \
+                     zero, Opponent only the first opponent in multiplayer)"
                 );
                 assert!(!up_to);
                 assert!(tf

@@ -143,9 +143,13 @@ fn drive_activation(runner: &mut GameRunner, walker: ObjectId, pick: ObjectId) -
 }
 
 #[test]
-fn a_sole_void_card_is_picked_automatically_and_playable_for_free() {
-    // CR 608.2d: a single legal candidate needs no prompt — the pick is made
-    // and the free-play permission must still land.
+fn a_sole_void_card_still_prompts_and_plays_for_free() {
+    // CR 608.2d: the controller announces the choice while applying the
+    // effect — this seam surfaces the `ChooseFromZoneChoice` even for a
+    // single legal candidate (no auto-pick path exists for it). Pinning that
+    // the prompt APPEARS is the regression guard against the original bug,
+    // where the pick was silently skipped; the chosen card must then play
+    // for free.
     let (mut runner, walker, orc) = voidwalker_board();
 
     runner
@@ -154,7 +158,12 @@ fn a_sole_void_card_is_picked_automatically_and_playable_for_free() {
             ability_index: 0,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
-    drive_activation(&mut runner, walker, orc);
+    let pick_seen = drive_activation(&mut runner, walker, orc);
+    assert!(
+        pick_seen,
+        "the pick prompt must be offered even for a single legal candidate — \
+         its absence is the original silent-skip bug"
+    );
 
     assert_eq!(
         zone_of(&runner, walker),
