@@ -50237,13 +50237,13 @@ mod plot_from_library {
         let same_turn = runner.state().turn_number;
         let top_obj = runner.state().objects[&top].clone();
         assert!(
-            !has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn),
+            !has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn, None),
             "a card plotted this turn must NOT be free-castable until a later turn"
         );
         // LATER-TURN probe (CR 702.170d, gate is `>`): a turn later it IS
         // free-castable — proving the reused Plotted lifecycle is intact.
         assert!(
-            has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn + 1),
+            has_exile_cast_permission(runner.state(), &top_obj, P0, same_turn + 1, None),
             "on a later turn the plotted card must be free-castable"
         );
     }

@@ -3104,29 +3104,62 @@ pub(crate) fn effective_spell_keyword_kinds_for(
 
 /// Check if an object has any permission allowing it to be cast from exile.
 /// Uses explicit match arms (not `matches!`) so the compiler catches new variants.
+///
+/// `variant` is the casting method this zone-authority check serves. CR 118.9a
+/// ("Only one alternative cost can be applied to any one spell as it's being
+/// cast") + CR 601.2b ("A player can't apply two alternative methods of
+/// casting or two alternative costs to a single spell"): a permission that is
+/// itself an alternative cost — cast "without paying its mana cost" or for a
+/// substitute cost (`ExileWithAltCost`, ability costs, energy, plot, foretell)
+/// — cannot lend zone authority to the `FaceDown` {3} cast, which is a second
+/// alternative method+cost. Normal-cost routes (Adventure creature face,
+/// Warp's later cast, `PlayFromExile`, battlefield exile-cast statics) are
+/// method-agnostic zone authority and remain available to every variant.
 fn has_exile_cast_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
     turn_number: u32,
+    variant: Option<CastingVariant>,
 ) -> bool {
-    play_from_exile_permission_source(state, obj, player, turn_number).is_some()
-        || obj.casting_permissions.iter().any(|p| match p {
-            crate::types::ability::CastingPermission::AdventureCreature
-            | crate::types::ability::CastingPermission::ExileWithEnergyCost => obj.owner == player,
+    // CR 601.2b: the face-down cast may only ride a normal-cost route.
+    let face_down = matches!(variant, Some(CastingVariant::FaceDown));
+    // CR 601.2b + CR 305.1: a `PlayFromExile` installed alongside an
+    // alternative-cost grant is the land/look companion of a "you may play it
+    // … without paying its mana cost" sentence (see `cast_from_zone.rs`), not
+    // a normal-cost cast route — while an alt-cost grant covers this player,
+    // it lends no face-down authority. Named limit: an independent impulse
+    // `PlayFromExile` coexisting with such a grant is suppressed too
+    // (conservative under CR 118.9a; the permissions carry no source link to
+    // tell the two apart).
+    let alt_cost_grant_covers_player = face_down
+        && obj.casting_permissions.iter().any(|p| match p {
             crate::types::ability::CastingPermission::ExileWithAltCost { .. }
             | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
                 exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+            }
+            _ => false,
+        });
+    (!alt_cost_grant_covers_player
+        && play_from_exile_permission_source(state, obj, player, turn_number).is_some())
+        || obj.casting_permissions.iter().any(|p| match p {
+            crate::types::ability::CastingPermission::AdventureCreature => obj.owner == player,
+            crate::types::ability::CastingPermission::ExileWithEnergyCost => {
+                !face_down && obj.owner == player
+            }
+            crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+                !face_down && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::PlayFromExile { .. } => false,
             crate::types::ability::CastingPermission::WarpExile {
                 castable_after_turn,
             } => obj.owner == player && turn_number > *castable_after_turn,
             crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
-                obj.owner == player && turn_number > *turn_plotted
+                !face_down && obj.owner == player && turn_number > *turn_plotted
             }
             crate::types::ability::CastingPermission::Foretold { turn_foretold, .. } => {
-                obj.owner == player && turn_number > *turn_foretold
+                !face_down && obj.owner == player && turn_number > *turn_foretold
             }
         })
         // CR 601.2a + CR 113.6b: A `StaticMode::ExileCastPermission` static on a
@@ -3183,7 +3216,7 @@ fn exile_object_castable_by_permission(
     player: PlayerId,
 ) -> bool {
     play_from_exile_object_in_cast_path(obj)
-        && has_exile_cast_permission(state, obj, player, state.turn_number)
+        && has_exile_cast_permission(state, obj, player, state.turn_number, None)
 }
 
 pub(super) fn cast_permission_constraint_allows_cast(
@@ -6225,7 +6258,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // are excluded in both zones (CR 305.1) via
     // `play_from_exile_object_in_cast_path`.
     let has_object_tagged_play_permission = play_from_exile_object_in_cast_path(obj)
-        && has_exile_cast_permission(state, obj, player, state.turn_number);
+        && has_exile_cast_permission(state, obj, player, state.turn_number, variant_override);
     let has_madness = obj.zone == Zone::Exile
         && matches!(variant_override, Some(CastingVariant::Madness))
         && obj.owner == player
@@ -6318,9 +6351,20 @@ fn prepare_spell_cast_with_variant_override_inner(
     let has_unowned_exile_permission = obj.zone == Zone::Exile
         && obj.owner != player
         && has_alt_cost_permission_for(obj, state, player);
-    let castable_zone = has_unowned_exile_permission
+    // CR 118.9a ("Only one alternative cost can be applied to any one spell
+    // as it's being cast") + CR 601.2b ("A player can't apply two alternative
+    // methods of casting or two alternative costs to a single spell"): an
+    // alternative-cost authority — exile/graveyard alt-cost grants,
+    // during-resolution free-cast windows, graveyard cast keywords — cannot
+    // admit the {3} face-down cast, which is itself an alternative
+    // method+cost. Normal-cost authorities (hand, command zone,
+    // `has_object_tagged_play_permission` = PlayFromExile/Adventure/Warp,
+    // Lurrus-class graveyard permissions, top-of-library play) admit every
+    // variant: there the face-down {3} is the single alternative applied.
+    let face_down_variant = variant_override == Some(CastingVariant::FaceDown);
+    let castable_zone = (!face_down_variant
+        && (has_unowned_exile_permission || has_during_resolution_alt_cost))
         || has_object_tagged_play_permission
-        || has_during_resolution_alt_cost
         || (obj.owner == player
             && (obj.zone == Zone::Hand
                 || (state.format_config.command_zone
@@ -6331,10 +6375,9 @@ fn prepare_spell_cast_with_variant_override_inner(
                     && obj.is_signature_spell()
                     && oathbreaker_on_battlefield(state, player))
                 || has_madness
-                || has_graveyard_cast_keyword
-                || has_mayhem
+                || (!face_down_variant
+                    && (has_graveyard_cast_keyword || has_mayhem || has_graveyard_alt_cost))
                 || has_graveyard_permission
-                || has_graveyard_alt_cost
                 || has_top_of_library_permission));
     if !castable_zone {
         return Err(EngineError::InvalidAction(
