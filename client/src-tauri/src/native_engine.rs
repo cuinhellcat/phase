@@ -22,6 +22,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::native_bridge::BridgeHandle;
+use crate::native_engine_contract::{
+    NativeEngineError, NativeEngineKey, NativeEngineProgress, NativeEngineProgressPhase,
+    NativeEngineReady,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -47,14 +51,6 @@ const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(250);
-
-/// A server artifact identity supplied by first-party remote content.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativeEngineKey {
-    Release { version: String },
-    Preview { fingerprint: String },
-}
 
 impl NativeEngineKey {
     fn channel(&self) -> &'static str {
@@ -98,69 +94,6 @@ impl NativeEngineKey {
             )),
         }
     }
-}
-
-/// The only successful IPC response for `ensure_native_engine`.
-#[derive(Clone, Debug, Serialize)]
-pub struct NativeEngineReady {
-    pub port: u16,
-}
-
-/// Progress emitted while the shell prepares a native engine.
-#[derive(Clone, Debug, Serialize)]
-pub struct NativeEngineProgress {
-    pub phase: NativeEngineProgressPhase,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativeEngineProgressPhase {
-    Resolving,
-    DownloadingBinary,
-    Verifying,
-    DownloadingData,
-    Spawning,
-    Ready,
-    Failed,
-}
-
-/// Structured IPC failures let the frontend choose its normal WASM fallback.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NativeEngineError {
-    InvalidKey {
-        detail: String,
-    },
-    #[allow(dead_code)]
-    UnsupportedPlatform {
-        detail: String,
-    },
-    Download {
-        detail: String,
-    },
-    Verification {
-        detail: String,
-    },
-    Manifest {
-        detail: String,
-    },
-    Downgrade {
-        detail: String,
-    },
-    Storage {
-        detail: String,
-    },
-    Spawn {
-        detail: String,
-    },
-    Health {
-        detail: String,
-    },
-    Internal {
-        detail: String,
-    },
 }
 
 impl NativeEngineError {

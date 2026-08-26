@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-import { isTauri } from "./platform";
+import { isDesktopTauri } from "./platform";
 
 export type NativeEngineKey =
   | { release: { version: string } }
@@ -46,7 +46,7 @@ export function nativeEngineKeyForCurrentOrigin(): NativeEngineKey | null {
 
 /** Native routing is only available from a supported desktop origin. */
 export function canAttemptNativeEngine(enabled: boolean): boolean {
-  return enabled && isTauri() && nativeEngineKeyForCurrentOrigin() !== null;
+  return enabled && isDesktopTauri() && nativeEngineKeyForCurrentOrigin() !== null;
 }
 
 /**
@@ -84,6 +84,9 @@ export function useNativeEngineProvisioning(): boolean {
 
 /** Feature-detects the shell command at invocation time for plain-web fallback. */
 export async function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEngineReady> {
+  if (!isDesktopTauri()) {
+    throw new Error("Native engine provisioning is available only in the desktop shell.");
+  }
   setProvisioningCalls(provisioningCalls + 1);
   try {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -95,7 +98,7 @@ export async function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEn
 
 /** Returns progress emitted before this webview registered its listener. */
 export async function getNativeEngineProgress(): Promise<NativeEngineProgress | null> {
-  if (!isTauri()) return null;
+  if (!isDesktopTauri()) return null;
 
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<NativeEngineProgress | null>("native_engine_progress");
@@ -105,7 +108,7 @@ export async function getNativeEngineProgress(): Promise<NativeEngineProgress | 
 export async function subscribeNativeEngineProgress(
   listener: (progress: NativeEngineProgress) => void,
 ): Promise<() => void> {
-  if (!isTauri()) return () => {};
+  if (!isDesktopTauri()) return () => {};
 
   const { listen } = await import("@tauri-apps/api/event");
   return listen<NativeEngineProgress>("native-engine-progress", ({ payload }) => listener(payload));

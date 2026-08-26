@@ -94,6 +94,17 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * admitted; see the gate for why.
  *
  * Bumps to date:
+ *  28 — PayCostKind::TapCreatures changed from { aggregate } to a required
+ *       { mode } (Fixed/VariableX/Aggregate) — the fix that also unlocks
+ *       the u32::MAX X-sentinel tap-cost form (Glacian, Powerstone Engineer
+ *       + 8 sibling cards, #7799). mode carries no serde default, so a
+ *       GameState snapshot paused mid-TapCreatures payment under the old
+ *       aggregate shape now fails to deserialize instead of risking a
+ *       silent fixed/aggregate misclassification. game_setup and
+ *       reconnect_ack both carry the full GameState, so this P2P track is
+ *       broken by the same change as the full-game PROTOCOL_VERSION track
+ *       (see crates/lobby-broker/src/protocol.rs entry 37) and must bump
+ *       in lockstep with it.
  *  27 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
  *       DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
  *       required dungeon_name, and changed options from number[] to
@@ -157,7 +168,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 27 as const;
+export const WIRE_PROTOCOL_VERSION = 28 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   // `wireProtocolVersion` is optional on both first-contact guest messages:

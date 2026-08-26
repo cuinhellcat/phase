@@ -10020,14 +10020,16 @@ impl SacrificeRequirement {
 /// Aggregate statistic for a tap-creatures-cost selection constraint.
 ///
 /// CR 208.1: power is the aggregate axis. Currently only `TotalPower` (Crew
-/// CR 702.122a, Saddle CR 702.171a, Teamwork). Mirrors `SacrificeAggregateStat`.
+/// CR 702.122a, Saddle CR 702.171a, Teamwork CR 702.194a). Mirrors
+/// `SacrificeAggregateStat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TapCreaturesAggregateStat {
     TotalPower,
 }
 
 /// CR 601.2f + CR 208.1: The aggregate constraint a `TapCreatures` cost payment
-/// must satisfy (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Snapshots
+/// must satisfy (Crew CR 702.122a / Saddle CR 702.171a / Teamwork
+/// CR 702.194a). Snapshots
 /// the `TapCreaturesRequirement::Aggregate` `{ stat, comparator, value }` triple
 /// into the interactive payment state (`PayCostKind::TapCreatures`) so the
 /// candidate enumerator and selection validator honor the advertised comparator
@@ -10054,9 +10056,9 @@ impl TapCreaturesAggregate {
 /// `Count { count }` is the fixed-number form (Conspire's "tap two creatures",
 /// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value }` is
 /// the "tap any number of creatures with total power N or greater" form used by
-/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork. Mirrors
-/// `SacrificeRequirement` so the two cost families share one parameterization
-/// shape.
+/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork (CR 702.194a).
+/// Mirrors `SacrificeRequirement` so the two cost families share one
+/// parameterization shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "requirement", rename_all = "snake_case")]
 pub enum TapCreaturesRequirement {
@@ -10076,6 +10078,30 @@ impl Default for TapCreaturesRequirement {
     fn default() -> Self {
         Self::Count { count: 1 }
     }
+}
+
+/// CR 107.3a + CR 208.1: the three mutually exclusive selection semantics a
+/// `TapCreatures` cost can carry. Computed once from `TapCreaturesRequirement`
+/// at registration time (`TapCreaturesRequirement::selection_mode`) and carried
+/// verbatim through `WaitingFor::PayCost` to the completion handler, so no seam
+/// ever re-derives "is this X" from an ambiguous signal like `min_count == 0` —
+/// aggregate selections also have a zero floor (CR 208.1's "any subset
+/// satisfying the power threshold"), which is exactly the conflation this type
+/// exists to make unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TapCreaturesSelectionMode {
+    /// A fixed, non-X requirement (`count != u32::MAX`). The chosen count must
+    /// equal `count` exactly (`min_count == count`).
+    Fixed,
+    /// CR 107.3a's `u32::MAX` X-sentinel ("Tap X untapped … you control"). The
+    /// chosen count ranges freely over `[0, eligible]` and — if and only if the
+    /// mode is `VariableX` — the completion handler binds the resolving
+    /// ability's X to the chosen count.
+    VariableX,
+    /// CR 208.1 Crew (CR 702.122a) / Saddle (CR 702.171a) / Teamwork
+    /// (CR 702.194a): any subset whose total positive power satisfies the
+    /// comparator. Never binds X.
+    Aggregate(TapCreaturesAggregate),
 }
 
 impl TapCreaturesRequirement {
@@ -10102,6 +10128,30 @@ impl TapCreaturesRequirement {
 
     pub fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
+    }
+
+    /// CR 107.3a + CR 208.1: the single authority for a `TapCreatures` cost's
+    /// selection semantics. Every registration site computes this once and
+    /// carries the result through `PayCostKind::TapCreatures`, so downstream
+    /// seams never re-derive "is this an X cost" from `min_count == 0` (which an
+    /// aggregate selection also has).
+    pub fn selection_mode(&self) -> TapCreaturesSelectionMode {
+        match self {
+            // CR 107.3a: `u32::MAX` is the X-sentinel for "Tap X untapped … you
+            // control", whose value the controller announces as the chosen
+            // count rather than reading it off the requirement.
+            Self::Count { count } if *count == u32::MAX => TapCreaturesSelectionMode::VariableX,
+            Self::Count { .. } => TapCreaturesSelectionMode::Fixed,
+            Self::Aggregate {
+                stat,
+                comparator,
+                value,
+            } => TapCreaturesSelectionMode::Aggregate(TapCreaturesAggregate {
+                stat: *stat,
+                comparator: *comparator,
+                value: *value,
+            }),
+        }
     }
 }
 
@@ -22691,6 +22741,12 @@ pub enum TriggerCondition {
     /// controller's mutable `state.ring_bearer`. This retains the trigger-time
     /// choice if a later Ring temptation changes the current Ring-bearer.
     ChoseOtherRingBearer,
+    /// CR 701.54a/d: "Whenever you choose a creature as your Ring-bearer"
+    /// (Call of the Ring). True when the triggering
+    /// `GameEvent::RingTemptsYou` carries a `chosen_bearer` — a temptation
+    /// with no legal candidates chooses nothing and must not fire this —
+    /// and the chooser is the trigger's controller.
+    ChoseRingBearer,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -23151,6 +23207,7 @@ impl TriggerCondition {
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
             | TriggerCondition::ChoseOtherRingBearer
+            | TriggerCondition::ChoseRingBearer
             | TriggerCondition::ControlsType { .. }
             | TriggerCondition::NoSpellsCastLastTurn
             | TriggerCondition::TwoOrMoreSpellsCastLastTurn

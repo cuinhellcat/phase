@@ -45,7 +45,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
-import { isTauri } from "../../services/platform.ts";
+import { isDesktopTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
@@ -438,7 +438,7 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
-                  {isTauri() && (
+                  {isDesktopTauri() && (
                     <label className="mt-1 flex min-h-11 items-start gap-2">
                       <input
                         type="checkbox"

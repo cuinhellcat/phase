@@ -203,6 +203,18 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 37 — PayCostKind::TapCreatures changed from { aggregate:
+ *      Option<TapCreaturesAggregate> } to a required { mode:
+ *      TapCreaturesSelectionMode } (Fixed/VariableX/Aggregate) — the fix that
+ *      also unlocks the u32::MAX X-sentinel tap-cost form (Glacian,
+ *      Powerstone Engineer + 8 sibling cards, #7799). mode carries no serde
+ *      default: a GameState snapshot paused mid-TapCreatures payment
+ *      (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked X-sentinel form)
+ *      under the old aggregate shape now fails deserialization rather than
+ *      risk silently misclassifying an aggregate payment as fixed-count (or
+ *      vice versa) — exactly the ambiguity TapCreaturesSelectionMode exists to
+ *      make unrepresentable. Old and new peers can't parse each other's
+ *      serialized snapshots while such a payment is in flight.
  * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
  *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
  *      required dungeon_name, and changed options from number[] to
@@ -280,7 +292,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 36;
+export const PROTOCOL_VERSION = 37;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

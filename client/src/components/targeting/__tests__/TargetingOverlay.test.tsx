@@ -186,7 +186,7 @@ describe("TargetingOverlay", () => {
         type: "PayCost",
         data: {
           player: 0,
-          kind: { type: "TapCreatures" },
+          kind: { type: "TapCreatures", mode: "VariableX" },
           choices: [7],
           count: 1,
           min_count: 0,
@@ -235,7 +235,7 @@ describe("TargetingOverlay", () => {
         type: "PayCost",
         data: {
           player: 0,
-          kind: { type: "TapCreatures" },
+          kind: { type: "TapCreatures", mode: "VariableX" },
           choices: [7],
           count: 1,
           min_count: 0,
@@ -266,11 +266,111 @@ describe("TargetingOverlay", () => {
       useUiStore.setState({ selectedCardIds: [7] });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Tap (1/1)" }));
+    // min_count: 0 makes this a legal [0,1] range, not an exact-1 requirement
+    // (the same min_count-honoring fix this file's other new test covers) —
+    // the generic range-count confirm label renders here, not "Confirm Tap".
+    fireEvent.click(screen.getByRole("button", { name: "Confirm (1/1)" }));
 
     expect(dispatch).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [7] },
+    });
+  });
+
+  it("confirms an X-style tap cost paid below the maximum eligible count", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Memnite" }),
+        buildGameObjectWithCoreTypes(["Creature"], { id: 8, name: "Ornithopter" }),
+        buildGameObjectWithCoreTypes(["Creature"], { id: 9, name: "Phyrexian Walker" }),
+      ),
+      waiting_for: {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "TapCreatures", mode: "VariableX" },
+          choices: [7, 8, 9],
+          // The engine offers X = 1..3 here; paying X = 1 must be confirmable.
+          count: 3,
+          min_count: 1,
+          resume: { type: "Resolution" },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [7] });
+    });
+
+    const confirm = screen.getByRole("button", { name: "Confirm (1/3)" });
+    expect(confirm).not.toBeDisabled();
+
+    fireEvent.click(confirm);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [7] },
+    });
+  });
+
+  it("gates an aggregate TapCreatures PayCost and submits SelectCards on a qualifying subset", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], { id: 7, name: "Memnite", power: 1 }),
+        buildGameObjectWithCoreTypes(["Creature"], { id: 8, name: "Ornithopter", power: 1 }),
+      ),
+      waiting_for: {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: {
+            type: "TapCreatures",
+            mode: { Aggregate: { stat: "TotalPower", comparator: "GE", value: 2 } },
+          },
+          choices: [7, 8],
+          count: 2,
+          min_count: 0,
+          resume: { type: "Resolution" },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for, dispatch });
+    });
+
+    render(<TargetingOverlay />);
+
+    // Below threshold: one 1-power creature selected, but the cost needs 2.
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [7] });
+    });
+    expect(screen.getByRole("button", { name: "Confirm (1/2 power)" })).toBeDisabled();
+
+    // Qualifying subset: both creatures selected, total power 2.
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [7, 8] });
+    });
+    const aggregateConfirm = screen.getByRole("button", { name: "Confirm (2/2 power)" });
+    expect(aggregateConfirm).not.toBeDisabled();
+
+    fireEvent.click(aggregateConfirm);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [7, 8] },
     });
   });
 

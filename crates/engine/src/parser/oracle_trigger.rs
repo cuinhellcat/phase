@@ -13017,6 +13017,22 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::RingTemptsYou;
         return Some((TriggerMode::RingTemptsYou, def));
     }
+
+    // CR 701.54a: "Whenever you choose a creature as your Ring-bearer" — the
+    // same temptation event, gated on a choice actually having been made
+    // (Call of the Ring). The gate rides in `def.condition`, which the
+    // caller ANDs with any additional intervening-if.
+    if all_consuming(pair(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("you choose a creature as your ring-bearer"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::RingTemptsYou;
+        def.condition = Some(TriggerCondition::ChoseRingBearer);
+        return Some((TriggerMode::RingTemptsYou, def));
+    }
     None
 }
 

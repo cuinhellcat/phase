@@ -3373,6 +3373,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             sibling: false,
             projected: false,
         },
+        // Same event-bound read as `ChoseOtherRingBearer`: the chooser and
+        // the chosen bearer live on the triggering temptation event.
+        TriggerCondition::ChoseRingBearer => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         TriggerCondition::FirstCombatPhaseOfTurn => Axes {
             event: false,
             sibling: false,
@@ -8173,6 +8180,19 @@ mod tests {
             &TriggerCondition::ChoseOtherRingBearer,
             ScanMode::Conservative,
         );
+        assert!(axes.event, "must be event-bound");
+        assert!(!axes.sibling);
+        assert!(!axes.projected);
+    }
+
+    /// #7816: same event-bound classification as its `ChoseOtherRingBearer`
+    /// sibling — chooser and bearer live on the triggering temptation.
+    #[test]
+    fn chose_ring_bearer_is_event_bound() {
+        use crate::types::ability::TriggerCondition;
+
+        let axes =
+            scan_trigger_condition(&TriggerCondition::ChoseRingBearer, ScanMode::Conservative);
         assert!(axes.event, "must be event-bound");
         assert!(!axes.sibling);
         assert!(!axes.projected);
