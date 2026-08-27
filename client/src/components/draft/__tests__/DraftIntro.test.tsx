@@ -3,6 +3,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 
 import { DraftIntro } from "../DraftIntro";
 
+afterEach(cleanup);
+
 describe("DraftIntro", () => {
   afterEach(cleanup);
 
@@ -45,5 +47,35 @@ describe("DraftIntro", () => {
     // Non-vacuous: the positive assertions above prove this render mounted, so
     // the absent Commander step is a real absence.
     expect(screen.queryByText("Pick two cards from each pack, then pass the rest")).toBeNull();
+  });
+
+  it("lists every booster's size when a multi-set draft mixes them", () => {
+    render(
+      <DraftIntro
+        mode="quick"
+        packCount={3}
+        cardsPerPack={15}
+        packSizes={[15, 14, 15]}
+        onContinue={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("You'll open 3 packs of mixed sizes — 15, 14, 15 cards, in that order"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the single-size line when every booster agrees", () => {
+    render(
+      <DraftIntro
+        mode="quick"
+        packCount={3}
+        cardsPerPack={15}
+        packSizes={[15, 15, 15]}
+        onContinue={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("You'll open 3 packs of 15 cards each")).toBeInTheDocument();
   });
 });

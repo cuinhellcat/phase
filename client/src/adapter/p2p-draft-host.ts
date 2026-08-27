@@ -118,6 +118,15 @@ type DraftHostEventListener = (event: DraftHostEvent) => void;
 /** Default grace window for guest reconnect during draft. */
 const DRAFT_GRACE_PERIOD_MS = 60_000;
 
+/**
+ * Booster size the lobby view advertises before any pack is opened. A POOL
+ * property, not a `DraftProcedure` axis — the host has no session to read one
+ * from, and the authoritative view replaces it the moment the draft starts.
+ * Named so `cards_per_pack` and the `pack_sizes` array it fills cannot drift
+ * apart. See `buildLobbyView`.
+ */
+const LOBBY_PLACEHOLDER_CARDS_PER_PACK = 14;
+
 /** Arena-style escalating pick timer durations (ms). Index = pick number (0-based). */
 const PICK_TIMER_DURATIONS_MS: readonly number[] = [
   75_000, 70_000, 65_000, 58_000, 52_000, 46_000,
@@ -1651,7 +1660,12 @@ export class P2PDraftHost {
     }
 
     const [opponent, ...aiDecks] = decks;
-    return { player, opponent, ai_decks: aiDecks, draft_set_code: view.draft_set_code };
+    return {
+      player,
+      opponent,
+      ai_decks: aiDecks,
+      draft_set_codes: view.draft_set_codes,
+    };
   }
 
   private async dispatchMatchLaunch(pairing: PairingView, view: DraftPlayerView): Promise<void> {
@@ -2709,7 +2723,28 @@ export class P2PDraftHost {
       // rather than wrong for CommanderDraft. This is a pre-draft placeholder
       // view that the real session view replaces once the draft starts; not a
       // missed kind-derived hardcode.
-      cards_per_pack: 14,
+      cards_per_pack: LOBBY_PLACEHOLDER_CARDS_PER_PACK,
+      // Mirrors what `filter_for_player` publishes for a session that has
+      // opened nothing: `pack_size_sequence()` falls back to the uniform
+      // `cards_per_pack` for every pack, and the lobby's own `cards_per_pack`
+      // above is that uniform value. The length is read from the procedure
+      // rather than hardcoded, so a kind whose pack count differs does not get
+      // a 3-element array. A multi-set draft's real per-pack sizes replace
+      // these the moment the draft starts.
+      pack_sizes: Array<number>(this.procedure.packs_per_player).fill(
+        LOBBY_PLACEHOLDER_CARDS_PER_PACK,
+      ),
+      // Empty strings, not fabricated codes: the lobby host has no
+      // `DraftSource`, so there is no engine answer for which set fills each
+      // booster. `""` is the one value no reachable producer publishes — every
+      // path that fills `pack_set_code_sequence` names a real set or cube id —
+      // so it cannot be read as an engine answer.
+      pack_set_codes: Array<string>(this.procedure.packs_per_player).fill(""),
+      // Zeroes, for the same reason the scalar below is 0: there is no
+      // engine-derived step count to publish before a session exists, and 0 is
+      // a value no reachable producer emits. Sized from the procedure so the
+      // array agrees with `pack_count`.
+      pack_pick_steps: Array<number>(this.procedure.packs_per_player).fill(0),
       // 0, not a step count: the lobby host has no session, and its own
       // `cards_per_pack` above is a POOL placeholder rather than a config
       // value — so there is no engine-derived answer to publish here. Deriving
@@ -2726,8 +2761,8 @@ export class P2PDraftHost {
       // Note which precedent applies: `required_pick_count: 0` above justifies
       // its `0` as a value production DOES emit (a seat with no pending pack).
       // That ground does not transfer — there is no production state that
-      // yields 0 steps. The ground here is `cards_per_pack: 14`'s: an
-      // acknowledged placeholder, wrong uniformly rather than kind-selectively.
+      // yields 0 steps. The ground here is `cards_per_pack`'s: an acknowledged
+      // placeholder, wrong uniformly rather than kind-selectively.
       pick_steps_per_pack: 0,
       pack_count: this.procedure.packs_per_player,
       min_deck_size: this.procedure.min_deck_size,

@@ -14565,6 +14565,7 @@ fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
                 qty: QuantityRef::ControlledByEachPlayer {
                     filter: filter.clone(),
                     aggregate: AggregateFunction::Min,
+                    relation: PlayerRelation::All,
                 },
             };
             Effect::Sacrifice {
@@ -15201,6 +15202,7 @@ fn parse_uneven_land_search_ir(
         qty: QuantityRef::ControlledByEachPlayer {
             filter: lands.clone(),
             aggregate: extremum,
+            relation: PlayerRelation::All,
         },
     };
     let difference = QuantityExpr::Difference {

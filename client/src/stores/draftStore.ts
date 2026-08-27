@@ -2,8 +2,10 @@ import { create } from "zustand";
 
 import {
   DraftAdapter,
+  distinctJoined,
   type CubeDraftSettings,
   type DraftPlayerView,
+  type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import { useGameStore } from "./gameStore";
@@ -28,6 +30,30 @@ import type {
 // ── Types ───────────────────────────────────────────────────────────────
 
 export type DraftPhase = "setup" | "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
+
+/** One booster of a local set draft: which set fills it, and that set's name. */
+export interface DraftPackChoice {
+  code: string;
+  name: string;
+}
+
+/**
+ * A set-backed local draft's boosters, in the order the player arranged them,
+ * plus the `draft-pools.json` entry for each distinct set they named. A set may
+ * appear in `packs` more than once; `pools` still carries it once.
+ */
+export interface DraftSetSelection {
+  packs: DraftPackChoice[];
+  pools: unknown[];
+}
+
+/** The WASM-boundary payload for a set selection. */
+function packSequence(selection: DraftSetSelection): SetPackSequence {
+  return {
+    pools: selection.pools,
+    sequence: selection.packs.map((pack) => pack.code),
+  };
+}
 export type LocalDraftKind = "Quick" | "Sealed";
 export type PoolSortMode = "color" | "type" | "cmc";
 
@@ -50,8 +76,8 @@ interface DraftStoreState {
 }
 
 interface DraftStoreActions {
-  startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
-  startSealedDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
+  startDraft: (selection: DraftSetSelection, difficulty: number) => Promise<void>;
+  startSealedDraft: (selection: DraftSetSelection, difficulty: number) => Promise<void>;
   startCubeDraft: (cubeListText: string, cubeName: string, settings: CubeDraftSettings, difficulty: number) => Promise<void>;
   completeSealedOpening: () => void;
   resumeDraft: () => Promise<void>;
@@ -216,7 +242,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
   (set, get) => ({
     ...initialState,
 
-    startDraft: async (setPoolJson, setCode, setName, difficulty) => {
+    startDraft: async (selection, difficulty) => {
       const oldMeta = loadActiveQuickDraft();
       if (oldMeta) {
         void clearDraftRun(oldMeta.id);
@@ -231,7 +257,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       }
 
       const seed = Math.floor(Math.random() * 0xffffffff);
-      const view = await adapter.initialize(setPoolJson, difficulty, seed);
+      const view = await adapter.initialize(packSequence(selection), difficulty, seed);
       const draftId = crypto.randomUUID();
 
       set({
@@ -240,8 +266,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         view,
         phase: "drafting",
         difficulty,
-        selectedSet: setCode,
-        selectedSetName: setName,
+        selectedSet: distinctJoined(selection.packs.map((p) => p.code), "+"),
+        selectedSetName: distinctJoined(selection.packs.map((p) => p.name), " · "),
         kind: "Quick",
         selectedCard: null,
         mainDeck: [],
@@ -252,7 +278,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       persistDraft();
     },
 
-    startSealedDraft: async (setPoolJson, setCode, setName, difficulty) => {
+    startSealedDraft: async (selection, difficulty) => {
       const oldMeta = loadActiveQuickDraft();
       if (oldMeta) void clearDraftRun(oldMeta.id);
 
@@ -260,7 +286,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const resp = await fetch(__CARD_DATA_URL__);
       await adapter.loadCardDatabase(await resp.text());
       const view = await adapter.initializeSealed(
-        setPoolJson,
+        packSequence(selection),
         difficulty,
         Math.floor(Math.random() * 0xffffffff),
       );
@@ -271,8 +297,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         view,
         phase: "opening",
         difficulty,
-        selectedSet: setCode,
-        selectedSetName: setName,
+        selectedSet: distinctJoined(selection.packs.map((p) => p.code), "+"),
+        selectedSetName: distinctJoined(selection.packs.map((p) => p.name), " · "),
         kind: "Sealed",
         selectedCard: null,
         mainDeck: [],

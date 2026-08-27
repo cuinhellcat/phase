@@ -72,6 +72,9 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -136,7 +139,7 @@ describe("ServerDraftAdapter", () => {
     // Start a createDraft flow — this triggers attachSocket.
     const createPromise = adapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",
@@ -190,7 +193,7 @@ describe("ServerDraftAdapter", () => {
     const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
     const createPromise = setupFailingAdapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",

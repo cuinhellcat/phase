@@ -12,7 +12,7 @@ use crate::types::*;
 use crate::validation::{validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::{draft_set_concessions, DraftSetConcessions};
+use engine::game::deck_validation::{draft_set_concessions_for, DraftSetConcessions};
 
 impl DraftSession {
     /// The round that pairings may next be generated for.
@@ -39,6 +39,7 @@ impl DraftSession {
             status: DraftStatus::Lobby,
             pass_direction: PassDirection::for_pack(0),
             current_pack_number: 0,
+            pack_sizes: Vec::new(),
             pick_number: 0,
             seats_picked_this_round: SeatFlags::all_false(pod_size as u8),
             connected_seats: SeatFlags::all_true(pod_size as u8),
@@ -57,6 +58,56 @@ impl DraftSession {
         }
     }
 
+    /// Cards booster `pack_number` held when it was opened.
+    ///
+    /// The single read path for pack shape. Uses the sizes recorded at
+    /// `StartDraft` when present, and falls back to the uniform
+    /// `config.cards_per_pack` for snapshots written before per-pack sizes
+    /// existed (and for sessions still in Lobby, which have opened nothing).
+    pub fn cards_in_pack(&self, pack_number: u8) -> u8 {
+        entry_for_pack(&self.pack_sizes, pack_number)
+            .copied()
+            .unwrap_or(self.config.cards_per_pack)
+    }
+
+    /// Cards a single seat opens across every booster of the session.
+    pub fn total_pack_cards(&self) -> usize {
+        if self.pack_sizes.is_empty() {
+            return usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        }
+        self.pack_sizes.iter().copied().map(usize::from).sum()
+    }
+
+    /// Booster sizes for every pack of the session, in pack order. Derived so
+    /// clients render progress without reconstructing pack shape themselves.
+    pub fn pack_size_sequence(&self) -> Vec<u8> {
+        (0..self.config.pack_count)
+            .map(|pack| self.cards_in_pack(pack))
+            .collect()
+    }
+
+    /// The set filling every booster of the session, in pack order.
+    pub fn pack_set_code_sequence(&self) -> Vec<String> {
+        (0..self.config.pack_count)
+            .map(|pack| self.config.source.set_code_for_pack(pack))
+            .collect()
+    }
+
+    /// CR 903.13b: pick STEPS in every booster of the session, in pack order.
+    ///
+    /// The per-pack counterpart of [`DraftProcedure::pick_steps_per_pack`].
+    /// `pick_number` counts steps, not cards, so a progress display measures
+    /// each booster against this rather than against
+    /// [`Self::pack_size_sequence`] — a 14-card Commander pack is 7 steps. Both
+    /// axes vary independently: multi-set drafts differ in cards per pack, and
+    /// the kind's procedure decides how many cards one step takes.
+    pub fn pack_pick_step_sequence(&self) -> Vec<u8> {
+        let procedure = self.kind.procedure();
+        (0..self.config.pack_count)
+            .map(|pack| procedure.pick_steps_per_pack(self.cards_in_pack(pack)))
+            .collect()
+    }
+
     /// Validate the small set of invariants unique to persisted Sealed events.
     ///
     /// This is intentionally an import/restore boundary check. Reducer-created
@@ -73,10 +124,12 @@ impl DraftSession {
             PackDistribution::PickAndPass => return Ok(()),
             PackDistribution::AllAtOnce => {}
         }
-        let DraftSource::Set { code } = &self.config.source else {
+        if !matches!(self.config.source, DraftSource::Set { .. }) {
             return Err(DraftError::SealedRequiresSetSource);
-        };
-        if code != &self.config.set_code || self.set_code != self.config.set_code {
+        }
+        if self.config.source.set_code() != self.config.set_code
+            || self.set_code != self.config.set_code
+        {
             return Err(DraftError::InvalidSealedSnapshot {
                 reason: "set source and session codes must match".to_string(),
             });
@@ -112,8 +165,7 @@ impl DraftSession {
                 reason: "per-seat vectors do not match the core seats".to_string(),
             });
         }
-        let expected_pool_size =
-            usize::from(self.config.pack_count) * usize::from(self.config.cards_per_pack);
+        let expected_pool_size = self.total_pack_cards();
         if self.status != DraftStatus::Lobby
             && self
                 .pools
@@ -750,10 +802,15 @@ fn apply_start_draft(
     }
     match procedure.distribution {
         PackDistribution::AllAtOnce => {
-            let DraftSource::Set { code } = &session.config.source else {
+            if !matches!(session.config.source, DraftSource::Set { .. }) {
                 return Err(DraftError::SealedRequiresSetSource);
-            };
-            if code != &session.config.set_code || session.set_code != session.config.set_code {
+            }
+            // A multi-set source labels itself with its joined distinct codes,
+            // so the session label is compared against `set_code()` rather than
+            // against any single pack's set. Mirrors `validate_sealed_snapshot`.
+            if session.config.source.set_code() != session.config.set_code
+                || session.set_code != session.config.set_code
+            {
                 return Err(DraftError::InvalidSealedConfiguration {
                     reason: "set source and session codes must match".to_string(),
                 });
@@ -774,6 +831,22 @@ fn apply_start_draft(
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
     let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
+
+    // Record the shape of the boosters the source actually produced, in pack
+    // order. Every seat opens the same set in the same pack round, so seat 0's
+    // packs describe the session. Both distributions consume `all_packs` below,
+    // and picking mutates the packs from there on, so this is the only moment
+    // the original sizes are observable.
+    session.pack_sizes = all_packs
+        .first()
+        .map(|seat_packs| {
+            seat_packs
+                .iter()
+                .map(|pack| u8::try_from(pack.0.len()).unwrap_or(u8::MAX))
+                .collect()
+        })
+        .unwrap_or_default();
+
     match procedure.distribution {
         // Every pack goes straight to its own seat; there is no pick step, so
         // the event opens directly in deckbuilding.
@@ -822,7 +895,7 @@ fn apply_start_draft(
 }
 
 /// CR 903.13e + CR 903.13f(3): the deck-construction concessions this session's
-/// booster set makes, LATCHED from `config.source` at session creation and
+/// booster sets make, LATCHED from `config.source` at session creation and
 /// never re-derived from pool contents.
 ///
 /// Pool contents are not evidence of the grant IN EITHER DIRECTION: the
@@ -835,31 +908,56 @@ fn apply_start_draft(
 /// become `pub` -- outside draft-core the concessions are consumed from the
 /// published view field, never re-derived.
 pub(crate) fn session_concessions(session: &DraftSession) -> DraftSetConcessions {
-    concession_set_code(session)
-        .map(draft_set_concessions)
-        .unwrap_or_default()
+    draft_set_concessions_for(concession_set_codes(session))
 }
 
-/// CR 903.13e + CR 903.13f(3): the set code whose concessions this session
-/// carries, LATCHED from `config.source` at session creation. `None` when the
+/// CR 903.13e + CR 903.13f(3): every set whose draft boosters this session
+/// CONTAINED, LATCHED from `config.source` at session creation. EMPTY when the
 /// rules concede nothing -- a cube (which contains no draft boosters from any
 /// set) and every kind outside CR 903.13's scope.
 ///
-/// The single authority for "which set did this draft contain". Both
+/// The single authority for "which sets did this draft contain". Both
 /// `session_concessions` above and `view::filter_for_player`'s published
-/// `draft_set_code` read it, so the two can never disagree about a cube.
+/// `draft_set_codes` read it, so the two can never disagree about a cube.
 ///
 /// Both rules live in CR 903.13, which scopes them to Commander Draft, so every
 /// other kind concedes nothing. Both `match`es are wildcard-free: a sixth
 /// `DraftKind`, or a third `DraftSource`, must state its answer.
-pub(crate) fn concession_set_code(session: &DraftSession) -> Option<&str> {
+///
+/// PLURAL, and that is the rules-correct shape rather than a convenience.
+/// CR 903.13e/f condition each grant on whether "the draft contained draft
+/// boosters from" a named set, so a multi-set Commander Draft satisfies each
+/// named set's condition independently: a CMM+CLB draft concedes The Prismatic
+/// Piper AND Faceless One, and grants the CR 903.13f(3) partner ability because
+/// it contained Commander Masters boosters. Returning one representative code
+/// would drop the other set's grant; returning none would drop both. The union
+/// is taken by `draft_set_concessions_for`, which reads containment only -- so
+/// pack ORDER, repetition and casing cannot move the answer.
+///
+/// Distinct, in first-appearance order: a set names its condition once however
+/// many boosters it filled. This is a latched list of what the draft contained,
+/// not a per-pack sequence -- `DraftSource::set_code_for_pack` owns that axis.
+pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
     match session.kind {
         DraftKind::CommanderDraft => match &session.config.source {
-            DraftSource::Set { code } => Some(code.as_str()),
+            DraftSource::Set { codes } => {
+                let mut distinct: Vec<&str> = Vec::with_capacity(codes.len());
+                for code in codes {
+                    if !distinct
+                        .iter()
+                        .any(|held| held.eq_ignore_ascii_case(code.as_str()))
+                    {
+                        distinct.push(code.as_str());
+                    }
+                }
+                distinct
+            }
             // A cube contains no draft boosters from any set.
-            DraftSource::Cube { .. } => None,
+            DraftSource::Cube { .. } => Vec::new(),
         },
-        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => None,
+        DraftKind::Quick | DraftKind::Premier | DraftKind::Traditional | DraftKind::Sealed => {
+            Vec::new()
+        }
     }
 }
 
@@ -911,7 +1009,7 @@ fn apply_submit_deck(
         &pool_names,
         &session.config.addable_cards,
         session.config.min_deck_size,
-        concessions.filler.as_ref(),
+        &concessions.fillers,
         &commanders,
         // CR 903.3: the floor is the kind's, read from the procedure table.
         // This is the line that makes the value kind-derived rather than
@@ -984,12 +1082,14 @@ fn apply_submit_deck(
 mod tests {
     use super::*;
     use crate::pack_source::FixturePackSource;
+    // The one-set row of the concession table. The production latch reads the
+    // UNION (`draft_set_concessions_for`); these rows assert the union against
+    // its parts, so they need the per-set answer too.
+    use engine::game::deck_validation::draft_set_concessions;
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size,
@@ -1014,6 +1114,105 @@ mod tests {
         };
         let session = DraftSession::new(config, seats, "TEST-001".to_string());
         (session, source)
+    }
+
+    /// A source whose boosters differ in size by pack number — the shape a
+    /// multi-set draft produces when its sets have different MTGJSON booster
+    /// sizes. Sizes shorter than the pack count repeat their last entry, the
+    /// same rule the rest of the pack-ordered sequences follow.
+    struct MixedSizePackSource {
+        sizes: Vec<u8>,
+    }
+
+    impl PackSource for MixedSizePackSource {
+        fn generate_pack(
+            &self,
+            _rng: &mut dyn rand::RngCore,
+            seat: u8,
+            pack_number: u8,
+        ) -> DraftPack {
+            let size = entry_for_pack(&self.sizes, pack_number)
+                .copied()
+                .unwrap_or(0);
+            DraftPack(
+                (0..size)
+                    .map(|i| DraftCardInstance {
+                        instance_id: format!("MIX-{seat}-{pack_number}-{i}"),
+                        name: format!("Mixed {seat}-{pack_number}-{i}"),
+                        set_code: "MIX".to_string(),
+                        collector_number: format!("{}", i + 1),
+                        rarity: "common".to_string(),
+                        colors: Vec::new(),
+                        cmc: 0,
+                        type_line: String::new(),
+                        draft_effect: None,
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    #[test]
+    fn starting_a_draft_records_the_size_of_every_booster_it_opened() {
+        let (mut session, _) = test_session(2);
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+        };
+        let source = MixedSizePackSource {
+            sizes: vec![15, 14, 15],
+        };
+
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        assert_eq!(session.pack_sizes, vec![15, 14, 15]);
+        assert_eq!(session.cards_in_pack(0), 15);
+        assert_eq!(session.cards_in_pack(1), 14);
+        assert_eq!(session.total_pack_cards(), 44);
+        assert_eq!(
+            session.pack_set_code_sequence(),
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_recorded_pack_sizes_falls_back_to_the_uniform_size() {
+        // Snapshots written before per-pack sizes were recorded leave the
+        // sequence empty; the uniform config value still describes them.
+        let (session, _) = test_session(2);
+
+        assert!(session.pack_sizes.is_empty());
+        assert_eq!(session.cards_in_pack(0), 14);
+        assert_eq!(session.cards_in_pack(2), 14);
+        assert_eq!(session.total_pack_cards(), 42);
+    }
+
+    #[test]
+    fn a_mixed_size_sealed_pool_satisfies_the_snapshot_invariant() {
+        let (mut session, _) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = SEALED_PACK_COUNT;
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(); 3]
+                .into_iter()
+                .chain(vec!["BBB".to_string(); 3])
+                .collect(),
+        };
+        session.set_code = session.config.source.set_code();
+        session.config.set_code = session.set_code.clone();
+        let source = MixedSizePackSource {
+            sizes: vec![15, 15, 15, 14, 14, 14],
+        };
+
+        apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        assert_eq!(session.status, DraftStatus::Deckbuilding);
+        assert_eq!(session.total_pack_cards(), 87);
+        assert!(session.pools.iter().all(|pool| pool.len() == 87));
+        // The uniform scalar would have expected 6 × 14 = 84 and rejected this.
+        session
+            .validate_sealed_snapshot()
+            .expect("a mixed-size sealed pool is valid");
     }
 
     #[test]
@@ -1110,9 +1309,7 @@ mod tests {
         session.kind = DraftKind::Sealed;
         session.config.kind = DraftKind::Sealed;
         session.config.pack_count = 6;
-        session.config.source = DraftSource::Set {
-            code: "OTHER".to_string(),
-        };
+        session.config.source = DraftSource::single_set("OTHER".to_string());
 
         assert!(matches!(
             apply(&mut session, DraftAction::StartDraft, Some(&source)),
@@ -1305,9 +1502,7 @@ mod tests {
     #[test]
     fn submit_deck_all_submitted_quick_draft_transitions_to_complete() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
             pod_size: 2,
@@ -2041,9 +2236,7 @@ mod tests {
     #[test]
     fn test_se_bracket_8_players() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,
@@ -2080,9 +2273,7 @@ mod tests {
     #[test]
     fn single_elimination_advances_pairing_winners() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,
@@ -2695,9 +2886,7 @@ mod tests {
         let (mut session, _) = test_session(4);
         session.kind = DraftKind::CommanderDraft;
         session.config.kind = DraftKind::CommanderDraft;
-        session.config.source = DraftSource::Set {
-            code: set_code.to_string(),
-        };
+        session.config.source = DraftSource::single_set(set_code);
         session
     }
 
@@ -2713,15 +2902,100 @@ mod tests {
             "a CMM Commander Draft must concede exactly what CR 903.13e/f say CMM concedes"
         );
         assert!(
-            session_concessions(&commander_draft_session("CMM"))
-                .filler
-                .is_some(),
+            !session_concessions(&commander_draft_session("CMM"))
+                .fillers
+                .is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set"
         );
         assert_eq!(
             session_concessions(&commander_draft_session("NEO")),
             DraftSetConcessions::default(),
             "CR 903.13e names no set outside its own list"
+        );
+    }
+
+    /// Multi-set sources -- CR 903.13e/f condition each grant on what the draft
+    /// CONTAINED, so a Commander Draft whose boosters came from several sets
+    /// carries every grant those sets make.
+    ///
+    /// A repeated granting code is still one set, so it concedes exactly what
+    /// the single-set draft does -- that half proves the latch reads set
+    /// IDENTITY and not sequence length, and it is the shape a multi-set
+    /// selection produces for an ordinary three-pack CMM draft.
+    ///
+    /// The mixed half is the rules-correct union: a CMM+CLB draft concedes The
+    /// Prismatic Piper AND Faceless One, and keeps CR 903.13f(3)'s partner
+    /// grant because it contained Commander Masters boosters. Both a latch that
+    /// answers with pack 1's set (dropping CLB's filler) and one that refuses
+    /// to answer when the sets disagree (dropping both) red here.
+    ///
+    /// Reachable: `create_multiplayer_draft` resolves its Commander pool input
+    /// through `ResolvedSetSelection`, which builds `DraftSource::Set` from the
+    /// host's whole pack sequence.
+    #[test]
+    fn a_mixed_set_commander_draft_concedes_every_contained_sets_grants() {
+        let mut repeated = commander_draft_session("CMM");
+        repeated.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "cmm".to_string(), "CMM".to_string()],
+        };
+        assert_eq!(
+            session_concessions(&repeated),
+            draft_set_concessions("CMM"),
+            "one set named three times is still one set, casing included"
+        );
+
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+        };
+        assert_eq!(
+            session_concessions(&mixed),
+            draft_set_concessions_for(["CMM", "CLB"]),
+            "CR 903.13e: the draft contained both sets, so both grants stand"
+        );
+        assert_eq!(
+            session_concessions(&mixed).fillers.len(),
+            2,
+            "reach guard: CMM and CLB name DIFFERENT cards, so the union holds two"
+        );
+        assert_eq!(
+            session_concessions(&mixed).partner_grant,
+            draft_set_concessions("CMM").partner_grant,
+            "CR 903.13f(3): the draft contained Commander Masters boosters"
+        );
+    }
+
+    /// The latched set codes are what the draft CONTAINED -- distinct, and
+    /// scoped to Commander Draft. This is the value `filter_for_player`
+    /// publishes, so it is asserted at its own seam rather than only through
+    /// the concessions it feeds.
+    #[test]
+    fn the_latched_set_codes_are_the_distinct_sets_a_commander_draft_contained() {
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string(), "cmm".to_string()],
+        };
+        assert_eq!(
+            concession_set_codes(&mixed),
+            vec!["CMM", "CLB"],
+            "a set names its CR 903.13e condition once however many boosters it filled"
+        );
+
+        let mut cube = commander_draft_session("CMM");
+        cube.config.source = DraftSource::Cube {
+            id: "cube-1".to_string(),
+            name: "Cube".to_string(),
+        };
+        assert!(
+            concession_set_codes(&cube).is_empty(),
+            "a cube contains no draft boosters from any set"
+        );
+
+        let mut premier = commander_draft_session("CMM");
+        premier.kind = DraftKind::Premier;
+        assert!(
+            concession_set_codes(&premier).is_empty(),
+            "CR 903.13 scopes both rules to Commander Draft"
         );
     }
 
@@ -2783,7 +3057,7 @@ mod tests {
     /// a latch that never reached the validator would accept both.
     #[test]
     fn submit_deck_applies_the_latched_filler_grant() {
-        let filler = draft_set_concessions("CMM").filler.unwrap();
+        let filler = draft_set_concessions("CMM").fillers.remove(0);
 
         let deck_with = |copies: usize| {
             let mut deck: Vec<String> = (0..60 - copies).map(|i| format!("Card {i}")).collect();
@@ -2828,7 +3102,7 @@ mod tests {
     /// the P9 handoff received an empty list.
     #[test]
     fn submit_deck_snapshots_the_designation_onto_the_submission() {
-        let filler = draft_set_concessions("CMM").filler.unwrap();
+        let filler = draft_set_concessions("CMM").fillers.remove(0);
         let mut session = deckbuilding_commander_draft("CMM", 60);
         let mut main_deck: Vec<String> = (0..59).map(|i| format!("Card {i}")).collect();
         main_deck.push(filler.card_name.clone());

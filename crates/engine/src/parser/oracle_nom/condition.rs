@@ -1462,7 +1462,8 @@ pub(crate) fn parse_attached_subject_target_filter(input: &str) -> OracleResult<
 }
 
 /// CR 508.1a + CR 509.1a + CR 611.3a: Parse "enchanted/equipped creature is
-/// attacking|blocking" into the attached-subject's `TargetFilter` plus the
+/// attacking alone|attacking|blocking" into the attached-subject's
+/// `TargetFilter` plus the
 /// combat-state `FilterProp`. Unlike `parse_attached_subject_is_filter` (which
 /// folds a STATIC characteristic — color/type/supertype — into the subject
 /// filter), combat state is re-evaluated each layer cycle (CR 611.3a), so the
@@ -1479,6 +1480,7 @@ pub(crate) fn parse_attached_subject_combat_state(
     let (rest, subject) = parse_attached_condition_subject(input)?;
     let (rest, _) = tag("is ").parse(rest)?;
     let (rest, prop) = alt((
+        value(FilterProp::AttackingAlone, tag("attacking alone")),
         value(FilterProp::Attacking { defender: None }, tag("attacking")),
         value(FilterProp::Blocking, tag("blocking")),
     ))
@@ -4701,6 +4703,7 @@ fn parse_a_player_controls_no(input: &str) -> OracleResult<'_, StaticCondition> 
             QuantityRef::ControlledByEachPlayer {
                 filter,
                 aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
             },
             Comparator::EQ,
             0,
@@ -12691,6 +12694,7 @@ mod tests {
                             QuantityRef::ControlledByEachPlayer {
                                 filter,
                                 aggregate: AggregateFunction::Min,
+                                relation: PlayerRelation::All,
                             },
                     },
                 comparator: Comparator::EQ,
@@ -14461,6 +14465,48 @@ mod tests {
         assert!(angel
             .type_filters
             .contains(&TypeFilter::Subtype("Angel".to_string())));
+    }
+
+    #[test]
+    fn attached_subject_combat_state_parses_attacking_alone_before_attacking() {
+        let (rest, (filter, prop)) =
+            parse_attached_subject_combat_state("enchanted creature is attacking alone")
+                .expect("attached attacking-alone condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::AttackingAlone);
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]))
+        );
+    }
+
+    #[test]
+    fn attached_subject_combat_state_preserves_equipped_and_broad_attacking_forms() {
+        let (rest, (filter, prop)) =
+            parse_attached_subject_combat_state("equipped creature is attacking alone")
+                .expect("equipped attacking-alone condition must parse");
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::AttackingAlone);
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+        );
+
+        let (rest, (_, prop)) =
+            parse_attached_subject_combat_state("enchanted creature is attacking")
+                .expect("existing broad attacking condition must still parse");
+        assert_eq!(rest, "");
+        assert_eq!(prop, FilterProp::Attacking { defender: None });
+    }
+
+    #[test]
+    fn attached_subject_combat_state_leaves_hostile_trailing_text_for_caller() {
+        let (rest, (_, prop)) = parse_attached_subject_combat_state(
+            "enchanted creature is attacking alone during your turn",
+        )
+        .expect("the building block should parse its exact predicate");
+        assert_eq!(prop, FilterProp::AttackingAlone);
+        assert_eq!(rest, " during your turn");
     }
 
     // -- Anaphoric "it" recipient conditions (CR 611.3a) --

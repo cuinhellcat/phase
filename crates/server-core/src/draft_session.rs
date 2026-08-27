@@ -859,9 +859,7 @@ mod tests {
 
     fn test_config() -> DraftConfig {
         DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 8,
@@ -1570,9 +1568,7 @@ mod tests {
         use engine::types::player::PlayerId;
 
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size: 2,

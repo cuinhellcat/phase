@@ -322,9 +322,7 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size,
@@ -866,9 +864,7 @@ mod tests {
         let procedure = DraftKind::CommanderDraft.procedure();
         let pod_size = procedure.pod_size;
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST"),
             set_code: "TST".to_string(),
             kind: DraftKind::CommanderDraft,
             pod_size,

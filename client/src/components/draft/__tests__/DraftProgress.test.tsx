@@ -13,20 +13,33 @@ vi.mock("../../../stores/draftStore", () => ({
 
 import { DraftProgress } from "../DraftProgress";
 
+afterEach(cleanup);
+
+/** The pips `PackSegment` renders, per pack, in pack order. */
+function pipCountsPerPack(container: HTMLElement): number[] {
+  return [...container.querySelectorAll("div.gap-px")].map(
+    (segment) => segment.children.length,
+  );
+}
+
 /**
- * VM row 8 — CR 903.13b. `pick_number` counts pick STEPS, not cards, so the
- * bar's denominator is the engine's published step count. A 14-card Commander
- * pack drains in SEVEN steps, and 14 was a denominator the session could never
- * reach.
+ * Total pips across every pack. They carry no accessible role — the bar is
+ * purely visual — so the DOM is the only available instrument, and the pip
+ * COUNT is precisely the user-visible claim under test.
+ */
+function pipCount(container: HTMLElement): number {
+  return container.querySelectorAll("div.h-2").length;
+}
+
+/**
+ * CR 903.13b. `pick_number` counts pick STEPS, not cards, so the bar's
+ * denominator is the engine's published step count. A 14-card Commander pack
+ * drains in SEVEN steps, and 14 is a denominator the session can never reach.
  *
  * REVERT-PROBE: point `DraftProgress` back at `cards_per_pack` and the first
  * case renders 14 pips and `4/14` against assertions naming 7 and `4/7`.
  */
 describe("DraftProgress — CR 903.13b pick steps", () => {
-  afterEach(() => {
-    cleanup();
-  });
-
   /** One pack, so the rendered pip count IS the step count. */
   function progressView(
     overrides: Partial<DraftProgressFields> = {},
@@ -35,20 +48,14 @@ describe("DraftProgress — CR 903.13b pick steps", () => {
       current_pack_number: 0,
       pick_number: 3,
       cards_per_pack: 14,
+      pack_sizes: [14],
+      pack_set_codes: ["TST"],
+      pack_pick_steps: [7],
       pick_steps_per_pack: 7,
       pack_count: 1,
       pass_direction: "Left",
       ...overrides,
     };
-  }
-
-  /**
-   * The pips `PackSegment` renders. They carry no accessible role — the bar is
-   * purely visual — so the DOM is the only available instrument, and the pip
-   * COUNT is precisely the user-visible claim under test.
-   */
-  function pipCount(container: HTMLElement): number {
-    return container.querySelectorAll("div.h-2").length;
   }
 
   it("renders one pip per pick STEP, not one per card", () => {
@@ -72,7 +79,11 @@ describe("DraftProgress — CR 903.13b pick steps", () => {
   it("still renders one pip per card when a step takes one card", () => {
     const { container } = render(
       <DraftProgress
-        view={progressView({ cards_per_pack: 14, pick_steps_per_pack: 14 })}
+        view={progressView({
+          cards_per_pack: 14,
+          pack_pick_steps: [14],
+          pick_steps_per_pack: 14,
+        })}
       />,
     );
 
@@ -96,6 +107,9 @@ describe("DraftProgress — CR 903.13b pick steps", () => {
       pass_direction: "Left",
       seats: [],
       cards_per_pack: 14,
+      pack_sizes: [14],
+      pack_set_codes: ["TST"],
+      pack_pick_steps: [7],
       pick_steps_per_pack: 7,
       pack_count: 1,
       min_deck_size: 60,
@@ -112,5 +126,111 @@ describe("DraftProgress — CR 903.13b pick steps", () => {
 
     expect(pipCount(container)).toBe(7);
     expect(screen.getByText("/7")).toBeInTheDocument();
+  });
+});
+
+/**
+ * Multi-set drafts open a different set each round, and those boosters differ
+ * in size. The bar reads the engine's per-pack step counts rather than
+ * describing every pack with the current one's.
+ */
+describe("DraftProgress — per-pack booster shape", () => {
+  function progressView(
+    overrides: Partial<DraftProgressFields> = {},
+  ): DraftProgressFields {
+    return {
+      current_pack_number: 0,
+      pick_number: 0,
+      cards_per_pack: 15,
+      pack_sizes: [15, 15, 15],
+      pack_set_codes: ["ISD", "ISD", "ISD"],
+      pack_pick_steps: [15, 15, 15],
+      pick_steps_per_pack: 15,
+      pack_count: 3,
+      pass_direction: "Left",
+      ...overrides,
+    };
+  }
+
+  it("draws each booster at the step count the engine reported for it", () => {
+    const { container } = render(
+      <DraftProgress
+        view={progressView({
+          pack_sizes: [15, 14, 20],
+          pack_set_codes: ["ISD", "BLB", "CMR"],
+          pack_pick_steps: [15, 14, 20],
+        })}
+      />,
+    );
+
+    expect(pipCountsPerPack(container)).toEqual([15, 14, 20]);
+  });
+
+  it("counts picks against the booster in play, not the first one", () => {
+    render(
+      <DraftProgress
+        view={progressView({
+          current_pack_number: 1,
+          pick_number: 3,
+          cards_per_pack: 14,
+          pack_sizes: [15, 14, 15],
+          pack_set_codes: ["ISD", "BLB", "ISD"],
+          pack_pick_steps: [15, 14, 15],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("/14")).toBeInTheDocument();
+  });
+
+  /**
+   * The composition of both axes, and the discriminating case for this merge:
+   * a Commander draft whose boosters differ in size takes TWO cards per step,
+   * so neither `pack_sizes` (the card counts) nor the scalar
+   * `pick_steps_per_pack` (the current pack's) renders this bar correctly.
+   * Only the per-pack step array does.
+   *
+   * REVERT-PROBE: read `pack_sizes` and the pips become [20, 14, 16]; read the
+   * scalar `pick_steps_per_pack` and they become [7, 7, 7].
+   */
+  it("reads per-pack step counts when packs differ in size AND a step takes two cards", () => {
+    const { container } = render(
+      <DraftProgress
+        view={progressView({
+          current_pack_number: 1,
+          pick_number: 2,
+          cards_per_pack: 14,
+          pack_sizes: [20, 14, 16],
+          pack_set_codes: ["CMR", "CLB", "LCC"],
+          pack_pick_steps: [10, 7, 8],
+          pick_steps_per_pack: 7,
+        })}
+      />,
+    );
+
+    expect(pipCountsPerPack(container)).toEqual([10, 7, 8]);
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("/7")).toBeInTheDocument();
+  });
+
+  it("names each booster's set when the draft mixes sets", () => {
+    render(
+      <DraftProgress
+        view={progressView({
+          current_pack_number: 1,
+          pack_set_codes: ["ISD", "DKA", "AVR"],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("DKA")).toBeInTheDocument();
+    expect(screen.getByText("AVR")).toBeInTheDocument();
+  });
+
+  it("stays unlabelled when every booster comes from the same set", () => {
+    render(<DraftProgress view={progressView()} />);
+
+    expect(screen.queryByText("ISD")).not.toBeInTheDocument();
   });
 });

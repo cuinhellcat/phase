@@ -48,6 +48,9 @@ function viewForRound(round: number): DraftPlayerView {
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -68,7 +71,7 @@ describe("P2PDraftHost.advanceRound", () => {
     const host = new P2PDraftHost(
       { id: "host" } as never,
       () => () => {},
-      { type: "Set", data: { set_pool_json: "{}" } } as never,
+      { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
       "Premier",
       8,
       "Host",

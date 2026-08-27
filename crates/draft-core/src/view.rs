@@ -2,7 +2,7 @@ use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::pick_pass::required_pick_count;
-use crate::session::{concession_set_code, session_concessions};
+use crate::session::{concession_set_codes, session_concessions};
 use crate::types::*;
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
@@ -270,12 +270,29 @@ pub struct DraftPlayerView {
     pub sealed_packs: Option<Vec<Vec<DraftCardInstance>>>,
     /// Public info for all seats
     pub seats: Vec<SeatPublicView>,
-    /// Total cards per pack (for UI progress display)
+    /// Cards in the booster currently being drafted (for UI progress display).
+    /// Multi-set drafts mix booster sizes, so this tracks `current_pack_number`
+    /// rather than describing the session as a whole — see `pack_sizes`.
     pub cards_per_pack: u8,
-    /// CR 903.13b: how many pick STEPS this session's pack contains for this
-    /// kind — `cards_per_pack.div_ceil(cards_per_pick)`. `pick_number` counts
-    /// steps, not cards, so this is the denominator a progress display can
-    /// actually reach: a 14-card Commander pack is 7 steps, not 14.
+    /// Cards in each booster of the session, in pack order. Engine-derived so
+    /// clients render per-pack progress without reconstructing pack shape.
+    pub pack_sizes: Vec<u8>,
+    /// The set filling each booster, in pack order. Multi-set drafts open a
+    /// different set each round; single-set drafts repeat one code. Cube
+    /// sources report the cube id for every pack.
+    pub pack_set_codes: Vec<String>,
+    /// CR 903.13b: pick STEPS in each booster, in pack order — the per-pack
+    /// counterpart of `pick_steps_per_pack`. A progress display measures each
+    /// booster against this, never against `pack_sizes`: the two differ
+    /// whenever a kind takes more than one card per step.
+    pub pack_pick_steps: Vec<u8>,
+    /// CR 903.13b: how many pick STEPS the booster currently being drafted
+    /// contains for this kind — `cards_per_pack.div_ceil(cards_per_pick)`.
+    /// `pick_number` counts steps, not cards, so this is the denominator a
+    /// progress display can actually reach: a 14-card Commander pack is 7
+    /// steps, not 14. Derived from `cards_per_pack`, so it tracks
+    /// `current_pack_number` for the same reason that field does — a multi-set
+    /// draft whose packs differ in size also differs in step count per pack.
     ///
     /// Published so the display layer never re-derives it. A client that
     /// divided `cards_per_pack` itself would be a second authority for
@@ -288,28 +305,37 @@ pub struct DraftPlayerView {
     pub min_deck_size: usize,
     /// Cards available in unlimited quantity during deck construction.
     pub addable_cards: Vec<String>,
-    /// CR 903.13e: the commander filler this draft's booster set grants, and
-    /// its cap. `None` when the set grants none.
+    /// CR 903.13e: every commander filler this draft's booster sets grant, and
+    /// each one's cap. EMPTY when no contained set grants one.
+    ///
+    /// Plural because CR 903.13e states its grants per contained set: a draft
+    /// that opened Commander Masters and Battle for Baldur's Gate boosters
+    /// satisfies both conditions and concedes both cards.
     ///
     /// Deliberately NOT folded into `addable_cards`, whose contract is
     /// *unlimited quantity* -- the exact property CR 903.13e denies. Engine-
-    /// derived: the client must never re-derive it from the set code.
-    /// Rendered by `PoolPanel` (the grant line) and by `LimitedDeckBuilder`
-    /// (the addable list); the cap and the CR 903.13e commander-condition stay
+    /// derived: the client must never re-derive it from the set codes.
+    /// Rendered by `PoolPanel` (the grant lines) and by `LimitedDeckBuilder`
+    /// (the addable list); the caps and the CR 903.13e commander-condition stay
     /// engine-enforced in `validate_limited_deck`.
-    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
-    /// CR 903.13f(3): the set code this draft was latched to, as an OPAQUE
-    /// courier token for the engine functions that map a set code to a
-    /// deck-construction concession (`commanderPartnerCandidates`). `None` for
+    pub grantable_commander_fillers: Vec<GrantableCommanderFiller>,
+    /// CR 903.13f(3): every set this draft was latched to, as OPAQUE courier
+    /// tokens for the engine functions that map contained sets to a
+    /// deck-construction concession (`commanderPartnerCandidates`). EMPTY for
     /// a cube and for every kind outside CR 903.13's scope.
     ///
-    /// The display layer passes it back to the engine and NEVER interprets it:
-    /// which sets grant what is engine knowledge, tabled once in
-    /// `deck_validation::DRAFT_SET_CONCESSIONS`. In particular it must never be
-    /// reconstructed from a pool card's `set_code` -- the filler cards are
+    /// Plural for the same reason as `grantable_commander_fillers`: both rules
+    /// ask what the draft CONTAINED, and a mixed-set draft contained all of
+    /// them. Publishing one representative would silently drop the grants the
+    /// others make.
+    ///
+    /// The display layer passes them back to the engine and NEVER interprets
+    /// them: which sets grant what is engine knowledge, tabled once in
+    /// `deck_validation::DRAFT_SET_CONCESSIONS`. In particular they must never
+    /// be reconstructed from a pool card's `set_code` -- the filler cards are
     /// printed in the granting sets' own boosters, so a card's printing is
     /// evidence of the grant in neither direction.
-    pub draft_set_code: Option<String>,
+    pub draft_set_codes: Vec<String>,
     /// Milliseconds remaining on the pick timer. Always None from the reducer;
     /// the P2P host injects the authoritative value on the wire.
     pub timer_remaining_ms: Option<u32>,
@@ -349,7 +375,15 @@ pub struct SpectatorDraftView {
     pub pick_number: u8,
     pub pass_direction: PassDirection,
     pub seats: Vec<SeatPublicView>,
+    /// Cards in the booster currently being drafted. See
+    /// [`DraftPlayerView::cards_per_pack`].
     pub cards_per_pack: u8,
+    /// Cards in each booster of the session, in pack order.
+    pub pack_sizes: Vec<u8>,
+    /// The set filling each booster, in pack order.
+    pub pack_set_codes: Vec<String>,
+    /// CR 903.13b: mirrors `DraftPlayerView::pack_pick_steps`; see that field.
+    pub pack_pick_steps: Vec<u8>,
     /// CR 903.13b: mirrors `DraftPlayerView::pick_steps_per_pack`; see that
     /// field. Present on both views because `DraftProgress` renders either
     /// shape through one shared prop contract.
@@ -357,10 +391,10 @@ pub struct SpectatorDraftView {
     pub pack_count: u8,
     pub min_deck_size: usize,
     pub addable_cards: Vec<String>,
-    /// CR 903.13e: the commander filler this draft's booster set grants, and
-    /// its cap. Mirrors `DraftPlayerView`'s field; see that one for why it is
-    /// separate from `addable_cards`.
-    pub grantable_commander_filler: Option<GrantableCommanderFiller>,
+    /// CR 903.13e: every commander filler this draft's booster sets grant, and
+    /// each one's cap. Mirrors `DraftPlayerView`'s field; see that one for why
+    /// it is separate from `addable_cards` and why it is plural.
+    pub grantable_commander_fillers: Vec<GrantableCommanderFiller>,
     pub standings: Vec<StandingEntry>,
     pub current_round: u8,
     pub tournament_format: TournamentFormat,
@@ -454,16 +488,19 @@ pub fn filter_for_spectator(
         pick_number: session.pick_number,
         pass_direction: session.pass_direction,
         seats,
-        cards_per_pack: session.config.cards_per_pack,
+        cards_per_pack: session.cards_in_pack(session.current_pack_number),
+        pack_sizes: session.pack_size_sequence(),
+        pack_set_codes: session.pack_set_code_sequence(),
+        pack_pick_steps: session.pack_pick_step_sequence(),
         pick_steps_per_pack: session
             .kind
             .procedure()
-            .pick_steps_per_pack(session.config.cards_per_pack),
+            .pick_steps_per_pack(session.cards_in_pack(session.current_pack_number)),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_filler: session_concessions(session).filler,
+        grantable_commander_fillers: session_concessions(session).fillers,
         standings,
         current_round: session.current_round,
         tournament_format: session.config.tournament_format,
@@ -473,6 +510,33 @@ pub fn filter_for_spectator(
         pools,
         current_packs,
     }
+}
+
+/// Split a sealed pool back into the boosters it was opened from.
+///
+/// Sealed pools are stored flat, in opening order. A multi-set sealed event
+/// mixes booster sizes, so the split follows the per-pack sizes the session
+/// recorded rather than a single chunk width. Any remainder (a pool that does
+/// not match the recorded sizes) is returned as a final pack so no card is
+/// silently dropped from the display.
+fn split_by_pack_size(
+    pool: &[DraftCardInstance],
+    session: &DraftSession,
+) -> Vec<Vec<DraftCardInstance>> {
+    let mut packs = Vec::with_capacity(usize::from(session.config.pack_count));
+    let mut rest = pool;
+    for size in session.pack_size_sequence() {
+        if rest.is_empty() {
+            break;
+        }
+        let (pack, remainder) = rest.split_at(usize::from(size).min(rest.len()));
+        packs.push(pack.to_vec());
+        rest = remainder;
+    }
+    if !rest.is_empty() {
+        packs.push(rest.to_vec());
+    }
+    packs
 }
 
 /// Produce a filtered view of the draft session for a specific seat.
@@ -500,13 +564,11 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
     let draft_effects = face_up_draft_cards(&pool);
     // Only an all-at-once kind has unopened packs to project onto the view; a
-    // pick-and-pass kind's pool is not chunked into packs.
+    // pick-and-pass kind's pool is not chunked into packs. The split follows the
+    // per-pack sizes the session recorded rather than a single uniform chunk
+    // width, because a multi-set event's boosters differ in size.
     let sealed_packs = match session.kind.procedure().distribution {
-        PackDistribution::AllAtOnce => Some(
-            pool.chunks(usize::from(session.config.cards_per_pack))
-                .map(ToOwned::to_owned)
-                .collect(),
-        ),
+        PackDistribution::AllAtOnce => Some(split_by_pack_size(&pool, session)),
         PackDistribution::PickAndPass => None,
     };
     let pool_groups = DraftPoolGroups::from_pool(&pool);
@@ -576,19 +638,25 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         pool_groups,
         sealed_packs,
         seats,
-        cards_per_pack: session.config.cards_per_pack,
+        cards_per_pack: session.cards_in_pack(session.current_pack_number),
+        pack_sizes: session.pack_size_sequence(),
+        pack_set_codes: session.pack_set_code_sequence(),
+        pack_pick_steps: session.pack_pick_step_sequence(),
         pick_steps_per_pack: session
             .kind
             .procedure()
-            .pick_steps_per_pack(session.config.cards_per_pack),
+            .pick_steps_per_pack(session.cards_in_pack(session.current_pack_number)),
         pack_count: session.config.pack_count,
         min_deck_size: session.config.min_deck_size,
         addable_cards: session.config.addable_cards.display_names(),
         // CR 903.13e: read from the latch, never re-derived here.
-        grantable_commander_filler: session_concessions(session).filler,
+        grantable_commander_fillers: session_concessions(session).fillers,
         // CR 903.13f(3): the same latch, published for the engine's partner
-        // query. `map(str::to_string)` because the view is owned.
-        draft_set_code: concession_set_code(session).map(str::to_string),
+        // query. Owned strings because the view is owned.
+        draft_set_codes: concession_set_codes(session)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
@@ -1010,9 +1078,7 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
             pod_size,
@@ -1565,6 +1631,50 @@ mod tests {
     }
 
     #[test]
+    fn the_player_view_publishes_the_shape_and_set_of_every_booster() {
+        let (mut session, source) = test_session(2);
+        session.config.source = DraftSource::Set {
+            codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+        };
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        // Pretend the table has moved on to the second booster.
+        session.pack_sizes = vec![15, 14, 15];
+        session.current_pack_number = 1;
+
+        let view = filter_for_player(&session, 0);
+
+        assert_eq!(view.pack_sizes, vec![15, 14, 15]);
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+        // `cards_per_pack` tracks the booster in play, not a session-wide size.
+        assert_eq!(view.cards_per_pack, 14);
+    }
+
+    #[test]
+    fn a_mixed_size_sealed_pool_splits_back_into_the_boosters_it_came_from() {
+        let (mut session, source) = test_session(2);
+        session.kind = DraftKind::Sealed;
+        session.config.kind = DraftKind::Sealed;
+        session.config.pack_count = SEALED_PACK_COUNT;
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+        // Sealed pools are stored flat; only the recorded sizes say where one
+        // booster ended and the next began.
+        session.pack_sizes = vec![20, 20, 20, 8, 8, 8];
+
+        let view = filter_for_player(&session, 0);
+
+        let packs = view
+            .sealed_packs
+            .expect("sealed events publish their packs");
+        assert_eq!(
+            packs.iter().map(Vec::len).collect::<Vec<_>>(),
+            [20, 20, 20, 8, 8, 8]
+        );
+    }
+
+    #[test]
     fn rarity_group_kinds_match_the_wire_contract() {
         let values = [
             (DraftPoolGroupKind::Mythic, "mythic"),
@@ -1766,9 +1876,7 @@ mod tests {
     #[test]
     fn view_bot_seat_shows_as_bot() {
         let config = DraftConfig {
-            source: DraftSource::Set {
-                code: "TST".to_string(),
-            },
+            source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
             pod_size: 8,
@@ -2099,53 +2207,76 @@ mod tests {
             let (mut session, _) = test_session(4);
             session.kind = DraftKind::CommanderDraft;
             session.config.kind = DraftKind::CommanderDraft;
-            session.config.source = DraftSource::Set {
-                code: set_code.to_string(),
-            };
+            session.config.source = DraftSource::single_set(set_code);
             session
         }
 
         let granting = commander_draft_session("CMM");
-        let expected = engine::game::deck_validation::draft_set_concessions("CMM").filler;
+        let expected = engine::game::deck_validation::draft_set_concessions("CMM").fillers;
         assert!(
-            expected.is_some(),
+            !expected.is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set"
         );
 
         assert_eq!(
-            filter_for_player(&granting, 0).grantable_commander_filler,
+            filter_for_player(&granting, 0).grantable_commander_fillers,
             expected
         );
         assert_eq!(
             filter_for_spectator(&granting, SpectatorVisibility::default())
-                .grantable_commander_filler,
+                .grantable_commander_fillers,
             expected
         );
 
         let non_granting = commander_draft_session("NEO");
+        assert!(filter_for_player(&non_granting, 0)
+            .grantable_commander_fillers
+            .is_empty());
+        assert!(
+            filter_for_spectator(&non_granting, SpectatorVisibility::default())
+                .grantable_commander_fillers
+                .is_empty()
+        );
+
+        // CR 903.13e: a mixed-set draft publishes EVERY contained set's grant.
+        // Both builders read one latch, so both must carry the union -- a
+        // builder that published only the first would red on this pair.
+        let mut mixed = commander_draft_session("CMM");
+        mixed.config.source = DraftSource::Set {
+            codes: vec!["CMM".to_string(), "CLB".to_string()],
+        };
+        let union =
+            engine::game::deck_validation::draft_set_concessions_for(["CMM", "CLB"]).fillers;
         assert_eq!(
-            filter_for_player(&non_granting, 0).grantable_commander_filler,
-            None
+            union.len(),
+            2,
+            "reach guard: CR 903.13e names DIFFERENT cards for CMM and CLB"
         );
         assert_eq!(
-            filter_for_spectator(&non_granting, SpectatorVisibility::default())
-                .grantable_commander_filler,
-            None
+            filter_for_player(&mixed, 0).grantable_commander_fillers,
+            union
+        );
+        assert_eq!(
+            filter_for_spectator(&mixed, SpectatorVisibility::default())
+                .grantable_commander_fillers,
+            union
         );
     }
 
-    /// V4 -- CR 903.13f(3): `DraftPlayerView.draft_set_code` publishes the
-    /// LATCHED concession set code, and publishes it only for a Commander
+    /// V4 -- CR 903.13f(3): `DraftPlayerView.draft_set_codes` publishes the
+    /// LATCHED concession set codes, and publishes them only for a Commander
     /// Draft whose source is a set.
     ///
-    /// Three rows on one axis, because a single `Some` row is satisfied by
+    /// Four rows on one axis, because a single non-empty row is satisfied by
     /// `session.config.source.set_code()` -- which returns the CUBE ID for a
-    /// cube and a code for every kind -- and would publish a grant CR 903.13
-    /// does not make. Row (i) carries a reach guard (`grantable_commander_filler`
-    /// is `Some`) so the two `None` rows cannot be vacuous greens from a
-    /// fixture that concedes nothing in the first place.
+    /// cube, a code for every kind, and the JOINED `"CMM+CLB"` label for a
+    /// mixed draft -- and would publish a grant CR 903.13 does not make, or a
+    /// token no set-code lookup can match. Row (i) carries a reach guard
+    /// (`grantable_commander_fillers` is non-empty) so the two empty rows
+    /// cannot be vacuous greens from a fixture that concedes nothing in the
+    /// first place.
     #[test]
-    fn publishes_the_latched_concession_set_code_only_for_a_commander_draft_from_a_set() {
+    fn publishes_the_latched_concession_set_codes_only_for_a_commander_draft_from_a_set() {
         fn session_with(kind: DraftKind, source: DraftSource) -> DraftSession {
             let (mut session, _) = test_session(4);
             session.kind = kind;
@@ -2155,19 +2286,30 @@ mod tests {
         }
 
         // (i) Commander Draft from a granting set: the latch is published.
-        let from_set = session_with(
-            DraftKind::CommanderDraft,
-            DraftSource::Set {
-                code: "CMM".to_string(),
-            },
-        );
+        let from_set = session_with(DraftKind::CommanderDraft, DraftSource::single_set("CMM"));
         let from_set_view = filter_for_player(&from_set, 0);
         assert!(
-            from_set_view.grantable_commander_filler.is_some(),
+            !from_set_view.grantable_commander_fillers.is_empty(),
             "reach guard: CR 903.13e names Commander Masters as a granting set, \
              so this fixture really is a conceding session"
         );
-        assert_eq!(from_set_view.draft_set_code, Some("CMM".to_string()));
+        assert_eq!(from_set_view.draft_set_codes, vec!["CMM".to_string()]);
+
+        // (i-b) A mixed Commander Draft publishes EVERY set it contained, as
+        // separate codes. The `"CMM+CLB"` label `DraftSource::set_code()`
+        // builds is a DISPLAY string that no concession lookup can match, so
+        // publishing it here would silently disable both grants.
+        let mixed = session_with(
+            DraftKind::CommanderDraft,
+            DraftSource::Set {
+                codes: vec!["CMM".to_string(), "CLB".to_string(), "CMM".to_string()],
+            },
+        );
+        assert_eq!(
+            filter_for_player(&mixed, 0).draft_set_codes,
+            vec!["CMM".to_string(), "CLB".to_string()],
+            "CR 903.13e/f ask what the draft CONTAINED, and it contained both"
+        );
 
         // (ii) A cube contains no draft boosters from any set. `set_code()`
         // would answer with the cube ID here, which is the wrong answer.
@@ -2178,16 +2320,11 @@ mod tests {
                 name: "Test Cube".to_string(),
             },
         );
-        assert_eq!(filter_for_player(&from_cube, 0).draft_set_code, None);
+        assert!(filter_for_player(&from_cube, 0).draft_set_codes.is_empty());
 
         // (iii) CR 903.13 scopes both concessions to Commander Draft.
-        let sealed = session_with(
-            DraftKind::Sealed,
-            DraftSource::Set {
-                code: "CMM".to_string(),
-            },
-        );
-        assert_eq!(filter_for_player(&sealed, 0).draft_set_code, None);
+        let sealed = session_with(DraftKind::Sealed, DraftSource::single_set("CMM"));
+        assert!(filter_for_player(&sealed, 0).draft_set_codes.is_empty());
     }
     /// VM row 3 — PF3 / U25. CR 903.13b: the published pick-step count, folded
     /// over every kind in the procedure table.
@@ -2253,6 +2390,65 @@ mod tests {
                 .procedure()
                 .pick_steps_per_pack(15),
             8
+        );
+    }
+
+    /// CR 903.13b, per pack. `pack_pick_steps` is the per-pack counterpart of
+    /// the scalar above, and it exists because BOTH axes vary independently: a
+    /// multi-set draft's boosters differ in size, and the kind's procedure
+    /// decides how many cards one step takes.
+    ///
+    /// CommanderDraft is the discriminating kind. At two cards per step
+    /// (CR 903.13b), boosters of 20/14/16 cards are 10/7/8 steps — a triple
+    /// that no competing implementation reproduces:
+    ///   - publishing `pack_sizes` gives [20, 14, 16] (cards, not steps);
+    ///   - broadcasting the scalar `pick_steps_per_pack` gives [7, 7, 7]
+    ///     (the current pack's count, applied to every pack);
+    ///   - halving a session-wide `config.cards_per_pack` gives [7, 7, 7] too.
+    ///
+    /// Each of those reds here while passing every single-set fixture.
+    #[test]
+    fn the_published_per_pack_step_counts_track_each_boosters_own_size() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        session.config.pack_count = 3;
+        // A multi-set Commander draft: three boosters, three sizes.
+        session.pack_sizes = vec![20, 14, 16];
+
+        let player = filter_for_player(&session, 0);
+        assert_eq!(
+            player.pack_pick_steps,
+            vec![10, 7, 8],
+            "each booster is measured in its own pick steps, not its card count"
+        );
+        assert_eq!(
+            filter_for_spectator(&session, SpectatorVisibility::Public).pack_pick_steps,
+            vec![10, 7, 8],
+            "the spectator view publishes the same per-pack counts"
+        );
+
+        // The array and the scalar are one contract: the scalar is the entry
+        // for the booster in play, so a display reading either agrees.
+        for pack in 0..session.config.pack_count {
+            session.current_pack_number = pack;
+            let view = filter_for_player(&session, 0);
+            assert_eq!(
+                view.pick_steps_per_pack,
+                view.pack_pick_steps[usize::from(pack)],
+                "pack {pack}: the scalar must equal this pack's entry"
+            );
+        }
+
+        // Reach-guard for the CR 905.1a kinds: at one card per step the steps
+        // ARE the sizes, so the field still tracks per-pack shape rather than
+        // collapsing to a single number.
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            filter_for_player(&session, 0).pack_pick_steps,
+            vec![20, 14, 16],
+            "one card per step means steps equal cards — still per pack"
         );
     }
 }

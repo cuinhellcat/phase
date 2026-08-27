@@ -132,6 +132,9 @@ function mockView(status: string): DraftPlayerView {
     },
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -210,7 +213,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("transitions to lobby after initialization", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -229,7 +232,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("can suspend without terminating the persisted host draft", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -249,7 +252,7 @@ describe("DraftPodHostAdapter", () => {
 
     await expect(
       adapter.initialize({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -264,7 +267,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates startDraft to P2PDraftHost", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -291,13 +294,13 @@ describe("DraftPodHostAdapter", () => {
       draftStarted: true,
       draftCode: "ABCDE",
       draftSessionJson: "{}",
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     });
     const restoredView = mockView("MatchInProgress");
     mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
 
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -328,7 +331,7 @@ describe("DraftPodHostAdapter", () => {
       draftStarted: true,
       draftCode: "draft-1",
       draftSessionJson: "{}",
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     });
     let resolveRestore!: (view: DraftPlayerView | null) => void;
     mockHostRestoreFromPersisted.mockImplementationOnce(() => new Promise((resolve) => {
@@ -336,7 +339,7 @@ describe("DraftPodHostAdapter", () => {
     }));
     const controller = new AbortController();
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -367,7 +370,7 @@ describe("DraftPodHostAdapter", () => {
       resolveSession = resolve;
     }));
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -398,7 +401,7 @@ describe("DraftPodHostAdapter", () => {
       }),
     );
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -419,7 +422,7 @@ describe("DraftPodHostAdapter", () => {
     const replacementResult = mockHostResult();
     (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValueOnce(replacementResult);
     await replacement.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -439,7 +442,7 @@ describe("DraftPodHostAdapter", () => {
     }));
     const controller = new AbortController();
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -460,7 +463,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates submitPick and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -475,7 +478,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates draft-effect picks and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -490,7 +493,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates submitDeck and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -510,7 +513,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates host controls (kick, pause, resume)", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -536,7 +539,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("maps P2PDraftHost events to DraftPodHostEvents", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -605,7 +608,7 @@ describe("DraftPodHostAdapter", () => {
   it("never reports pairing for a Complete pod", async () => {
     stubCardDataFetch();
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "CommanderDraft",
       podSize: 4,
       hostDisplayName: "Host",
@@ -636,7 +639,7 @@ describe("DraftPodHostAdapter", () => {
    */
   it("still reaches pairing on roundAdvanced", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -656,7 +659,7 @@ describe("DraftPodHostAdapter", () => {
    */
   it("still reaches matchInProgress on pairingsGenerated", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -672,7 +675,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("cleans up on dispose", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -691,7 +694,7 @@ describe("DraftPodHostAdapter", () => {
     const unsub = adapter.onEvent((e) => extraEvents.push(e));
 
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",

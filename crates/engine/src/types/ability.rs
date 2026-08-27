@@ -7121,7 +7121,8 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
-    /// CR 107.1: The [min/max], across every player in the game, of the number
+    /// CR 107.1 + CR 102.1/102.2/102.3: The [min/max], across players in
+    /// `relation`, of the number
     /// of **battlefield** objects matching `filter` that the player controls
     /// (the game counts only in integers). Each player's per-player count is
     /// computed as if `filter`'s
@@ -7136,6 +7137,15 @@ pub enum QuantityRef {
     ControlledByEachPlayer {
         filter: TargetFilter,
         aggregate: AggregateFunction,
+        /// Which players contribute one controlled-object count. `All` preserves
+        /// the original Balance-family reading; `Opponent` covers "the greatest
+        /// number of artifacts an opponent controls" without collapsing all
+        /// opponents into one object count.
+        #[serde(
+            default = "player_relation_all",
+            skip_serializing_if = "is_player_relation_all"
+        )]
+        relation: PlayerRelation,
     },
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
@@ -8085,6 +8095,14 @@ pub enum PlayerRelation {
     Opponent,
     /// All players in the game.
     All,
+}
+
+fn player_relation_all() -> PlayerRelation {
+    PlayerRelation::All
+}
+
+fn is_player_relation_all(relation: &PlayerRelation) -> bool {
+    matches!(relation, PlayerRelation::All)
 }
 
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.

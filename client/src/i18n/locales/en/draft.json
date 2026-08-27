@@ -9,7 +9,8 @@
       "step1": "You'll open {{packCount}} packs of {{cardsPerPack}} cards each",
       "step2": "Pick one card per pack, then pass the rest to AI drafters",
       "step3": "Packs alternate direction each round — left, right, left",
-      "step4": "After all picks, build a 40-card deck and play a match"
+      "step4": "After all picks, build a 40-card deck and play a match",
+      "step1Mixed": "You'll open {{packCount}} packs of mixed sizes — {{packSizes}} cards, in that order"
     },
     "pod": {
       "step1": "You're drafting with {{count}} players in a pod",
@@ -76,10 +77,29 @@
       "Hard": "Hard",
       "VeryHard": "Very Hard"
     },
-    "chooseSet": "Choose a Set",
     "noPools": "No draft pools available. Run the draft data pipeline first.",
     "setIconAlt": "{{name}} set icon",
-    "loadFailed": "Failed to load sets"
+    "loadFailed": "Failed to load sets",
+    "packOrder": "Pack Order",
+    "clearPacks": "Clear",
+    "emptyPacks_one": "Pick a set for each pack. A draft opens {{count}} pack by default — repeat a set or mix several.",
+    "emptyPacks_other": "Pick a set for each pack. A draft opens {{count}} packs by default — repeat a set or mix several to draft a block.",
+    "emptyPacksFixed_one": "Sealed opens exactly {{count}} pack. Pick a set for it.",
+    "emptyPacksFixed_other": "Sealed opens exactly {{count}} packs. Pick a set for each — repeat one or mix several.",
+    "packCountFixed": "{{selected}} of {{required}} packs chosen",
+    "packCountFlexible": "{{selected}} packs chosen — up to {{max}}",
+    "addPackFromSet": "Add a Pack",
+    "packsFull": "Pack list is full",
+    "addPackOf": "Add a pack of {{name}}",
+    "movePackEarlier": "Move pack {{number}} earlier",
+    "movePackLater": "Move pack {{number}} later",
+    "removePack": "Remove pack {{number}}",
+    "chooseSet": "Choose a Set",
+    "draftSet": "Draft {{name}}",
+    "fillRemaining_one": "Fill the last pack with {{name}}",
+    "fillRemaining_other": "Fill the remaining {{count}} packs with {{name}}",
+    "startDraft": "Start Draft",
+    "startSealed": "Start Sealed"
   },
   "pack": {
     "confirmPick": "Confirm Pick",
@@ -357,7 +377,8 @@
     "podSize": "Pod Size",
     "podSizeDesc": "{{count}} total seats. Empty seats can be filled with bots from the lobby before the draft starts.",
     "playerCount": "{{count}} players",
-    "setSelectorHint": "Choose the draft set last. Selecting a set loads its card pool and creates the pod room.",
+    "setSelectorHint": "Arrange the sets your pod drafts — one per pack, in the order they open. Name one set to fill every pack with it. Creating the pod loads the pools.",
+    "createPod": "Create Pod",
     "loadingPool": "Loading set pool data...",
     "roomCode": "Room Code",
     "roomCodePlaceholder": "Enter room code...",

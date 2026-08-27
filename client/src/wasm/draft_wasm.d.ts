@@ -154,19 +154,21 @@ export function start_quick_cube_draft(cube_list_text: string, cube_name: string
 /**
  * Start a Quick Draft session: 1 human + 7 bots.
  *
- * - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+ * - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
+ *   from draft-pools.json plus the set filling each booster, in pack order.
+ *   The sequence length is the draft's pack count, and a set may repeat.
  * - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
  * - `seed`: RNG seed for deterministic pack generation
  *
  * Returns the initial DraftPlayerView as a JS object.
  */
-export function start_quick_draft(set_pool_json: string, difficulty: number, seed: number): any;
+export function start_quick_draft(selection_json: string, difficulty: number, seed: number): any;
 
 /**
  * Start a local Sealed event: one human and seven bots each open six packs,
  * then the human proceeds directly to deckbuilding.
  */
-export function start_sealed_draft(set_pool_json: string, difficulty: number, seed: number): any;
+export function start_sealed_draft(selection_json: string, difficulty: number, seed: number): any;
 
 /**
  * Submit the human player's deck for limited play.
@@ -262,7 +264,6 @@ export interface InitOutput {
     readonly get_view: () => [number, number, number];
     readonly get_view_for_seat: (a: number) => [number, number, number];
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
-    readonly init_panic_hook: () => void;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
@@ -277,6 +278,7 @@ export interface InitOutput {
     readonly submit_pick_with_draft_effect_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
+    readonly init_panic_hook: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
