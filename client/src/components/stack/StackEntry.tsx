@@ -21,7 +21,12 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { PopoverMenu } from "../menu/PopoverMenu.tsx";
 import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
-import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
+import type {
+  ObjectId,
+  StackEntry as StackEntryType,
+  StackEntryDisplay,
+  StackPaidFactView,
+} from "../../adapter/types.ts";
 
 interface StackEntryProps {
   entry: StackEntryType;
@@ -44,10 +49,17 @@ interface StackEntryProps {
    * that don't proxy group data keep the prior per-entry rendering.
    */
   groupCount?: number;
+  /**
+   * The engine-selected object identity for a compact coalesced group. The
+   * visible card remains `entry`; choice membership and dispatch use this id.
+   */
+  choiceObjectId?: ObjectId;
+  /** All object identities represented by a compact group. */
+  groupedObjectIds?: ObjectId[];
   details?: StackEntryDisplay;
 }
 
-export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
+export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -182,7 +194,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // counterspell), CR 707.10c "may choose new targets for the copy", and plain
   // CR 601.2c target announcement alike.
   const isValidTarget =
-    canActForWaitingState && getWaitingForObjectChoiceIds(waitingFor).includes(entry.id);
+    canActForWaitingState && getWaitingForObjectChoiceIds(waitingFor).includes(choiceObjectId);
 
   // Ring style: targeting glow overrides default ring
   const ringClass = isValidTarget
@@ -192,7 +204,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const handleClick = () => {
     if (longPressFired.current) { longPressFired.current = false; return; }
     if (isValidTarget) {
-      dispatchAction({ type: "ChooseTarget", data: { target: { Object: entry.id } } });
+      dispatchAction({ type: "ChooseTarget", data: { target: { Object: choiceObjectId } } });
     } else {
       inspectObject(entry.source_id);
     }
@@ -210,6 +222,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       }}
       style={style}
       data-stack-entry={entry.id}
+      data-object-id={entry.id}
+      data-grouped-ids={groupedObjectIds && groupedObjectIds.length > 1 ? groupedObjectIds.join(" ") : undefined}
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}

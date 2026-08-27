@@ -15,9 +15,14 @@ import {
   buildPriorityWaitingFor,
   buildStackEntry,
   buildTargetSelectionProgress,
+  copyTargetChoiceWaitingForFactory,
   copyRetargetWaitingForFactory,
+  exploreChoiceWaitingForFactory,
+  populateChoiceWaitingForFactory,
   retargetChoiceWaitingForFactory,
+  returnAsAuraTargetWaitingForFactory,
   targetSelectionWaitingForFactory,
+  triggerTargetSelectionWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -144,6 +149,23 @@ describe("StackEntry", () => {
 
     expect(onHoverChange).toHaveBeenCalledWith(true);
     vi.useRealTimers();
+  });
+
+  it("identifies the represented stack object and compact group for contextual errors", () => {
+    const entry = buildStackEntry({ id: 77, source_id: 42 });
+
+    render(
+      <StackEntry
+        entry={entry}
+        groupedObjectIds={[77, 78]}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+      />,
+    );
+
+    expect(document.querySelector('[data-stack-entry="77"]')).toHaveAttribute("data-object-id", "77");
+    expect(document.querySelector('[data-stack-entry="77"]')).toHaveAttribute("data-grouped-ids", "77 78");
   });
 
   it("offers Revoke for an AllCopies yield after the source token has ceased", () => {
@@ -527,18 +549,58 @@ describe("StackEntry", () => {
       });
     });
 
+    it("uses a compact representative's exact legal member for membership and dispatch", () => {
+      const entry = buildEntry();
+      const legalMemberId = ENTRY_ID + 1;
+      const waitingFor = copyTargetChoiceWaitingForFactory
+        .withData({ valid_targets: [legalMemberId] })
+        .build();
+      const gameState = createGameState({ stack: [entry], waiting_for: waitingFor });
+      act(() => {
+        useGameStore.setState({ gameState, waitingFor });
+      });
+
+      render(
+        <StackEntry
+          entry={entry}
+          choiceObjectId={legalMemberId}
+          index={0}
+          isTop
+          cardSize={CARD_SIZE}
+        />,
+      );
+
+      expect(ringHost().className).toContain("ring-cyan-300");
+      fireEvent.click(node());
+      expect(dispatchActionMock).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Object: legalMemberId } },
+      });
+    });
+
     // Row 2 — paired reach-guard for rows 1/3/4: without it, a change that lit
     // every stack entry unconditionally would pass all three positives. The
     // prompt is addressed to the other seat, so this seat neither glows nor
     // dispatches, and the click falls through to plain inspect.
     it("leaves a stack entry inert when the engine is asking a different seat to choose", () => {
       const entry = buildEntry();
-      mount(
-        entry,
-        copyRetargetWaitingForFactory
-          .forPlayer(1)
-          .withData({ target_slots: [objectSlot()] })
-          .build(),
+      const legalMemberId = ENTRY_ID + 1;
+      const waitingFor = copyTargetChoiceWaitingForFactory
+        .forPlayer(1)
+        .withData({ valid_targets: [legalMemberId] })
+        .build();
+      const gameState = createGameState({ stack: [entry], waiting_for: waitingFor });
+      act(() => {
+        useGameStore.setState({ gameState, waitingFor });
+      });
+      render(
+        <StackEntry
+          entry={entry}
+          choiceObjectId={legalMemberId}
+          index={0}
+          isTop
+          cardSize={CARD_SIZE}
+        />,
       );
 
       expect(ringHost().className).not.toContain("ring-cyan-300");
@@ -568,6 +630,47 @@ describe("StackEntry", () => {
 
       fireEvent.click(node());
 
+      expect(dispatchActionMock).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Object: ENTRY_ID } },
+      });
+    });
+
+    it.each([
+      [
+        "trigger target selection",
+        triggerTargetSelectionWaitingForFactory
+          .withData({
+            selection: buildTargetSelectionProgress({
+              current_legal_targets: [{ Object: ENTRY_ID }],
+            }),
+          })
+          .build(),
+      ],
+      [
+        "copy target choice",
+        copyTargetChoiceWaitingForFactory.withData({ valid_targets: [ENTRY_ID] }).build(),
+      ],
+      [
+        "explore choice",
+        exploreChoiceWaitingForFactory.withData({ choosable: [ENTRY_ID] }).build(),
+      ],
+      [
+        "populate choice",
+        populateChoiceWaitingForFactory.withData({ valid_tokens: [ENTRY_ID] }).build(),
+      ],
+      [
+        "return-as-Aura target choice",
+        returnAsAuraTargetWaitingForFactory
+          .withData({ legal_targets: [{ Object: ENTRY_ID }] })
+          .build(),
+      ],
+    ] as const)("lights and dispatches every remaining stack-capable selector: %s", (_name, waitingFor) => {
+      const entry = buildEntry();
+      mount(entry, waitingFor);
+
+      expect(ringHost().className).toContain("ring-cyan-300");
+      fireEvent.click(node());
       expect(dispatchActionMock).toHaveBeenCalledWith({
         type: "ChooseTarget",
         data: { target: { Object: ENTRY_ID } },
@@ -617,7 +720,21 @@ describe("StackEntry", () => {
     // this discriminate its own click rather than inheriting row 2's value.
     it("falls back to inspect when the current prompt names no objects", () => {
       const entry = buildEntry();
-      mount(entry, buildPriorityWaitingFor());
+      const choiceObjectId = ENTRY_ID + 1;
+      const waitingFor = buildPriorityWaitingFor();
+      const gameState = createGameState({ stack: [entry], waiting_for: waitingFor });
+      act(() => {
+        useGameStore.setState({ gameState, waitingFor });
+      });
+      render(
+        <StackEntry
+          entry={entry}
+          choiceObjectId={choiceObjectId}
+          index={0}
+          isTop
+          cardSize={CARD_SIZE}
+        />,
+      );
 
       expect(ringHost().className).not.toContain("ring-cyan-300");
 

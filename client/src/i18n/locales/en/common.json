@@ -19,7 +19,8 @@
     "defaultEyebrow": "Workspace Tool"
   },
   "pausedBanner": {
-    "message": "Game paused — {{reason}}"
+    "message": "Game paused — {{reason}}",
+    "resume": "Resume"
   },
   "fullscreen": {
     "enter": "Enter fullscreen",
@@ -84,6 +85,11 @@
     "boardLayoutLegacy": "Legacy",
     "switchToSplitView": "Switch to split table view",
     "switchToLegacyView": "Switch to legacy focused view",
+    "multiplayerSplitLayoutNudge": {
+      "message": "See every opponent at once with split table view.",
+      "trySplit": "Try split view",
+      "dismiss": "Not now"
+    },
     "helpShortcuts": "Help & Shortcuts",
     "showAiHand": "Show AI Hand",
     "hideAiHand": "Hide AI Hand",

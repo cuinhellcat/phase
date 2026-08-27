@@ -31,6 +31,38 @@ export type DungeonId =
   | "Undercity"
   | "BaldursGateWilderness";
 
+// Mirrors `engine::game::dungeon::RoomPreview`. The engine is the single
+// authority for room names (CR 309.4b) and room-ability text (CR 309.4c) — the
+// client renders these strings and never carries its own room table.
+export interface RoomPreview {
+  /** Index within the dungeon; the value `ChooseDungeonRoom` carries. */
+  index: number;
+  name: string;
+  /** The room ability's printed effect, e.g. "Create a Treasure token." */
+  text: string;
+}
+
+// Mirrors `engine::game::dungeon::DungeonPreview`. `entry_room` is the topmost
+// room (CR 309.4a) — the room the venturing player enters immediately on
+// choosing this dungeon.
+export interface DungeonPreview {
+  dungeon: DungeonId;
+  name: string;
+  entry_room: RoomPreview;
+}
+
+// Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
+// venture marker currently sits, named. Delivered on
+// `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
+// only the raw room index.
+export interface DungeonRoomView {
+  dungeon: DungeonId;
+  dungeon_name: string;
+  room: RoomPreview;
+  /** Total rooms on the dungeon card, for "room 3 of 7". */
+  room_count: number;
+}
+
 // ── Game Format ─────────────────────────────────────────────────────────
 
 export type GameFormat =
@@ -55,9 +87,28 @@ export type GameFormat =
   | "Archenemy"
   | "Planechase"
   | "Limited"
-  | "Momir";
+  | "Momir"
+  | "CommanderDraft";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
+
+/**
+ * CR 100.4 / CR 100.4a: format-specific sideboard policy, mirroring the
+ * engine's tagged `SideboardPolicy` enum.
+ */
+export type SideboardPolicy =
+  | { type: "Forbidden" }
+  | { type: "Limited"; data: number }
+  | { type: "Unlimited" };
+
+/**
+ * CR 100.5 / CR 903.5a: a format's deck-size rule as a discriminated union,
+ * mirroring the engine's `DeckSizeRule`. Serde tag/content format matches the
+ * engine. Always exhaustive-switch on `type` — never assume a minimum.
+ */
+export type DeckSizeRule =
+  | { type: "Minimum"; data: number }
+  | { type: "Exactly"; data: number };
 
 export interface RangeOfInfluenceConfig {
   default_range: number;
@@ -69,15 +120,19 @@ export interface FormatConfig {
   starting_life: number;
   min_players: number;
   max_players: number;
-  deck_size: number;
+  deck_size: DeckSizeRule;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
   range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
+  /** Engine-authoritative sideboard policy. This must be sent with every
+   * format configuration; the engine intentionally treats a missing policy as
+   * `Forbidden` for legacy payloads. */
+  sideboard_policy: SideboardPolicy;
   /**
    * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */
@@ -410,6 +465,40 @@ export type SearchOrderingHint = "Unordered" | "OrderedToLibraryTop";
 export type ExileCostSourceZone = "Hand" | "Graveyard";
 export type CounterCostSelection = "SingleObject" | "AmongObjects";
 
+// CR 208.1: power is the sole aggregate axis for a tap-creatures cost today
+// (Crew CR 702.122a / Saddle CR 702.171a / Teamwork CR 702.194a all use
+// TotalPower). Typed as a one-member string-literal union — not `string` —
+// so a second engine-side `TapCreaturesAggregateStat` variant is a TS compile
+// error at every switch over it, not a silently-ignored field. Mirrors
+// `crate::types::ability::TapCreaturesAggregateStat`.
+export type TapCreaturesAggregateStat = "TotalPower";
+
+// CR 601.2f + CR 208.1: the aggregate constraint a `TapCreatures` cost
+// payment must satisfy. `comparator`/`value` are carried verbatim from the
+// engine's `TapCreaturesAggregate` (`crate::types::ability::TapCreaturesAggregate`)
+// — the client never re-derives the threshold. Only `GE` ("total power N or
+// greater") is constructible by any current engine registration site
+// (`TapCreaturesRequirement::total_power_at_least`, Teamwork's sole
+// non-test constructor); `gameStateView.ts`'s mapping is written to fail
+// loud rather than silently mis-gate if that ever changes.
+export type TapCreaturesAggregate = {
+  stat: TapCreaturesAggregateStat;
+  comparator: Comparator;
+  value: number;
+};
+
+// CR 107.3a + CR 208.1: mirrors `crate::types::ability::TapCreaturesSelectionMode`
+// (no `#[serde(tag=...)]` on the Rust enum, so this uses serde's default
+// externally-tagged representation: unit variants are bare strings, the
+// newtype variant is `{ "Aggregate": <payload> }`). `Fixed`/`VariableX` are
+// the count-bounded forms (existing `confirmedCountSelection` mapping
+// applies); `Aggregate` is the Crew/Saddle/Teamwork "total power N or
+// greater" shape and must gate confirmation on summed power, not count.
+export type TapCreaturesSelectionMode =
+  | "Fixed"
+  | "VariableX"
+  | { Aggregate: TapCreaturesAggregate };
+
 // CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
 // to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
 export type PayCostKind =
@@ -429,7 +518,11 @@ export type PayCostKind =
   | { type: "ExilePermanent"; filter: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch; count: number; selection: CounterCostSelection }
-  | { type: "TapCreatures" }
+  // CR 601.2b + CR 107.3a + CR 208.1: `mode` is the single authority for
+  // which of the three `TapCreaturesRequirement` selection semantics this
+  // payment carries (mirrors `crate::types::game_state::PayCostKind::TapCreatures`'s
+  // doc comment). See `TapCreaturesSelectionMode` above.
+  | { type: "TapCreatures"; mode: TapCreaturesSelectionMode }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
 // CR 118.12 + CR 601.2b + CR 605.3b: resumption context after a `PayCost`
@@ -579,6 +672,8 @@ export type ManaRestriction =
   | { OnlyForSpellColor: ManaColor }
   // "Spend this mana only to cast a spell from, or not from, the named zone."
   | { OnlyForSpellFromZone: ZoneSpend }
+  // "This mana can't be spent to cast spells from the named zone."
+  | { CannotCastSpellFromZone: Zone }
   // "Spend this mana only to cast a face-down spell."
   | "OnlyForFaceDownSpell"
   // "Spend this mana only to activate abilities."
@@ -831,6 +926,8 @@ export type CastChoice = { type: "Cast" } | { type: "Decline" };
 
 export type AutoMayChoice = { type: "Accept" } | { type: "Decline" };
 
+export type MayTriggerAutoChoiceScope = { type: "ExactInstance" } | { type: "SameCard" };
+
 export type MayTriggerOrigin =
   | { type: "Definition"; definition_ref: TriggerDefinitionRef }
   | { type: "Printed"; trigger_index: number }
@@ -842,17 +939,32 @@ export interface MayTriggerAutoChoiceKey {
   origin: MayTriggerOrigin;
 }
 
+export interface PrintedCardRef {
+  oracle_id: string;
+  face_name: string;
+}
+
+export type MayTriggerAutoChoiceSelector =
+  | {
+      type: "ExactInstance";
+      data: { player: PlayerId; source_id: ObjectId; origin: MayTriggerOrigin };
+    }
+  | {
+      type: "SameCard";
+      data: { player: PlayerId; printed_ref: PrintedCardRef; printed_occurrence: number };
+    };
+
 export interface MayTriggerAutoChoiceRecord {
-  key: MayTriggerAutoChoiceKey;
+  selector: MayTriggerAutoChoiceSelector;
   choice: AutoMayChoice;
 }
 
 // CR 603.5: The mutation a `SetMayTriggerAutoChoice` action performs on the
 // acting player's stored "don't ask again" auto-choices for optional ("may")
-// triggers. `Remove` echoes a stored key verbatim; `ClearAll` drops every
+// triggers. `Remove` echoes a stored selector verbatim; `ClearAll` drops every
 // stored auto-choice belonging to the acting player.
 export type MayTriggerAutoChoiceOp =
-  | { type: "Remove"; data: { key: MayTriggerAutoChoiceKey } }
+  | { type: "Remove"; data: { selector: MayTriggerAutoChoiceSelector } }
   | { type: "ClearAll" };
 
 // CR 603.3b: A live `OrderTriggers` answer is the only way to save a
@@ -1029,9 +1141,10 @@ export interface GameObject {
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
   /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
-   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
-   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
-   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+   *  a tagged-union pointing at either an Object host (Equipment, Faith's
+   *  Fetters, most Auras) or a Player host (Curse cycle, Paradox Haze — the
+   *  `Enchant player` class). FE consumers must inspect `.type` before
+   *  reading `.data`; do not treat as a bare ObjectId. */
   attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;
@@ -1811,7 +1924,7 @@ export type WaitingFor =
         resume: CostResume;
       };
     }
-  | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "BlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";
@@ -1828,7 +1941,7 @@ export type WaitingFor =
     }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
@@ -1895,7 +2008,7 @@ export type WaitingFor =
   | { type: "TimeTravelChoice"; data: { player: PlayerId; eligible: TargetRef[]; phase: "Remove" | "Add" } }
   | { type: "AssistChoosePlayer"; data: { player: PlayerId; candidates: PlayerId[]; max_generic: number; convoke_mode?: ConvokeMode } }
   | { type: "AssistPayment"; data: { caster: PlayerId; chosen: PlayerId; max_generic: number; convoke_mode?: ConvokeMode } }
-  | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; trigger_event?: GameEvent } }
+  | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; min: number; max?: number; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
@@ -1935,8 +2048,8 @@ export type WaitingFor =
       // (index into this array) instead of `ChooseOption`.
       candidate_objects: ObjectId[];
     } }
-  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
-  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonPreview[] } }
+  | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; dungeon_name: string; options: RoomPreview[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
   // CR 709.5f-g: Resolving lock/unlock-door effect needs the player to choose
   // which door (half) of the targeted Room to act on. `options` is the engine's
@@ -2340,7 +2453,7 @@ export type GameAction =
   | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId; payment_mode?: CastPaymentMode } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
-  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }
+  | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the
@@ -2995,6 +3108,33 @@ export interface DebugLibraryCardView {
 export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unknown";
 
 /**
+ * CR 109.1 + CR 205.2a: the narrowest category of the CR object taxonomy true
+ * of EVERY object in one announcement's offered choice set. Mirrors
+ * `engine::game::derived_views::TargetObjectCategory` (plain unit variants, so
+ * each reaches the wire as a bare PascalCase string).
+ */
+export type TargetObjectCategory =
+  | "Spell"
+  | "Creature"
+  | "Planeswalker"
+  | "NonlandPermanent"
+  | "Permanent"
+  | "Object";
+
+/**
+ * CR 115.1: the engine's classification of the LIVE target announcement's
+ * offered choice set, over the object/player axis. Mirrors
+ * `engine::game::derived_views::TargetChoiceKind` (serde tag="type",
+ * content="data", so the payload sits under a nested `data` key). The FE maps
+ * each kind to an i18n noun and NEVER re-derives it from `objects` — that
+ * inference is exactly what issue #7692 removed.
+ */
+export type TargetChoiceKind =
+  | { type: "Players" }
+  | { type: "Objects"; data: { category: TargetObjectCategory } }
+  | { type: "ObjectsAndPlayers"; data: { category: TargetObjectCategory } };
+
+/**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
  * consume this shape directly and never compute grouping/filtering
@@ -3003,6 +3143,8 @@ export type LegendCandidateIdentity = "Original" | "Copy" | "TokenCopy" | "Unkno
  */
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
+  visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
    * Explicit debug-only identities for the viewing player's library. Normal
    * library objects remain hidden in `GameState.objects`; only the debug
@@ -3046,8 +3188,25 @@ export interface DerivedViews {
    * Keyed by ObjectId-as-string and omitted when no legend choice is pending.
    */
   legend_candidate_identities?: Record<string, LegendCandidateIdentity>;
+  /**
+   * CR 115.1: the engine's classification of the live target announcement, or
+   * absent when no `TargetSelection`/`TriggerTargetSelection` prompt is live.
+   * Optional (not nullable): the engine omits the key under
+   * `skip_serializing_if = "Option::is_none"`. The FE names the offer from
+   * this and never re-derives it from `objects` (issue #7692).
+   */
+  current_target_kind?: TargetChoiceKind;
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
+  /**
+   * CR 309.4a-c: the named room each venturing player's marker sits on, keyed
+   * by PlayerId-as-string. `dungeon_progress` carries only the room index; the
+   * room's printed name and effect live in the engine's dungeon definitions,
+   * so this is the FE's only legitimate channel for them. Omitted when nobody
+   * is venturing. Mirrors
+   * `engine::game::derived_views::DerivedViews::dungeon_rooms`.
+   */
+  dungeon_rooms?: Record<string, DungeonRoomView>;
   /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this
@@ -3508,6 +3667,103 @@ export type ContinuousModification =
  * Error type for adapter operations. Wraps WASM/transport errors
  * with structured metadata for error handling in the UI layer.
  */
+export type ActionRejectionCode =
+  | "invalid_action"
+  | "wrong_player"
+  | "not_your_priority"
+  | "action_not_allowed"
+  | "interaction_unavailable"
+  | "interaction_not_authorized"
+  | "stale_interaction"
+  | "stale_action"
+  | "invalid_interaction_response"
+  | "interaction_payload_too_large"
+  | "interaction_constraint_unsatisfied"
+  | "interaction_cancel_only"
+  | "interaction_reducer_rejected"
+  | "unsupported_interaction_response"
+  | "resolve_all_not_ready"
+  | "debug_permission_denied";
+
+export type ActionRejectionDisposition =
+  | "invalid"
+  | "unauthorized"
+  | "unavailable"
+  | "stale"
+  | "unsupported";
+
+/** Engine-owned, viewer-filtered explanation of an action not applied. */
+export interface ActionRejection {
+  code: ActionRejectionCode;
+  disposition: ActionRejectionDisposition;
+  message: string;
+  related_object_ids: ObjectId[];
+}
+
+const ACTION_REJECTION_DISPOSITIONS: Record<
+  ActionRejectionCode,
+  ActionRejectionDisposition
+> = {
+  invalid_action: "invalid",
+  wrong_player: "unauthorized",
+  not_your_priority: "unavailable",
+  action_not_allowed: "unavailable",
+  interaction_unavailable: "unavailable",
+  interaction_not_authorized: "unauthorized",
+  stale_interaction: "stale",
+  stale_action: "stale",
+  invalid_interaction_response: "invalid",
+  interaction_payload_too_large: "invalid",
+  interaction_constraint_unsatisfied: "invalid",
+  interaction_cancel_only: "unavailable",
+  interaction_reducer_rejected: "invalid",
+  unsupported_interaction_response: "unsupported",
+  resolve_all_not_ready: "unavailable",
+  debug_permission_denied: "unauthorized",
+};
+
+/** Validates the complete viewer-safe rejection DTO at an untyped boundary. */
+export function isActionRejection(value: unknown): value is ActionRejection {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 4 || !keys.every((key) => (
+    key === "code"
+    || key === "disposition"
+    || key === "message"
+    || key === "related_object_ids"
+  ))) return false;
+  if (typeof record.code !== "string" || !(record.code in ACTION_REJECTION_DISPOSITIONS)) {
+    return false;
+  }
+  const code = record.code as ActionRejectionCode;
+  return record.disposition === ACTION_REJECTION_DISPOSITIONS[code]
+    && typeof record.message === "string"
+    && Array.isArray(record.related_object_ids)
+    && record.related_object_ids.every((id) => (
+      typeof id === "number" && Number.isSafeInteger(id) && id >= 0
+    ));
+}
+
+export type ActionOutcome<T> =
+  | { status: "applied"; result: T }
+  | { status: "rejected"; rejection: ActionRejection };
+
+/** Validates the exact tagged WASM outcome shape before its result is trusted. */
+export function isActionOutcome(value: unknown): value is ActionOutcome<unknown> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.status === "applied") {
+    return keys.length === 2 && keys.includes("status") && keys.includes("result");
+  }
+  return record.status === "rejected"
+    && keys.length === 2
+    && keys.includes("status")
+    && keys.includes("rejection")
+    && isActionRejection(record.rejection);
+}
+
 export class AdapterError extends Error {
   readonly code: string;
   readonly recoverable: boolean;
@@ -3518,13 +3774,22 @@ export class AdapterError extends Error {
    * diagnostic without the recovery layer needing to thread it back.
    */
   readonly panic?: string;
+  /** Present only when the engine returned a typed action rejection. */
+  readonly rejection?: ActionRejection;
 
-  constructor(code: string, message: string, recoverable: boolean, panic?: string) {
+  constructor(
+    code: string,
+    message: string,
+    recoverable: boolean,
+    panic?: string,
+    rejection?: ActionRejection,
+  ) {
     super(message);
     this.name = "AdapterError";
     this.code = code;
     this.recoverable = recoverable;
     this.panic = panic;
+    this.rejection = rejection;
   }
 }
 
@@ -3606,24 +3871,12 @@ export function isStateLostMessage(message: string): boolean {
 }
 
 /**
- * Detect the engine's actor-authorization rejections. `submit_action` in
- * `engine-wasm/src/lib.rs` formats `EngineError::WrongPlayer` (Display: "Wrong
- * player") and `EngineError::NotYourPriority` (Display: "Not your priority")
- * as `Engine error: <display>`. Match the exact strings — these are the benign
- * stale-action race (see `AdapterErrorCode.STALE_ACTION`), never a state-loss
- * or panic.
- */
-export function isStaleActionMessage(message: string): boolean {
-  return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
-}
-
-/**
- * Transport-neutral test for "the engine rejected this action, but nothing
- * changed and nothing needs recovering". Single authority for what counts as a
- * benign stale rejection, so every transport agrees.
+ * Legacy transport-only detection for the one pre-structured ReorderHand
+ * rejection that can be safely dropped. All structured rejections use the
+ * engine-provided disposition instead.
  */
 export function isStaleRejectionMessage(message: string): boolean {
-  return isStaleActionMessage(message) || isStaleReorderMessage(message);
+  return isStaleReorderMessage(message);
 }
 
 /**
@@ -3640,10 +3893,17 @@ export function isStaleRejectionMessage(message: string): boolean {
  * caller should drop it, not re-submit. Every other rejection stays a
  * recoverable `ACTION_REJECTED` so existing retry/surface behavior is unchanged.
  */
-export function actionRejectionError(reason: string): AdapterError {
-  return isStaleRejectionMessage(reason)
-    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
-    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+export function actionRejectionError(rejection: ActionRejection): AdapterError;
+export function actionRejectionError(reason: string): AdapterError;
+export function actionRejectionError(rejection: ActionRejection | string): AdapterError {
+  if (typeof rejection === "string") {
+    return isStaleRejectionMessage(rejection)
+      ? new AdapterError(AdapterErrorCode.STALE_ACTION, rejection, false)
+      : new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection, true);
+  }
+  return rejection.disposition === "stale"
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, rejection.message, false, undefined, rejection)
+    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, rejection.message, true, undefined, rejection);
 }
 
 /**
@@ -3662,12 +3922,10 @@ export function resolveAllRejectionError(reason: string): AdapterError {
 }
 
 /**
- * Detect the engine's rejection of a `ReorderHand` whose order no longer names
- * the current hand. `apply_action` formats
- * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
- * `Engine error: ReorderHand: expected ...` and returns it BEFORE mutating any
- * player state, so — exactly like the actor-authorization rejections above —
- * nothing changed and there is nothing to recover.
+ * Detect the legacy string representation of a `ReorderHand` rejection from
+ * a pre-structured remote engine. Local WASM now emits `stale_action` with a
+ * typed disposition instead; this helper remains only until every remote
+ * transport has adopted the same DTO.
  *
  * This is the benign client/engine desync behind issue #5913: a drag computes
  * its order against the hand as displayed, but a draw or discard can land in
@@ -3679,8 +3937,8 @@ export function resolveAllRejectionError(reason: string): AdapterError {
  * Hand order carries no game-rules meaning (CR 402.3), so a dropped reorder
  * costs the player nothing beyond re-dragging.
  *
- * Covers BOTH staleness rejections `apply_action` can raise, because a hand can
- * go stale two ways in the same window:
+ * Covers both legacy string shapes because a hand can go stale two ways in the
+ * same window:
  *   - the count changed (a draw or a discard alone) — "expected {n} ids, got
  *     {m}", a prefix match since the message embeds the counts;
  *   - the count held but the ids moved (a discard AND a draw) — "order is not a
@@ -3896,7 +4154,7 @@ export type AiCardSubsetResult =
 export type AiProposalSubmission =
   | { status: "applied"; result: SubmitResult }
   | { status: "stale"; reason: string }
-  | { status: "rejected"; reason: string };
+  | { status: "rejected"; rejection: ActionRejection };
 
 export interface EngineAdapter {
   initialize(): Promise<void>;

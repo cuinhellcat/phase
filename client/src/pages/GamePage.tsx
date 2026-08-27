@@ -147,7 +147,7 @@ import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
 import { AttachmentFan } from "../components/board/AttachmentFan.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
-import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
+import { P2PHostAdapter, type P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
 import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
@@ -158,7 +158,6 @@ import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
 import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
-import type { MultiplayerBoardLayout } from "../stores/preferencesStore.ts";
 import {
   FORMAT_DEFAULTS,
   getOpponentDisplayName,
@@ -187,6 +186,7 @@ import {
   getSeatCount,
   getWaitingForObjectChoiceIds,
   isSplitBoardActive,
+  resolveMultiplayerBoardLayout,
   resolveFocusedOpponent,
   shouldRenderFocusedOpponentTopRow,
   type ZoneViewerTarget,
@@ -952,6 +952,12 @@ function GamePageContent({
   const cardReportDialogOpen = useUiStore((s) => s.cardReportDialogOpen);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
+  const multiplayerSplitLayoutNudgeDismissed = usePreferencesStore(
+    (s) => s.multiplayerSplitLayoutNudgeDismissed,
+  );
+  const setMultiplayerSplitLayoutNudgeDismissed = usePreferencesStore(
+    (s) => s.setMultiplayerSplitLayoutNudgeDismissed,
+  );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
   const toggleDebugClickModeButtonVisible = useUiStore(
@@ -990,18 +996,40 @@ function GamePageContent({
   const activeOpponentId =
     resolveFocusedOpponent(focusedOpponent, opponents) ?? opponents[0] ?? null;
   const seatCount = getSeatCount(gameState);
-  const effectiveMultiplayerBoardLayout: MultiplayerBoardLayout =
-    seatCount > 2 && canActForWaitingState && getBoardChoiceView(waitingFor, objects)?.intent === "untap"
-      ? "split"
-      : multiplayerBoardLayout;
+  const resolvedMultiplayerBoardLayout = resolveMultiplayerBoardLayout(
+    multiplayerBoardLayout,
+    seatCount,
+    isMobile,
+  );
+  const untapForcedSplit =
+    seatCount > 2 &&
+    canActForWaitingState &&
+    getBoardChoiceView(waitingFor, objects)?.intent === "untap";
+  const effectiveMultiplayerBoardLayout = untapForcedSplit
+    ? "split"
+    : resolvedMultiplayerBoardLayout;
   const splitBoardActive = isSplitBoardActive(effectiveMultiplayerBoardLayout, seatCount);
   const renderFocusedOpponentTopRow = shouldRenderFocusedOpponentTopRow(
     effectiveMultiplayerBoardLayout,
     seatCount,
   );
   const handleToggleMultiplayerBoardLayout = useCallback(() => {
-    setMultiplayerBoardLayout(multiplayerBoardLayout === "split" ? "focused" : "split");
-  }, [multiplayerBoardLayout, setMultiplayerBoardLayout]);
+    setMultiplayerBoardLayout(
+      resolvedMultiplayerBoardLayout === "split" ? "focused" : "split",
+    );
+  }, [resolvedMultiplayerBoardLayout, setMultiplayerBoardLayout]);
+  const handleTryMultiplayerSplitLayout = useCallback(() => {
+    setMultiplayerBoardLayout("split");
+  }, [setMultiplayerBoardLayout]);
+  const handleDismissMultiplayerSplitLayoutNudge = useCallback(() => {
+    setMultiplayerSplitLayoutNudgeDismissed(true);
+  }, [setMultiplayerSplitLayoutNudgeDismissed]);
+  const showMultiplayerSplitLayoutNudge =
+    seatCount > 2 &&
+    !isMobile &&
+    multiplayerBoardLayout === "focused" &&
+    !untapForcedSplit &&
+    !multiplayerSplitLayoutNudgeDismissed;
   const gridTemplateRows = splitBoardActive ? splitGridTemplateRows : focusedGridTemplateRows;
   const handleKickPlayer = useCallback((pid: number) => {
     const adapter = useGameStore.getState().adapter as
@@ -1009,6 +1037,9 @@ function GamePageContent({
       | null;
     void adapter?.kickPlayer?.(pid);
   }, []);
+  const handleResumeP2P = useCallback(() => {
+    if (adapter instanceof P2PHostAdapter) adapter.requestResume();
+  }, [adapter]);
 
   // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
   // React.memo, which shallow-compares props; without stable element
@@ -1277,6 +1308,10 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
     "--game-split-safe-top": "0px",
+    // Where the targeting prompt starts, which is the only part of its
+    // placement this page can state: the split layout puts seat panes at the
+    // very top of the board, so the prompt clears them. How TALL the block is
+    // stays the block's own business — see TargetingOverlay.
     "--game-targeting-prompt-top": splitBoardActive
       ? isMobile ? "4.25rem" : "4.75rem"
       : "0.25rem",
@@ -1620,8 +1655,19 @@ function GamePageContent({
         isOnlineMode={isOnlineMode}
         showAiHand={showAiHand}
         onToggleAiHand={() => setShowAiHand((v) => !v)}
-        multiplayerBoardLayout={seatCount > 2 ? multiplayerBoardLayout : undefined}
-        onToggleMultiplayerBoardLayout={seatCount > 2 ? handleToggleMultiplayerBoardLayout : undefined}
+        multiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? resolvedMultiplayerBoardLayout : undefined
+        }
+        onToggleMultiplayerBoardLayout={
+          seatCount > 2 && !untapForcedSplit ? handleToggleMultiplayerBoardLayout : undefined
+        }
+        showMultiplayerSplitLayoutNudge={showMultiplayerSplitLayoutNudge}
+        onTryMultiplayerSplitLayout={
+          showMultiplayerSplitLayoutNudge ? handleTryMultiplayerSplitLayout : undefined
+        }
+        onDismissMultiplayerSplitLayoutNudge={
+          showMultiplayerSplitLayoutNudge ? handleDismissMultiplayerSplitLayoutNudge : undefined
+        }
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
@@ -1690,7 +1736,11 @@ function GamePageContent({
       )}
 
       {/* P2P pause banner — visible to everyone while paused. */}
-      <PausedBanner isVisible={pauseReason !== null} reason={pauseReason ?? ""} />
+      <PausedBanner
+        isVisible={pauseReason !== null}
+        reason={pauseReason ?? ""}
+        onResume={isP2PHost && adapter instanceof P2PHostAdapter ? handleResumeP2P : undefined}
+      />
 
       {/* P2P host-only disconnect decision modal. */}
       {isP2PHost && disconnectChoice !== null && (
@@ -1910,7 +1960,7 @@ function GamePageContent({
         {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
         <AbilityChoiceModal />
 
-        {/* Player-attached Aura viewer (Curse cycle, Faith's Fetters, etc.).
+        {/* Player-attached Aura viewer (Curse cycle, Paradox Haze, etc.).
             Mounted here — not from inside HudPlate where the badge lives —
             so the dialog's `fixed inset-0` shell anchors to the viewport
             instead of HudPlate's transform-CB bounding box. */}
@@ -3032,6 +3082,8 @@ export function manaRestrictionLabel(
       return t("gamePage.manaRestrictions.onlyForSpellColor", restriction.data);
     case "onlyForSpellFromZone":
       return t("gamePage.manaRestrictions.onlyForSpellFromZone", restriction.data);
+    case "cannotCastSpellFromZone":
+      return t("gamePage.manaRestrictions.cannotCastSpellFromZone", restriction.data);
     case "onlyForFaceDownSpell":
       return t("gamePage.manaRestrictions.onlyForFaceDownSpell");
     case "onlyForAny":

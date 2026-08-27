@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::types::action_rejection::ActionRejection;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
@@ -40,6 +41,31 @@ pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: Obje
         .objects
         .get(&id)
         .is_some_and(|object| object.name != HIDDEN_CARD_NAME)
+}
+
+/// Projects ephemeral rejection metadata through the same viewer filter as the
+/// state snapshot. The state is filtered before identity checks so hidden card
+/// names can never be reintroduced through a rejected action's object ids.
+pub fn filter_action_rejection_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    rejection: &ActionRejection,
+) -> ActionRejection {
+    if rejection.related_object_ids.is_empty() {
+        return rejection.clone();
+    }
+    let filtered = filter_state_for_viewer(state, viewer);
+    ActionRejection {
+        code: rejection.code,
+        disposition: rejection.disposition,
+        message: rejection.message.clone(),
+        related_object_ids: rejection
+            .related_object_ids
+            .iter()
+            .copied()
+            .filter(|object_id| interaction_object_identity_is_visible(&filtered, *object_id))
+            .collect(),
+    }
 }
 
 /// Capture the authoritative display characteristics learned at the search
@@ -1661,7 +1687,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .retain(|pid, _| *pid == viewer);
     filtered
         .may_trigger_auto_choices
-        .retain(|record| record.key.player == viewer);
+        .retain(|record| record.selector.player() == viewer);
     // CR 723.4: "If information about an object in the game would be visible to the player
     // being controlled, it's visible to both that player and the player controlling them."
     // The pin vector's other carriers already answer "may this viewer see it" with this same
@@ -3044,7 +3070,10 @@ mod tests {
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
-        assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+        assert_eq!(
+            filtered.may_trigger_auto_choices[0].selector.player(),
+            PlayerId(0)
+        );
     }
 
     /// CR 603.3b: saved trigger-ordering templates are per-player private preference
@@ -6531,6 +6560,7 @@ mod tests {
             source_id: hidden,
             description: Some("Accepted triggered mana may".to_string()),
             may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
         };
         (state, MARKER)
     }

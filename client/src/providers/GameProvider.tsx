@@ -795,9 +795,12 @@ export function GameProvider({
 
         try {
           if (mode === "p2p-host") {
-            const activeHost = useMultiplayerStore.getState().getActiveP2PHost();
-            if (activeHost?.gameId === gameId) {
-              const adapter = activeHost.adapter;
+            // Browser P2P hosts always own seat zero. Do this before claiming
+            // a pre-game adapter: its one-shot identity event may already have
+            // fired while the lobby was starting the game.
+            useMultiplayerStore.getState().setActivePlayerId(0);
+            const adapter = useMultiplayerStore.getState().takeActiveP2PHost(gameId);
+            if (adapter) {
               p2pAdapter = adapter;
               wireP2PEvents(adapter);
               await resumeP2PHost(gameId, adapter);
@@ -1463,6 +1466,11 @@ export function GameProvider({
           player: ExpandedDeck;
           opponent: ExpandedDeck;
           ai_decks: ExpandedDeck[];
+          // CR 903.13f(3): the draft's set code, written by
+          // `podCommanderDeckPayload`.  Stated here because the payload
+          // carries it; it is passed through opaquely to the engine, so this
+          // annotation documents the contract rather than changing behaviour.
+          draft_set_code?: string | null;
         };
         try {
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);

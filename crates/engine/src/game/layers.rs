@@ -3475,6 +3475,14 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         TargetFilter::ChosenDamageSource { filter } => filter
             .as_deref()
             .is_some_and(target_filter_reads_life_total),
+        // CR 102.1 + CR 119 + CR 611.3a: the player-axis crossing. A
+        // `PlayerAttribute { attr: LifeTotal, .. }` payload reads the life family
+        // directly (Namor, Atlantean King's "a player who has more life than
+        // you"), so route it through the same authority the object-axis mirror
+        // `FilterProp::ControllerMatches` uses. Grouping this with the
+        // payload-free player references below would under-report the layer
+        // dependency at a life-change site.
+        TargetFilter::PlayerMatching { player } => player_filter_reads_life(player),
         // Payload-free / player-reference / stack-reference / anaphoric filters —
         // none carry a nested walked payload and none read the life family.
         // Enumerated explicitly (no wildcard).
@@ -17268,6 +17276,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17296,6 +17305,7 @@ mod tests {
         let exiled = make_exiled_card(&mut state, PlayerId(0));
         let perms = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
         perms.push(CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::UntilNextTurnOf {
                 player: PlayerScope::Controller,
             },
@@ -17312,6 +17322,7 @@ mod tests {
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17352,6 +17363,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17493,6 +17505,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextStepOf {
                     step: Phase::Upkeep,
                     player: PlayerScope::Controller,
@@ -17643,6 +17656,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17664,6 +17678,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17704,6 +17719,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -21830,6 +21846,47 @@ mod tests {
                 filter: life_filter,
             }
         ));
+    }
+
+    /// CR 102.1 + CR 119 + CR 611.3a: `TargetFilter::PlayerMatching` — the
+    /// player-axis mirror of `FilterProp::ControllerMatches` — must ROUTE its
+    /// payload here, not sit with the payload-free player references.
+    ///
+    /// Namor, Atlantean King's "a player who has more life than you" is exactly
+    /// a `PlayerAttribute { attr: LifeTotal, value: LifeTotal }`, so grouping the
+    /// variant with the non-reading arms would under-report the layer dependency
+    /// at a life-change site. Revert-failing: move the arm into that group and
+    /// the first assertion flips.
+    #[test]
+    fn player_matching_routes_its_payloads_life_reads() {
+        let reads = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GT,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+            }),
+        };
+        assert!(target_filter_reads_life_total(&reads));
+
+        // Negative sibling: a life-free payload must stay `false`, so the
+        // assertion above is about the ROUTING and not about the variant
+        // answering `true` unconditionally.
+        let life_free = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 8 }),
+            }),
+        };
+        assert!(!target_filter_reads_life_total(&life_free));
     }
 
     /// Filter-routed reads: the classifier descends nested payloads on every

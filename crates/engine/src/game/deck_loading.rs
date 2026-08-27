@@ -160,6 +160,19 @@ pub struct DeckList {
     /// means no AI seat is cEDH and validation is skipped — safe default.
     #[serde(default)]
     pub ai_difficulties: Vec<String>,
+    /// Set code of the draft this deck was built from. `None` means constructed
+    /// play — there is no draft behind the deck.
+    ///
+    /// CR 903.13f(3): "If the draft contained draft boosters from Commander
+    /// Masters, any card which can be a player's commander by itself and whose
+    /// color identity includes one or fewer colors is considered to have the
+    /// partner ability for the purposes of deckbuilding." (See CR 702.124,
+    /// "Partner.") This field is what decides whether that grant is in force.
+    ///
+    /// Old payloads that omit the field deserialize as `None`, which is the
+    /// constructed-play value and therefore the safe default.
+    #[serde(default)]
+    pub draft_set_code: Option<String>,
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
@@ -678,7 +691,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `deck_validation.rs`) accepts the entries; this is the rule-enforcement
     // boundary.
     let drop_sideboard = matches!(
-        state.format_config.format.sideboard_policy(),
+        state.format_config.sideboard_policy,
         crate::types::format::SideboardPolicy::Forbidden
     );
     let sideboard_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
@@ -694,7 +707,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // game pool; construction validation remains responsible for rejecting an
     // oversized submitted list.
     let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if !state.format_config.format.uses_commander() {
+        if !state.format_config.uses_commander {
             return Vec::new();
         }
         submitted

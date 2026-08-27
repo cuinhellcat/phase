@@ -18,7 +18,7 @@ import type {
   FormatConfig,
 } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq, resolveAllRejectionError } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -203,6 +203,68 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 42 — FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *      tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
+ *      CR 903.13f(1) makes Commander Draft a command-zone format with a
+ *      minimum rather than an exact size, and GameFormat gained a
+ *      CommanderDraft variant (CR 903.13a). A PARSE bump like 23 and 36, not a
+ *      capability bump like 24: FormatConfig::deck_size carries neither a
+ *      serde default nor a deserialize_with, so a v41 peer's "deck_size": 60
+ *      fails against the adjacently tagged enum and a v42 peer's
+ *      {"type":"Minimum","data":60} fails against a v41 u16 — the break is
+ *      unconditional and runs in BOTH directions, for every format.
+ *      GameState.format_config's serde default does NOT rescue it: a
+ *      field-level default applies only when the key is ABSENT, and an old
+ *      peer sends the key present with the old inner shape, so the default
+ *      never runs. The GameFormat::CommanderDraft variant is the second and
+ *      narrower half — it breaks only when that variant is actually
+ *      serialized.
+ * 41 — Operational failure responses are correlated to their pending action.
+ * 40 — Action rejection responses carry engine-owned structured context.
+ * 39 — ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *      GameState/ManaUnit restriction used by Karolina Dean. Older peers
+ *      cannot deserialize that externally tagged enum variant.
+ * 38 — WaitingFor.ChooseObjectsSelection publishes the resolving effect's
+ *      min and optional max bounds. Older clients silently ignore these
+ *      additive fields and offer selections outside the engine-authoritative
+ *      range, so the full-game handshake refuses that capability mismatch.
+ * 37 — PayCostKind::TapCreatures changed from { aggregate:
+ *      Option<TapCreaturesAggregate> } to a required { mode:
+ *      TapCreaturesSelectionMode } (Fixed/VariableX/Aggregate) — the fix that
+ *      also unlocks the u32::MAX X-sentinel tap-cost form (Glacian,
+ *      Powerstone Engineer + 8 sibling cards, #7799). mode carries no serde
+ *      default: a GameState snapshot paused mid-TapCreatures payment
+ *      (Crew/Saddle/Teamwork/Conspire, or the newly-unlocked X-sentinel form)
+ *      under the old aggregate shape now fails deserialization rather than
+ *      risk silently misclassifying an aggregate payment as fixed-count (or
+ *      vice versa) — exactly the ambiguity TapCreaturesSelectionMode exists to
+ *      make unrepresentable. Old and new peers can't parse each other's
+ *      serialized snapshots while such a payment is in flight.
+ * 36 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *      DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *      required dungeon_name, and changed options from number[] to
+ *      RoomPreview[], so each option carries the room's printed name and
+ *      room-ability text (CR 309.4b-c). A PARSE bump like 23, not a capability
+ *      bump like 24: none of the new fields carry a serde default, so a v35
+ *      peer fails deserialization on a dungeon-choice GameState outright
+ *      rather than degrading silently. DerivedViews.dungeon_rooms rides along
+ *      in the same bump — it IS serde-optional, but this client deleted its
+ *      dungeon_progress room-index derivation, so a v35 server that omits it
+ *      would leave this client rendering no dungeon badge at all.
+ * 35 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *      classification of the live target announcement. A CAPABILITY bump like
+ *      24 and 32, not a parse bump: the field is serde-optional, but this
+ *      client deleted inferTargetNoun, so a v34 server that omits it would
+ *      leave this client naming no target at all — silently, with no parse
+ *      error to catch it. The handshake is the only place that pairing is
+ *      refusable.
+ * 34 — DraftKind.CommanderDraft (CR 903.13a) is serialized by draft WebSocket
+ *      messages, and DraftAction::Pick renamed card_instance_id to
+ *      card_instance_ids: Vec<String> for a whole CR 903.13b pick step. A
+ *      PARSE bump, not a capability bump — the renamed field carries no serde
+ *      default. See PROTOCOL_VERSION in crates/lobby-broker/src/protocol.rs
+ *      for the full entry, including what it does and does not gate on the
+ *      lobby.
  * 33 — LegendCandidateIdentity adds Unknown so face-down legend candidates do
  *      not publish an affirmative original/copy identity.
  * 32 — DerivedViews.legend_candidate_identities publishes the engine-authored
@@ -262,7 +324,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 33;
+export const PROTOCOL_VERSION = 42;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -292,10 +354,14 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * twice for GameState-only changes and the derived lobby window went disjoint
  * from the deployed broker's.
  *
+ * 2 — FormatConfig.deck_size retyped from a bare integer to the adjacently
+ *     tagged DeckSizeRule, carried by CreateGameWithSettings, JoinTargetInfo
+ *     and PeerInfo. See LOBBY_PROTOCOL_VERSION in
+ *     crates/lobby-broker/src/protocol.rs for what the floor move evicts.
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 1;
+export const LOBBY_PROTOCOL_VERSION = 2;
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -307,7 +373,7 @@ export const LOBBY_PROTOCOL_VERSION = 1;
  * new variant it may never need — which is precisely how a protocol-bumping
  * release used to strand every older desktop build.
  */
-export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 1;
+export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
 
 /** Identity advertised by the server in its `ServerHello`. */
 export interface ServerInfo {
@@ -325,7 +391,20 @@ export interface ServerInfo {
 }
 
 /**
- * Why this client cannot talk to `info`, or `null` when it can.
+ * Which protocol surface a socket is opened for.
+ *
+ * The surface is a property of the CALLER's intent, not of the server: a `Full`
+ * server serves both. `ClientMessage::SubscribeLobby` and friends are "always
+ * allowed" in either server mode (`reject_if_disabled` in
+ * `crates/phase-server/src/main.rs`), and the whole lobby frame set —
+ * `LobbyClientMessage` / `LobbyServerMessage` in
+ * `crates/lobby-broker/src/protocol.rs` — carries no `GameState` and no
+ * `GameAction`. That is what lets the two surfaces version independently.
+ */
+export type ProtocolSurface = "full" | "lobby";
+
+/**
+ * Why this client cannot talk to `info` on `surface`, or `null` when it can.
  *
  * SINGLE AUTHORITY for the protocol window. The handshake in
  * `openPhaseSocket.ts` and the compatibility badge in `multiplayerStore.ts`
@@ -333,24 +412,37 @@ export interface ServerInfo {
  * as usable by the other.
  *
  * Three policies, by surface:
- *  - Full servers: exact match. GameState/GameAction payloads are neither
+ *  - Full-game surface: exact match. GameState/GameAction payloads are neither
  *    forward- nor backward-compatible across a bump.
- *  - Lobby brokers advertising a lobby version: floor only, NO CEILING. See
- *    {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
- *  - Lobby brokers that predate the field: the legacy one-version window on
- *    `protocolVersion`, unchanged, so already-deployed brokers stay reachable.
+ *  - Lobby surface, server advertising a lobby version: floor only, NO CEILING.
+ *    See {@link MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}.
+ *  - Lobby surface, server predating the field: the legacy one-version window
+ *    on `protocolVersion`, unchanged, so already-deployed brokers stay
+ *    reachable.
+ *
+ * The surface comes from the caller, never from `info.mode`. A `Full` server
+ * serves the lobby too, so reading the mode alone refuses a lobby socket to a
+ * server whose `lobbyProtocolVersion` matches and whose only incompatibility is
+ * with a game that socket will never carry — which a browser can only report as
+ * "unreachable", not as "a version you cannot play on".
  */
-export function serverProtocolRejection(info: ServerInfo): string | null {
-  if (info.mode === "LobbyOnly" && info.lobbyProtocolVersion !== undefined) {
+export function serverProtocolRejection(
+  info: ServerInfo,
+  surface: ProtocolSurface = "full",
+): string | null {
+  // A `LobbyOnly` server has no full-game surface at all, so every socket to
+  // one is a lobby socket whatever the caller asked for.
+  const onLobbySurface = surface === "lobby" || info.mode === "LobbyOnly";
+
+  if (onLobbySurface && info.lobbyProtocolVersion !== undefined) {
     return info.lobbyProtocolVersion < MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
       ? `Lobby protocol version ${info.lobbyProtocolVersion} is older than supported (client speaks ${LOBBY_PROTOCOL_VERSION}, min ${MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL}).`
       : null;
   }
 
-  const minAccepted =
-    info.mode === "LobbyOnly"
-      ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
-      : MIN_SUPPORTED_SERVER_PROTOCOL;
+  const minAccepted = onLobbySurface
+    ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL
+    : MIN_SUPPORTED_SERVER_PROTOCOL;
   if (info.protocolVersion < minAccepted) {
     return `Server protocol version ${info.protocolVersion} is older than supported (client speaks ${PROTOCOL_VERSION}, min ${minAccepted}). Please wait for the lobby to finish rolling out.`;
   }
@@ -380,6 +472,7 @@ export type WsAdapterEvent =
   | { type: "playerEliminated"; playerId: PlayerId; becameSpectator: boolean }
   | { type: "spectatorJoined"; name: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
+  | { type: "aiDriverFault"; id: number; revision: number; message: string }
   | { type: "error"; message: string }
   | { type: "deckRejected"; reason: string }
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
@@ -1595,11 +1688,14 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ActionRejected": {
-        const data = msg.data as { reason: string };
+        const data = msg.data as { rejection?: unknown };
+        const error = isActionRejection(data.rejection)
+          ? actionRejectionError(data.rejection)
+          : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
           this.pendingReject(
-            actionRejectionError(data.reason),
+            error,
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -1615,7 +1711,20 @@ export class WebSocketAdapter implements EngineAdapter {
           // hazard here — rejecting an in-flight ACTION's promise with a
           // TAKEBACK's reason string, which would be a misattribution rather
           // than merely a stale spinner.
-          this.emit({ type: "requestRejected", reason: data.reason });
+          this.emit({ type: "requestRejected", reason: error.message });
+        }
+        break;
+      }
+
+      case "ActionFailed": {
+        const data = msg.data as { message: string };
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        } else {
+          this.emit({ type: "error", message: data.message });
         }
         break;
       }
@@ -1648,9 +1757,22 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ResolveAllRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         if (this.pendingResolveAll?.requestId === data.request_id) {
-          this.pendingResolveAll.reject(resolveAllRejectionError(data.reason));
+          this.pendingResolveAll.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid Resolve All rejection.", false),
+          );
+          this.pendingResolveAll = null;
+        }
+        break;
+      }
+
+      case "ResolveAllFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        if (this.pendingResolveAll?.requestId === data.request_id) {
+          this.pendingResolveAll.reject(new AdapterError("WS_ERROR", data.message, false));
           this.pendingResolveAll = null;
         }
         break;
@@ -1677,12 +1799,35 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ManaPaymentPreviewRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(actionRejectionError(data.reason));
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
         }
+        break;
+      }
+
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+        }
+        break;
+      }
+
+      case "RequestRejected": {
+        const data = msg.data as { reason?: unknown };
+        this.emit({
+          type: "requestRejected",
+          reason: typeof data.reason === "string" ? data.reason : "Server rejected the request.",
+        });
         break;
       }
 
@@ -1851,6 +1996,27 @@ export class WebSocketAdapter implements EngineAdapter {
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         this.emit({ type: "error", message: data.message });
+        break;
+      }
+
+      case "AiDriverFault": {
+        const data = msg.data as {
+          fault: { id: number; after_state_revision: number; cause: unknown };
+        };
+        const message = "Native AI driver stopped; this game can no longer advance.";
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        }
+        this.emit({
+          type: "aiDriverFault",
+          id: data.fault.id,
+          revision: data.fault.after_state_revision,
+          message,
+        });
+        this.emit({ type: "error", message });
         break;
       }
     }

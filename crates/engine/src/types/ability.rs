@@ -1493,14 +1493,25 @@ pub enum DamageRedirectTarget {
     AttachedToSource,
 }
 
-/// Shield type for one-shot replacement effects that expire at cleanup.
+/// Classification of WHAT a damage-affecting replacement effect does —
+/// regenerate, prevent, modify a damage amount, or redirect.
+///
+/// **Carries no lifetime meaning.** The lifetime lives in
+/// [`ReplacementDefinition::expiry`] and nowhere else: CR 611.2a bounds a
+/// resolution-created shield by its stated window, while CR 604.2 makes a PRINTED
+/// static ability's shield last as long as its object remains in the appropriate
+/// zone. Both are `ShieldKind::Prevention { amount: All }` on the wire, and only
+/// `expiry` tells them apart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShieldKind {
     #[default]
     None,
     /// CR 701.19a: Regeneration shield — consumed on use, expires at cleanup.
     Regeneration,
-    /// CR 615: Prevention shield — absorbs/prevents damage, expires at cleanup.
+    /// CR 615: Prevention shield — absorbs/prevents damage. The ONLY shield kind
+    /// shared between the printed static-ability lowering (CR 604.2 — durable,
+    /// `expiry: None`) and the resolution path (CR 611.2a — turn-bound via
+    /// `expiry`), so this variant on its own says nothing about lifetime.
     Prevention { amount: PreventionAmount },
     /// CR 614.5 + CR 614.1a: One-shot damage-amount replacement created by an
     /// effect ("the next time ... would deal damage this turn, it deals double
@@ -1575,6 +1586,10 @@ impl ShieldKind {
         matches!(self, ShieldKind::None)
     }
 
+    /// Classification only — **never** use this as an expiry predicate (see
+    /// [`ReplacementDefinition::expiry`]). A printed static's shield (CR 604.2)
+    /// and a resolution-created one (CR 611.2a) answer `true` alike while having
+    /// opposite lifetimes.
     pub fn is_shield(&self) -> bool {
         !self.is_none()
     }
@@ -3063,6 +3078,10 @@ pub enum ManaSpendRestriction {
     /// accepts the legacy bare-`Zone` serialized form for backward compatibility,
     /// mapping it to the inclusion reading.
     SpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 601.2a: "This mana can't be spent to cast spells from
+    /// [zone]." Unlike `SpellFromZone(NotFrom)`, this prohibits one class of
+    /// spell cast without restricting ability, effect, or special-action costs.
+    CannotCastSpellFromZone(Zone),
     /// CR 106.6 + CR 116.2m + CR 709.5e: "Spend this mana only to unlock
     /// [a ]door[s]" — the special-action half of a spend restriction. A leaf of
     /// the [`ManaSpendRestriction::Any`] disjunction (Smoky Lounge: "cast Room
@@ -3159,6 +3178,7 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithColorCount { .. }
             | ManaSpendRestriction::SpellOfSourceChosenColor
             | ManaSpendRestriction::SpellFromZone(_)
+            | ManaSpendRestriction::CannotCastSpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
             // be production-live (`.all()`). Partial absorption would drop
@@ -3525,6 +3545,64 @@ pub enum RestrictionPlayerScope {
 // 500+ byte variant; the permissions are short-lived per-object grants, not
 // hot-path bulk collections, so the size is intentional. Mirrors the documented
 // allow on `Effect`.
+/// CR 118.9a: Provenance of a [`CastingPermission::PlayFromExile`] grant.
+///
+/// An `Impulse` grant is a self-standing "you may play it" permission with
+/// full cast authority (impulse draw, Warp returns, mill-to-graveyard play
+/// grants). A `LandLookCompanion` is the land-play/look half that
+/// `cast_from_zone` installs ALONGSIDE an alternative-cost grant (a "you may
+/// play it … without paying its mana cost" sentence installs
+/// `ExileWithAltCost` for the cast half and the companion for CR 305.1 land
+/// plays and the CR 406.3b face-down-exile look): provenance, not cast
+/// authority — the sibling alt-cost grant is the elected cast route, so cast
+/// elections skip companions and they lend the {3} face-down cast no zone
+/// authority (CR 601.2b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayFromExileProvenance {
+    /// Self-standing play permission with full cast authority (the default,
+    /// and what every pre-marker serialized grant deserializes to).
+    #[default]
+    Impulse,
+    /// Land/look companion of an alternative-cost grant — never elected as a
+    /// cast authority.
+    LandLookCompanion,
+}
+
+impl PlayFromExileProvenance {
+    /// Serde gate: the default `Impulse` stays off the wire.
+    pub fn is_impulse(&self) -> bool {
+        matches!(self, PlayFromExileProvenance::Impulse)
+    }
+}
+
+/// CR 118.9a: what the `cost` of an [`CastingPermission::ExileWithAltCost`]
+/// grant IS — a true alternative cost (cast "without paying its mana cost",
+/// suspend/keyword substitutes, any cost that replaces the printed one), or
+/// the card's own printed cost restated because the grant simply permits a
+/// NORMAL cast from the zone (the Nashi-class "you may play/cast that card"
+/// with ordinary payment). A `NormalCost` grant is a normal-cost route: it
+/// may authorize the {3} face-down cast, which is then the sole alternative
+/// applied (CR 702.168b + CR 601.2b); an `Alternative` grant may not.
+///
+/// `Alternative` is the serde default — every pre-provenance serialized
+/// grant deserializes to the CR-safe conservative reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExileGrantCostProvenance {
+    /// The grant's cost replaces the printed mana cost (an alternative cost).
+    #[default]
+    Alternative,
+    /// The grant restates the card's own printed cost — a normal cast
+    /// permitted from the zone, no alternative cost applied.
+    NormalCost,
+}
+
+impl ExileGrantCostProvenance {
+    /// Serde gate: the default `Alternative` stays off the wire.
+    pub fn is_alternative(&self) -> bool {
+        matches!(self, ExileGrantCostProvenance::Alternative)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3537,6 +3615,15 @@ pub enum CastingPermission {
     /// by Siege victory triggers (CR 310.12b: "cast it transformed without paying its mana cost").
     ExileWithAltCost {
         cost: ManaCost,
+        /// CR 118.9a: whether `cost` is a true alternative cost or the card's
+        /// own printed cost restated for a normal cast — see
+        /// [`ExileGrantCostProvenance`]. Decides whether this grant can lend
+        /// the face-down cast zone authority (CR 702.168b).
+        #[serde(
+            default,
+            skip_serializing_if = "ExileGrantCostProvenance::is_alternative"
+        )]
+        cost_provenance: ExileGrantCostProvenance,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
         /// CR 702.85a: optional cast-time predicate gating whether the cast may
@@ -3718,6 +3805,15 @@ pub enum CastingPermission {
         /// printed invalidation event occurs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invalidation: Option<PlayPermissionInvalidation>,
+        /// CR 305.1 + CR 406.3b + CR 118.9a: what kind of grant this is — a
+        /// self-standing impulse-class permission or the land-play/look
+        /// companion of an alternative-cost grant. See
+        /// [`PlayFromExileProvenance`]. The default (`Impulse`, and the value
+        /// every pre-existing serialized grant deserializes to) is full cast
+        /// authority; the companion is skipped by cast elections and lends
+        /// the face-down cast no zone authority (CR 601.2b).
+        #[serde(default, skip_serializing_if = "PlayFromExileProvenance::is_impulse")]
+        provenance: PlayFromExileProvenance,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -4262,7 +4358,7 @@ pub enum TypeFilter {
     Permanent,
     Card,
     Any,
-    /// CR 205.4b: Negation — matches objects whose type does NOT match the inner filter.
+    /// CR 205.2a + CR 205.3: Negation — matches objects whose type does NOT match the inner filter.
     /// "noncreature" → `Non(Box::new(Creature))`, "non-Human" → `Non(Box::new(Subtype("Human")))`
     Non(Box<TypeFilter>),
     /// CR 205.3: Matches objects with a specific subtype (creature type, land type, etc.).
@@ -5005,7 +5101,7 @@ pub enum FilterProp {
     /// stack object's static printed modality (`obj.modal.is_some()`), a printed
     /// characteristic present from object creation.
     Modal,
-    /// CR 205.4b: Matches objects that do NOT have a specific color.
+    /// CR 105.2: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
         color: ManaColor,
@@ -5803,6 +5899,48 @@ pub enum TargetFilter {
     /// `SpecificPlayer` vs `SpecificObject` separation.
     PlayerWhoChoseLabel {
         label: String,
+    },
+    /// CR 102.1 + CR 102.2 / CR 102.3 + CR 109.5: the player(s) satisfying an
+    /// arbitrary [`PlayerFilter`] predicate. CR 102.1 supplies the population
+    /// (the people in the game) this selects from, CR 102.2 / CR 102.3 the
+    /// `relation` axis's opponent semantics, and CR 109.5 the controller-relative
+    /// "you" every relation is measured against. (Deliberately NOT CR 109.4:
+    /// that rule governs an OBJECT's controller, which is the object-axis
+    /// mirror's business, not this variant's.)
+    ///
+    /// The PLAYER-axis mirror of [`FilterProp::ControllerMatches`], which is
+    /// itself documented as the object-axis mirror of `PlayerFilter`; this
+    /// variant completes the pair.
+    ///
+    /// Evaluated by the single-authority `game::effects::matches_player_scope`,
+    /// so every predicate `PlayerFilter` already expresses — life total
+    /// (CR 119.1), hand size (CR 402.1), controlled-permanent counts (CR 109.4),
+    /// counters (CR 122.1), attack history (CR 508.6) — becomes usable anywhere
+    /// a `TargetFilter` names a player, with no further variants.
+    ///
+    /// First consumer: `TriggerDefinition::valid_target` on a CR 508.1a attack
+    /// trigger whose attacked player carries a relative-clause predicate
+    /// ("attacks a player who has more life than you"). Per CR 603.2 that clause
+    /// is part of the TRIGGER EVENT and is checked once at declaration — which
+    /// is exactly `valid_target`'s contract
+    /// (`trigger_matchers::attack_target_matches`) and exactly why it is NOT
+    /// modelled as a `TriggerCondition`, which CR 603.4 re-checks at resolution.
+    ///
+    /// The `PlayerFilter`'s `relation` is evaluated against the TRIGGER SOURCE's
+    /// CONTROLLER, which is not always the attacking player — a player-subject
+    /// attack trigger routes the attacker into `valid_source` instead. Producers
+    /// must not assume the two coincide.
+    ///
+    /// `Box` breaks the `TargetFilter -> PlayerFilter -> ControlsCount { filter:
+    /// TargetFilter }` size cycle (same rationale as
+    /// `FilterProp::ControllerMatches` and `PlayerFilter::AllExcept`).
+    ///
+    /// FOLLOW-UP (not this change): [`TargetFilter::PlayerWhoChoseLabel`] is the
+    /// hard-coded single-predicate sibling this variant supersedes. Retiring it
+    /// needs a `PlayerFilter::ChoseLabel { label }` backed by the existing single
+    /// authority `game::players::player_last_chose_label`.
+    PlayerMatching {
+        player: Box<PlayerFilter>,
     },
     /// CR 102.1 + CR 103.1: living player seated immediately to controller's
     /// left/right; clockwise turn order, right = previous seat; resolved
@@ -9963,14 +10101,16 @@ impl SacrificeRequirement {
 /// Aggregate statistic for a tap-creatures-cost selection constraint.
 ///
 /// CR 208.1: power is the aggregate axis. Currently only `TotalPower` (Crew
-/// CR 702.122a, Saddle CR 702.171a, Teamwork). Mirrors `SacrificeAggregateStat`.
+/// CR 702.122a, Saddle CR 702.171a, Teamwork CR 702.194a). Mirrors
+/// `SacrificeAggregateStat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TapCreaturesAggregateStat {
     TotalPower,
 }
 
 /// CR 601.2f + CR 208.1: The aggregate constraint a `TapCreatures` cost payment
-/// must satisfy (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Snapshots
+/// must satisfy (Crew CR 702.122a / Saddle CR 702.171a / Teamwork
+/// CR 702.194a). Snapshots
 /// the `TapCreaturesRequirement::Aggregate` `{ stat, comparator, value }` triple
 /// into the interactive payment state (`PayCostKind::TapCreatures`) so the
 /// candidate enumerator and selection validator honor the advertised comparator
@@ -9997,9 +10137,9 @@ impl TapCreaturesAggregate {
 /// `Count { count }` is the fixed-number form (Conspire's "tap two creatures",
 /// Convoke-style "tap N creatures"). `Aggregate { stat, comparator, value }` is
 /// the "tap any number of creatures with total power N or greater" form used by
-/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork. Mirrors
-/// `SacrificeRequirement` so the two cost families share one parameterization
-/// shape.
+/// Crew (CR 702.122a), Saddle (CR 702.171a), and Teamwork (CR 702.194a).
+/// Mirrors `SacrificeRequirement` so the two cost families share one
+/// parameterization shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "requirement", rename_all = "snake_case")]
 pub enum TapCreaturesRequirement {
@@ -10019,6 +10159,30 @@ impl Default for TapCreaturesRequirement {
     fn default() -> Self {
         Self::Count { count: 1 }
     }
+}
+
+/// CR 107.3a + CR 208.1: the three mutually exclusive selection semantics a
+/// `TapCreatures` cost can carry. Computed once from `TapCreaturesRequirement`
+/// at registration time (`TapCreaturesRequirement::selection_mode`) and carried
+/// verbatim through `WaitingFor::PayCost` to the completion handler, so no seam
+/// ever re-derives "is this X" from an ambiguous signal like `min_count == 0` —
+/// aggregate selections also have a zero floor (CR 208.1's "any subset
+/// satisfying the power threshold"), which is exactly the conflation this type
+/// exists to make unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TapCreaturesSelectionMode {
+    /// A fixed, non-X requirement (`count != u32::MAX`). The chosen count must
+    /// equal `count` exactly (`min_count == count`).
+    Fixed,
+    /// CR 107.3a's `u32::MAX` X-sentinel ("Tap X untapped … you control"). The
+    /// chosen count ranges freely over `[0, eligible]` and — if and only if the
+    /// mode is `VariableX` — the completion handler binds the resolving
+    /// ability's X to the chosen count.
+    VariableX,
+    /// CR 208.1 Crew (CR 702.122a) / Saddle (CR 702.171a) / Teamwork
+    /// (CR 702.194a): any subset whose total positive power satisfies the
+    /// comparator. Never binds X.
+    Aggregate(TapCreaturesAggregate),
 }
 
 impl TapCreaturesRequirement {
@@ -10045,6 +10209,30 @@ impl TapCreaturesRequirement {
 
     pub fn is_aggregate(&self) -> bool {
         matches!(self, Self::Aggregate { .. })
+    }
+
+    /// CR 107.3a + CR 208.1: the single authority for a `TapCreatures` cost's
+    /// selection semantics. Every registration site computes this once and
+    /// carries the result through `PayCostKind::TapCreatures`, so downstream
+    /// seams never re-derive "is this an X cost" from `min_count == 0` (which an
+    /// aggregate selection also has).
+    pub fn selection_mode(&self) -> TapCreaturesSelectionMode {
+        match self {
+            // CR 107.3a: `u32::MAX` is the X-sentinel for "Tap X untapped … you
+            // control", whose value the controller announces as the chosen
+            // count rather than reading it off the requirement.
+            Self::Count { count } if *count == u32::MAX => TapCreaturesSelectionMode::VariableX,
+            Self::Count { .. } => TapCreaturesSelectionMode::Fixed,
+            Self::Aggregate {
+                stat,
+                comparator,
+                value,
+            } => TapCreaturesSelectionMode::Aggregate(TapCreaturesAggregate {
+                stat: *stat,
+                comparator: *comparator,
+                value: *value,
+            }),
+        }
     }
 }
 
@@ -11546,6 +11734,16 @@ pub enum EachDamageRecipient {
     /// ("each creature deals 1 damage to its controller"). A per-source recipient
     /// computed at resolution — surfaces no player-selectable target slot.
     EachController,
+    /// CR 120.1 + CR 608.2c: in an exactly two-object targeted batch, each
+    /// source deals to the other source ("each of those creatures ... to the
+    /// other"). Zero or one surviving/chosen object has no "other" and deals
+    /// no damage; any non-pair cardinality fails closed.
+    OtherBatchSource {
+        /// The two declared target-slot filters, in announcement order. These
+        /// remain the CR 608.2b legality authority at resolution; the compact
+        /// selected object list alone cannot prove type/controller legality.
+        source_filters: [Box<TargetFilter>; 2],
+    },
     // DEFERRED (§9, set-audit backlog): AttachedPermanent — each Aura source deals
     // to the permanent it's attached to (CR 303.4). Needs a new attachment
     // `FilterProp` (`AttachedToObjectOfType`) for the source filter; until then
@@ -12222,7 +12420,7 @@ pub enum Effect {
     },
     /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated
     /// at resolution time, CR 608.2) deals `amount` damage as its OWN source
-    /// (CR 120.1) to `recipient`. The filter-evaluated-source counterpart of
+    /// (CR 120.1) to `recipient`. Primarily the filter-evaluated-source counterpart of
     /// [`Effect::EachDealsDamageEqualToPower`] (whose sources are announced
     /// targets with a `multi_target` count and whose amount is each source's own
     /// power). Split as a sibling — not unified — because the source-selection
@@ -12231,17 +12429,21 @@ pub enum Effect {
     /// `QuantityExpr` so a future variable-amount filter-source card extends
     /// `amount` rather than adding a third sibling.
     ///
-    /// Covers "each <object class> [you control] deals N damage to <recipient>":
+    /// Covers "each <object class> [you control] deals N damage to <recipient>"
+    /// and the targeted pairwise "each of those ... to the other" shape:
     /// tribal pingers (Sarkhan the Masterless, Princess Snowfall), villainous-
     /// choice / modal pingers (Missy, Rakdos Charm), and Pestilence-adjacent "each
     /// creature deals" (Aura Barbs clause 1). `recipient` is an
-    /// [`EachDamageRecipient`] so "its controller" (per-source) and a shared
-    /// announced/context target are both expressed without a boolean.
+    /// [`EachDamageRecipient`] so "its controller" (per-source), a shared
+    /// announced/context target, and an exact reciprocal pair are expressed
+    /// without booleans.
     EachSourceDealsDamage {
         /// CR 608.2: The source class, evaluated against the battlefield at
         /// resolution. Each matching object is an independent damage source
-        /// (CR 120.1). Always a non-player object-class filter — player-shaped
-        /// subjects route to `DamageEachPlayer`.
+        /// (CR 120.1). Ordinarily a non-player object-class filter — player-shaped
+        /// subjects route to `DamageEachPlayer`. `ParentTarget` is reserved for
+        /// the typed `OtherBatchSource` pairwise relation, whose exact announced
+        /// objects are retained on the damage node.
         sources: TargetFilter,
         /// CR 120.1: Damage dealt by every source. Uniform across the batch
         /// (resolved once, CR 608.2) UNLESS the amount reads the per-source
@@ -12249,8 +12451,8 @@ pub enum Effect {
         /// in which case it is resolved per batch member (each source is the
         /// source of its own damage, CR 120.1).
         amount: QuantityExpr,
-        /// CR 120.3: The recipient resolution strategy (shared target vs
-        /// per-source controller).
+        /// CR 120.3: The recipient resolution strategy (shared target,
+        /// per-source controller, or the other member of an exact target pair).
         recipient: EachDamageRecipient,
     },
     /// CR 121.1: Draw a card.
@@ -16297,6 +16499,15 @@ impl TargetFilter {
                 controller: Some(_),
                 properties,
             }) => type_filters.is_empty() && properties.is_empty(),
+            // CR 102.1: PlayerMatching denotes a PLAYER population by
+            // construction — its payload is a `PlayerFilter`, evaluated only on
+            // the player axis. Decided, not defaulted: this method gates the
+            // player-subject attack branch in
+            // `trigger_matchers::matching_attack_events` and the attack anaphor
+            // rebind gate in `oracle_trigger`, and `false` here would
+            // misclassify a future "Whenever a player who … attacks"
+            // `valid_source` as an OBJECT filter, with no compile error.
+            TargetFilter::PlayerMatching { .. } => true,
             _ => false,
         }
     }
@@ -17072,8 +17283,8 @@ impl Effect {
             // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
             // `DealDamage::target` — surface it so the same target-slot collection
             // and event-context hydration build / bind the recipient. The
-            // `EachController` and deferred per-source recipients carry no slot and
-            // fall through to the `None` group below.
+            // `EachController` carries no slot; `OtherBatchSource` reuses the
+            // two preceding `TargetOnly` slots. Both fall through to `None`.
             Effect::EachSourceDealsDamage {
                 recipient: EachDamageRecipient::Shared(filter),
                 ..
@@ -17375,11 +17586,13 @@ impl Effect {
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
             // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
-            // resolver — no player-selectable target slot. Exhaustive match
-            // ensures any future `EachDamageRecipient` variant must be
-            // explicitly decided here rather than silently falling through.
+            // resolver; `OtherBatchSource` reuses the preceding declared object
+            // slots. Neither surfaces another selectable slot. Exhaustive match
+            // ensures future recipient variants are explicitly decided here.
             | Effect::EachSourceDealsDamage {
-                recipient: EachDamageRecipient::EachController,
+                recipient:
+                    EachDamageRecipient::EachController
+                        | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
             // CR 701.12a: player targets (player_a/player_b) are surfaced as
@@ -22618,6 +22831,19 @@ pub enum TriggerCondition {
     /// CR 400.7 + CR 508.1 + CR 603.4: True only when this exact source
     /// incarnation attacked during the current combat.
     SourceAttackedThisCombat,
+    /// CR 701.54a/d + CR 603.4: "if you chose a creature other than ~ as your
+    /// Ring-bearer" (Aragorn, Company Leader). True when the triggering
+    /// `GameEvent::RingTemptsYou` event's immutable `chosen_bearer` snapshot
+    /// exists and is NOT the trigger source, rather than consulting the
+    /// controller's mutable `state.ring_bearer`. This retains the trigger-time
+    /// choice if a later Ring temptation changes the current Ring-bearer.
+    ChoseOtherRingBearer,
+    /// CR 701.54a/d: "Whenever you choose a creature as your Ring-bearer"
+    /// (Call of the Ring). True when the triggering
+    /// `GameEvent::RingTemptsYou` carries a `chosen_bearer` — a temptation
+    /// with no legal candidates chooses nothing and must not fire this —
+    /// and the chooser is the trigger's controller.
+    ChoseRingBearer,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -23077,6 +23303,8 @@ impl TriggerCondition {
             TriggerCondition::GainedLife { .. }
             | TriggerCondition::LostLife
             | TriggerCondition::Descended
+            | TriggerCondition::ChoseOtherRingBearer
+            | TriggerCondition::ChoseRingBearer
             | TriggerCondition::ControlsType { .. }
             | TriggerCondition::NoSpellsCastLastTurn
             | TriggerCondition::TwoOrMoreSpellsCastLastTurn
@@ -25252,7 +25480,10 @@ pub struct ReplacementDefinition {
     /// [`PlaneswalkReplacementScope::PlanarDieOnly`] for Fixed Point in Time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planeswalk_scope: Option<PlaneswalkReplacementScope>,
-    /// Shield type for one-shot replacement effects that expire at cleanup.
+    /// Classification of WHAT this damage-affecting replacement does (regenerate,
+    /// prevent, modify a damage amount, redirect). Carries no lifetime meaning —
+    /// the lifetime lives in `expiry` and nowhere else (CR 604.2 vs CR 611.2a).
+    /// See [`ShieldKind`].
     #[serde(default, skip_serializing_if = "ShieldKind::is_none")]
     pub shield_kind: ShieldKind,
     /// CR 614.1a: Quantity modification for token/counter replacements (Double, Plus, Minus).
@@ -25294,9 +25525,15 @@ pub struct ReplacementDefinition {
     /// `None` means this replacement persists until removed by other means
     /// (e.g., the source object leaving the battlefield).
     ///
-    /// Orthogonal to `shield_kind`: shields imply EOT expiry via
-    /// `is_shield()`. Cleanup logic ORs both signals so a replacement may
-    /// be both a shield and have an explicit `EndOfTurn` expiry.
+    /// **Single authority for WHEN a replacement ends** (CR 514.2 / CR 611.2a).
+    /// `shield_kind` classifies WHAT the replacement does and carries no lifetime
+    /// meaning whatsoever: CR 604.2 makes a static ability's shield last as long
+    /// as its object stays in the appropriate zone, so a printed shield and a
+    /// resolution-created one can hold the identical `ShieldKind` value and still
+    /// have opposite lifetimes. Every prune — `turns::execute_cleanup`,
+    /// `turns::complete_end_combat_teardown`, the untap-step prune, and the
+    /// battlefield-exit prune in `layers.rs` — reads this field and only this
+    /// field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<RestrictionExpiry>,
     /// CR 615.1a: Damage redirection target filter — when present, prevented damage is
@@ -25541,19 +25778,79 @@ impl ReplacementDefinition {
         self
     }
 
+    /// Stamp the engine's default turn window on a shield created by the
+    /// RESOLUTION of a spell or ability that stated no duration.
+    ///
+    /// **This default is an engine fallback, not a rule.** CR 611.2a says a
+    /// resolution-created continuous effect with no stated duration "lasts until
+    /// the end of the game", and CR 615.3 says prevention effects "last until
+    /// they're used up or their duration has expired" — neither authorizes an
+    /// end-of-turn default. It exists because most of the duration-less
+    /// prevention shields in the card corpus come from cards whose printed text
+    /// DOES say "this turn" (Reverse Damage, Circle of Protection: Red,
+    /// Prismatic Strands, Honorable Passage, ...) and the parser drops that
+    /// window before the resolver sees it; the default reconstructs it.
+    /// CR 514.2 is the rule the window obeys ONCE STAMPED
+    /// (`turns::execute_cleanup`).
+    ///
+    /// The installation seam rejects a stated duration it cannot represent rather
+    /// than reaching this fallback and shortening the printed window.
+    ///
+    /// Applies only to shield-carrying definitions: a runtime-installed NON-shield
+    /// rider may legitimately be durable (the CR 611.2b `ControllerControlsSource`
+    /// lock, the CR 702.84a `UntilHostLeavesPlay` rider), and must not be given a
+    /// turn window here.
+    ///
+    /// CR 604.2 + CR 611.3b: a printed static ability's shield never passes through
+    /// a resolution seam, so it keeps `expiry: None` and stays active for as long
+    /// as its object remains in a zone the replacement pipeline scans.
+    fn stamp_default_turn_expiry(&mut self) {
+        if self.expiry.is_none() {
+            self.expiry = Some(RestrictionExpiry::EndOfTurn);
+        }
+    }
+
+    pub fn with_resolution_shield_expiry(mut self) -> Self {
+        if self.shield_kind.is_shield() {
+            self.stamp_default_turn_expiry();
+        }
+        self
+    }
+
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
         self.combat_scope = Some(scope);
         self
     }
 
-    /// CR 701.19a: Mark this replacement as a regeneration shield (one-shot, expires at cleanup).
+    /// CR 701.19a: Mark this replacement as a regeneration shield created by a
+    /// RESOLVING spell or ability — "the next time [permanent] would be destroyed
+    /// **this turn**". CR 514.2: that window ends at the cleanup step, so the
+    /// shield stamps its own `EndOfTurn` expiry here; the cleanup prune reads
+    /// `expiry` alone (`turns::execute_cleanup`) and never infers a lifetime from
+    /// `shield_kind`. (CR 701.19b's STATIC-ability regeneration is a different
+    /// effect that creates no shield at all.)
+    ///
+    /// An explicit `.expiry(..)` always wins, whether applied before or after.
     pub fn regeneration_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::Regeneration;
+        self.stamp_default_turn_expiry();
         self
     }
 
-    /// CR 615: Mark this replacement as a damage prevention shield.
-    /// The shield absorbs or prevents damage, and is cleaned up at end of turn.
+    /// CR 615: Mark this replacement as a damage prevention shield — the shield
+    /// absorbs or prevents damage.
+    ///
+    /// **Deliberately stamps no lifetime.** This is the one shield builder shared
+    /// between the parser's printed static-ability lowering and the resolution
+    /// path, so the lifetime is decided by `expiry` and by nothing else:
+    /// - CR 604.2 + CR 611.3b: a PRINTED static ability's shield keeps
+    ///   `expiry: None` and stays active for as long as its object remains in a
+    ///   zone the replacement pipeline scans. It must NOT be pruned at cleanup.
+    /// - CR 611.2a: a shield created by the RESOLUTION of a spell or ability is
+    ///   bounded by the window that spell or ability stated. Resolution callers
+    ///   stamp it — an explicit [`ReplacementDefinition::expiry`] for a stated
+    ///   window, then [`ReplacementDefinition::with_resolution_shield_expiry`]
+    ///   for the engine's turn-window fallback.
     pub fn prevention_shield(mut self, amount: PreventionAmount) -> Self {
         self.shield_kind = ShieldKind::Prevention { amount };
         self
@@ -25562,9 +25859,13 @@ impl ReplacementDefinition {
     /// CR 615.1a + CR 615.3 + CR 514.2: Mark this replacement as a one-shot
     /// prevention shield ("the next time [source] would deal damage this turn,
     /// prevent that damage" — Awe Strike). Single opportunity per CR 615.3;
-    /// consumed on use, expires at cleanup per CR 514.2.
+    /// consumed on use, expires at cleanup per CR 514.2 — so the shield stamps its
+    /// own `EndOfTurn` expiry here, because `turns::execute_cleanup` reads `expiry`
+    /// alone and never infers a lifetime from `shield_kind`. An explicit
+    /// `.expiry(..)` always wins, whether applied before or after.
     pub fn prevention_oneshot_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::PreventionOneShot;
+        self.stamp_default_turn_expiry();
         self
     }
 
@@ -25573,15 +25874,25 @@ impl ReplacementDefinition {
     /// the amount formula; the shield is consumed after its single use and
     /// expires at cleanup. Distinct from a continuous static (Furnace of Rath),
     /// which leaves `shield_kind` as `None`.
+    ///
+    /// CR 514.2: that turn window is stamped here as `EndOfTurn`, because
+    /// `turns::execute_cleanup` reads `expiry` alone and never infers a lifetime
+    /// from `shield_kind`. An explicit `.expiry(..)` always wins.
     pub fn damage_replacement_oneshot_shield(mut self) -> Self {
         self.shield_kind = ShieldKind::DamageReplacementOneShot;
+        self.stamp_default_turn_expiry();
         self
     }
 
     /// CR 614.9: Mark this replacement as a redirection shield that re-targets
-    /// the damage recipient. Expires at cleanup; `lifetime` decides whether it is
-    /// also consumed by its first event (CR 614.5) or re-applies to every
-    /// matching event in its window (CR 611.2a).
+    /// the damage recipient. `lifetime` decides whether it is also consumed by its
+    /// first event (CR 614.5) or re-applies to every matching event in its window
+    /// (CR 611.2a) — that axis is CONSUMPTION and is orthogonal to expiry.
+    ///
+    /// CR 611.2a + CR 514.2: this shield is only ever built by a resolving spell
+    /// or ability, so it stamps its own `EndOfTurn` expiry here;
+    /// `turns::execute_cleanup` reads `expiry` alone and never infers a lifetime
+    /// from `shield_kind`. An explicit `.expiry(..)` always wins.
     pub fn redirection_shield(
         mut self,
         recipient: DamageRedirectTarget,
@@ -25593,6 +25904,7 @@ impl ReplacementDefinition {
             amount,
             lifetime,
         };
+        self.stamp_default_turn_expiry();
         self
     }
 
@@ -26180,8 +26492,8 @@ pub enum ContinuousModification {
     /// CR 205.4 + CR 707.9d: Add a supertype to the affected object's
     /// supertypes (e.g., Sarkhan, Soul Aflame: "it's legendary in addition
     /// to its other types"). Idempotent: pushing an already-present supertype
-    /// is a no-op. Applied at Layer 4 (CR 613.1d) because supertypes are
-    /// types per CR 205.4b.
+    /// is a no-op. Applied at Layer 4 (CR 613.1d), which covers card type,
+    /// subtype, and supertype changes alike.
     AddSupertype {
         supertype: Supertype,
     },
@@ -27923,6 +28235,72 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    /// CR 102.1 — `TargetFilter::PlayerMatching::is_player_scope()` is a DECIDED
+    /// arm, not a wildcard default.
+    ///
+    /// Adding the variant produced no compile error here (the match ends in
+    /// `_ => false`), so this pin is the only thing that records the decision.
+    /// `is_player_scope` gates the player-subject attack branch in
+    /// `trigger_matchers::matching_attack_events` and the attack-anaphor rebind
+    /// gate in `oracle_trigger`; classifying a player predicate as an OBJECT
+    /// filter there would silently mis-route a future "Whenever a player who …
+    /// attacks" `valid_source`.
+    #[test]
+    fn player_matching_is_classified_as_a_player_scope() {
+        let filter = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                attr: Box::new(QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                }),
+                comparator: Comparator::GT,
+                value: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+            }),
+        };
+        assert!(
+            filter.is_player_scope(),
+            "a PlayerFilter payload denotes a PLAYER population by construction"
+        );
+        // Contrast: a genuine object filter must stay object-scoped, so the
+        // assertion above is about PlayerMatching and not about the method
+        // answering `true` for everything.
+        assert!(!TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        })
+        .is_player_scope());
+    }
+
+    /// Serialization pin (no CR governs wire format): the serialized shape is
+    /// purely ADDITIVE under the existing `#[serde(tag = "type")]`, so no
+    /// existing `card-data.json` row changes and no migration is needed.
+    /// Round-trips through the boxed payload.
+    #[test]
+    fn player_matching_round_trips_through_serde() {
+        let filter = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::ControlsCount {
+                relation: PlayerRelation::All,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    ..Default::default()
+                }),
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 8 }),
+            }),
+        };
+        let json = serde_json::to_string(&filter).expect("serialize PlayerMatching");
+        assert!(
+            json.contains("\"type\":\"PlayerMatching\""),
+            "additive tagged variant, got {json}"
+        );
+        let back: TargetFilter = serde_json::from_str(&json).expect("deserialize PlayerMatching");
+        assert_eq!(back, filter);
+    }
+
     /// Row 14, degenerate `AnyOf` cases. CR 109.2: a 0- or 1-member union is not
     /// a union, and an EMPTY one is actively unsound — `characteristic_source_read`
     /// would fold it to `RwProfile::empty()`, which is FAIL-OPEN for the CR 603.3b
@@ -28738,6 +29116,7 @@ mod tests {
             polarity: ZoneSpendPolarity::From,
         })
         .is_coverage_supported());
+        assert!(ManaSpendRestriction::CannotCastSpellFromZone(Zone::Hand).is_coverage_supported());
         assert!(ManaSpendRestriction::UnlockDoor.is_coverage_supported());
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.
@@ -30630,6 +31009,7 @@ mod tests {
     #[test]
     fn exile_with_alt_cost_reads_legacy_exile_on_resolve_bool() {
         let modern = CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,

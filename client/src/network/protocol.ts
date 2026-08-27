@@ -8,6 +8,7 @@ import type {
   ManaCost,
   ObjectId,
   ObjectAction,
+  ActionRejection,
 } from "../adapter/types";
 import type { InteractionSubmission, ViewerInteraction } from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
@@ -79,7 +80,74 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * in-band and surface an actionable "refresh both windows" message instead
  * of silently corrupting state.
  *
+ * A host → guest mismatch is enforced in exactly ONE place:
+ * `P2PGuestAdapter.handleHostMessage` (`adapter/p2p-adapter.ts`).
+ * `validateMessage` below deliberately does NOT check it. A throw from there
+ * propagates out of `decodeWireMessage` into the `catch` in `peer.ts`, which
+ * warns and drops the frame — so the host's `game_setup` never reaches the
+ * adapter, the setup promise never settles and the guest hangs on the
+ * connecting screen with no layer able to tell the user. Only the adapter
+ * holds the state needed to perform the response.
+ *
+ * The guest → host direction has its own single site: current guests must stamp
+ * this version on `guest_deck` / `reconnect`, and `P2PHostAdapter`'s
+ * first-contact gate rejects a missing or unequal value before it allocates a
+ * seat or adopts reconnect state.
+ *
  * Bumps to date:
+ *  32 — FormatConfig.deck_size changed from a bare u16 to the adjacently
+ *       tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
+ *       CR 903.13f(1) makes Commander Draft a command-zone format with a
+ *       minimum rather than an exact size, and GameFormat gained a
+ *       CommanderDraft variant (CR 903.13a). A PARSE bump like 16, not a
+ *       silent capability loss like 24: FormatConfig::deck_size carries
+ *       neither a serde default nor a deserialize_with, so a v31 peer's
+ *       "deck_size": 60 cannot deserialize against the adjacently tagged enum
+ *       and a v32 peer's {"type":"Minimum","data":60} cannot deserialize
+ *       against a v31 u16 — the break is unconditional, runs in BOTH
+ *       directions, and hits every format's snapshot, not just Commander
+ *       Draft's. GameState.format_config's serde default does NOT rescue it:
+ *       a field-level default applies only when the key is ABSENT, and an old
+ *       peer sends the key present with the old inner shape. The
+ *       GameFormat::CommanderDraft variant is the second and narrower half —
+ *       it breaks only when that variant is actually serialized.
+ *  31 — Action and mana-payment-preview rejections carry engine-owned,
+ *       viewer-filtered ActionRejection DTOs. First-contact versioning keeps
+ *       legacy peers from treating a typed rejection as a transport string.
+ *  30 — ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *       GameState/ManaUnit restriction used by Karolina Dean. Older peers
+ *       cannot deserialize that externally tagged enum variant.
+ *  29 — WaitingFor.ChooseObjectsSelection publishes min and optional max
+ *       bounds. A v28 peer silently ignores the additive fields and offers
+ *       out-of-range selections, so refuse the capability mismatch during
+ *       host/guest first contact.
+ *  28 — PayCostKind::TapCreatures changed from { aggregate } to a required
+ *       { mode } (Fixed/VariableX/Aggregate) — the fix that also unlocks
+ *       the u32::MAX X-sentinel tap-cost form (Glacian, Powerstone Engineer
+ *       + 8 sibling cards, #7799). mode carries no serde default, so a
+ *       GameState snapshot paused mid-TapCreatures payment under the old
+ *       aggregate shape now fails to deserialize instead of risking a
+ *       silent fixed/aggregate misclassification. game_setup and
+ *       reconnect_ack both carry the full GameState, so this P2P track is
+ *       broken by the same change as the full-game PROTOCOL_VERSION track
+ *       (see crates/lobby-broker/src/protocol.rs entry 37) and must bump
+ *       in lockstep with it.
+ *  27 — WaitingFor.ChooseDungeon.options changed from DungeonId[] to
+ *       DungeonPreview[], and ChooseDungeonRoom dropped option_names, gained a
+ *       required dungeon_name, and changed options from number[] to
+ *       RoomPreview[], so each option carries the room's printed name and
+ *       room-ability text (CR 309.4b-c). A PARSE bump like 16, not a silent
+ *       capability loss like 24: none of the new fields carry a serde default,
+ *       so a v26 peer cannot deserialize a dungeon-choice snapshot at all.
+ *       DerivedViews.dungeon_rooms rides along in the same bump — it IS
+ *       optional and would parse on a v26 peer, but this client deleted its
+ *       dungeon_progress room-index derivation, so a v26 host would leave a
+ *       v27 guest with no dungeon badge.
+ *  26 — DerivedViews.current_target_kind publishes the engine's CR 115.1
+ *       classification of the live target announcement. The field is optional
+ *       and parses on a v24 peer, so the loss is silent: this client deleted
+ *       inferTargetNoun, so a v24 host would leave a v25 guest naming no
+ *       target at all. The handshake is the only place to refuse it.
  *  23 — WaitingFor::AlternativeCastChoice.alternative_additional_cost_description
  *       changed from a string to a typed Emerge-sacrifice descriptor. Older
  *       clients would receive an object where their modal expects display text.
@@ -127,10 +195,16 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 24 as const;
+export const WIRE_PROTOCOL_VERSION = 32 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
-  | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }
+  | {
+      type: "guest_deck";
+      deckData: unknown;
+      displayName?: string;
+      reservationToken?: string;
+      wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
+    }
   | ({
       type: "game_setup";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
@@ -151,10 +225,12 @@ export type P2PMessage = P2PAuthorityWire & (
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     } & LegalActionsWire)
-  | { type: "action_rejected"; reason: string }
+  | { type: "action_rejected"; rejection: ActionRejection }
+  | { type: "action_failed"; message: string }
   | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
-  | { type: "mana_payment_preview_rejected"; requestId: number; reason: string }
+  | { type: "mana_payment_preview_rejected"; requestId: number; rejection: ActionRejection }
+  | { type: "mana_payment_preview_failed"; requestId: number; message: string }
   | { type: "ping"; timestamp: number }
   | { type: "pong"; timestamp: number }
   | { type: "disconnect"; reason: string }
@@ -163,7 +239,12 @@ export type P2PMessage = P2PAuthorityWire & (
   /** Protected by a draft-installed match capability on the host. */
   | { type: "match_concede" }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
-  | { type: "reconnect"; playerToken: string; sessionKey?: P2PSessionKey }
+  | {
+      type: "reconnect";
+      playerToken: string;
+      sessionKey?: P2PSessionKey;
+      wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
+    }
   | ({
       type: "reconnect_ack";
       wireProtocolVersion: typeof WIRE_PROTOCOL_VERSION;
@@ -172,7 +253,13 @@ export type P2PMessage = P2PAuthorityWire & (
       state: GameState;
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
-  | { type: "reconnect_rejected"; reason: string }
+  | {
+      type: "reconnect_rejected";
+      reason: string;
+      reasonCode?: "first_message_invalid" | "wire_protocol_version_required" | "wire_protocol_mismatch" | "malformed_authority";
+      hostWireProtocolVersion?: number;
+      guestWireProtocolVersion?: number;
+    }
   // Kick / forced removal (host → target).
   | { type: "kick"; reason: string; format?: string }
   // Host explicitly quit the game (host → all guests). Terminal: guests set
@@ -190,6 +277,9 @@ export type P2PMessage = P2PAuthorityWire & (
    * lease-bound; guests pin the first valid terminal id and never reconnect
    * after accepting the commitment for their filtered state. */
   | { type: "terminal_result"; result: P2PTerminalResult }
+  /** Native server AI became unable to advance the authoritative session.
+   * The host sends this only after the final state revision it depends on. */
+  | { type: "ai_driver_fault"; id: number; revision: number; message: string }
   // Lifecycle broadcasts (host → all remaining peers).
   | { type: "player_kicked"; playerId: number; reason: string }
   // Host chose "continue without them" OR guest self-conceded mid-game. Wire
@@ -214,9 +304,11 @@ const VALID_TYPES = new Set([
   "preview_mana_payment",
   "state_update",
   "action_rejected",
+  "action_failed",
   "action_noop",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
+  "mana_payment_preview_failed",
   "ping",
   "pong",
   "disconnect",
@@ -229,6 +321,7 @@ const VALID_TYPES = new Set([
   "kick",
   "host_left",
   "terminal_result",
+  "ai_driver_fault",
   "player_kicked",
   "player_conceded",
   "player_disconnected",
@@ -248,14 +341,6 @@ export function validateMessage(raw: unknown): P2PMessage {
   const msg = raw as { type: string };
   if (!VALID_TYPES.has(msg.type)) {
     throw new Error(`Invalid message type: ${msg.type}`);
-  }
-  if (msg.type === "game_setup" || msg.type === "reconnect_ack") {
-    const versioned = raw as { wireProtocolVersion?: unknown };
-    if (versioned.wireProtocolVersion !== WIRE_PROTOCOL_VERSION) {
-      throw new Error(
-        `Wire protocol mismatch: host sent v${String(versioned.wireProtocolVersion)}, this client speaks v${WIRE_PROTOCOL_VERSION}`,
-      );
-    }
   }
   return raw as P2PMessage;
 }

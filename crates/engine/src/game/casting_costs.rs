@@ -8,7 +8,7 @@ use crate::types::ability::{
     CounterCostSelection, Effect, KickerVariant, NotedManaPayment, ObjectProperty, QuantityExpr,
     QuantityRef, ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
     SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesAggregate, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
+    TapCreaturesSelectionMode, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -781,9 +781,12 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.zone != Zone::Hand || obj.controller != player {
+    if obj.controller != player {
         return None;
     }
+    // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
+    // already sit on the stack when a pending cast re-asks).
+    let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.
@@ -799,39 +802,47 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // is not a CR-mandated precedence; honoring full controller choice across a
     // self-option and one or more grants needs a multi-alternative choice
     // surface and is a known limitation tracked for follow-up.
-    let self_option = obj.casting_options.iter().find_map(|option| {
-        if option.condition.as_ref().is_some_and(|condition| {
-            !restrictions::evaluate_condition(state, player, object_id, condition)
-        }) {
-            return None;
-        }
-        let cost = match option.kind {
-            SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
-            SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
-                cost: ManaCost::NoCost,
-            },
-            SpellCastingOptionKind::AsThoughHadFlash | SpellCastingOptionKind::CastAdventure => {
+    let self_option = (origin_zone == Zone::Hand)
+        .then(|| obj.casting_options.iter())
+        .into_iter()
+        .flatten()
+        .find_map(|option| {
+            if option.condition.as_ref().is_some_and(|condition| {
+                !restrictions::evaluate_condition(state, player, object_id, condition)
+            }) {
                 return None;
             }
-        };
-        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
-            Some(PayableSpellAlternativeCost {
-                cost,
-                timing_permission: None,
-                // CR 118.9: a spell's own printed alternative cost carries no
-                // per-turn grant slot to consume.
-                once_per_turn_source: None,
-            })
-        } else {
-            None
-        }
-    });
+            let cost = match option.kind {
+                SpellCastingOptionKind::AlternativeCost => option.cost.clone()?,
+                SpellCastingOptionKind::CastWithoutManaCost => AbilityCost::Mana {
+                    cost: ManaCost::NoCost,
+                },
+                SpellCastingOptionKind::AsThoughHadFlash
+                | SpellCastingOptionKind::CastAdventure => {
+                    return None;
+                }
+            };
+            if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+                Some(PayableSpellAlternativeCost {
+                    cost,
+                    timing_permission: None,
+                    // CR 118.9: a spell's own printed alternative cost carries no
+                    // per-turn grant slot to consume.
+                    once_per_turn_source: None,
+                })
+            } else {
+                None
+            }
+        });
     if self_option.is_some() {
         return self_option;
     }
 
     // CR 118.9 + CR 601.2f: A permanent-granted alternative MANA cost (Rooftop
     // Storm, Fist of Suns, Jodah) applies when no self-referential option does.
+    // CR 118.9 + CR 601.2a (#7575): zone reach is decided INSIDE
+    // `granted_spell_alternative_cost` — hand casts match normally, a non-hand
+    // origin only through an origin-scoped filter branch.
     let granted = super::casting::granted_spell_alternative_cost(state, player, object_id)?;
     spell_alternative_cost_is_payable(state, player, object_id, &granted.cost).then_some(
         PayableSpellAlternativeCost {
@@ -3800,34 +3811,42 @@ pub(crate) fn tap_creatures_total_power(state: &GameState, ids: &[ObjectId]) -> 
 /// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
 pub(crate) fn pay_tap_creatures_selection(
     state: &mut GameState,
+    min_count: usize,
     count: usize,
-    aggregate: Option<TapCreaturesAggregate>,
+    mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     // CR 601.2b: Validate the chosen set against the cost's requirement shape.
-    // `aggregate == None` is fixed-count (tap exactly `count`); `Some(a)` is the
-    // aggregate Crew/Saddle/Teamwork form (tap any number whose total positive
-    // power, CR 208.1, satisfies the advertised comparator vs `a.value`).
-    for id in chosen {
-        if !legal_creatures.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected creature not eligible for tapping".to_string(),
-            ));
-        }
-    }
-    match aggregate {
-        None => {
-            if chosen.len() != count {
+    // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
+    // [min_count, count]); `Aggregate(a)` is the Crew/Saddle/Teamwork form (tap
+    // any number whose total positive power, CR 208.1, satisfies the advertised
+    // comparator vs `a.value`). Bounds/aggregate-satisfaction is checked first,
+    // mirroring `handle_sacrifice_for_cost` and
+    // `handle_tap_creatures_for_mana_ability` — the same-mechanism sibling that
+    // validates this exact `TapCreaturesSelectionMode` type for the mana-ability
+    // leg of the same cost.
+    match mode {
+        // CR 107.3a: `min_count < count` only for the X-sentinel shape ("Tap X
+        // untapped [type] you control"), where X is chosen freely by the
+        // controller within [min_count, count]. A fixed (non-X) requirement
+        // still has min_count == count, so this subsumes the prior
+        // exact-match behavior unchanged for every existing card.
+        TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX => {
+            if chosen.len() < min_count || chosen.len() > count {
+                let requirement = if min_count == count {
+                    format!("exactly {count} creature(s)")
+                } else {
+                    format!("between {min_count} and {count} creature(s)")
+                };
                 return Err(EngineError::InvalidAction(format!(
-                    "Must tap exactly {} creature(s), got {}",
-                    count,
+                    "Must tap {requirement}, got {}",
                     chosen.len()
                 )));
             }
         }
-        Some(aggregate) => {
+        TapCreaturesSelectionMode::Aggregate(aggregate) => {
             let total_positive_power = tap_creatures_total_power(state, chosen);
             if !aggregate.satisfied_by(total_positive_power) {
                 return Err(EngineError::InvalidAction(format!(
@@ -3836,6 +3855,29 @@ pub(crate) fn pay_tap_creatures_selection(
                     aggregate.comparator, aggregate.value
                 )));
             }
+        }
+    }
+
+    // CR 118.3 + CR 601.2h: one creature can only pay for itself once — a
+    // creature already spent on this payment can't be spent again within the
+    // same payment. Checked unconditionally, for every `mode`, BEFORE the tap
+    // loop: the `Aggregate` arm above sums `chosen` with no dedup
+    // (`tap_creatures_total_power` — a duplicated id would double-count its
+    // power, letting `[a, a]` on a power-2 creature satisfy a "total power >=
+    // 4" requirement with only one real creature), so this loop is what
+    // actually protects the aggregate case, not the match arm's own check.
+    // Combined into a single pass with the membership check, mirroring
+    // `handle_tap_creatures_for_mana_ability`.
+    for (index, id) in chosen.iter().enumerate() {
+        if !legal_creatures.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected creature not eligible for tapping".to_string(),
+            ));
+        }
+        if chosen[..index].contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Cannot tap the same creature twice for a tap-creatures cost".to_string(),
+            ));
         }
     }
 
@@ -3853,14 +3895,33 @@ pub(crate) fn pay_tap_creatures_selection(
 pub(crate) fn handle_tap_creatures_for_spell_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
+    min_count: usize,
     count: usize,
-    aggregate: Option<TapCreaturesAggregate>,
+    mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pay_tap_creatures_selection(state, count, aggregate, legal_creatures, chosen, events)?;
+    pay_tap_creatures_selection(
+        state,
+        min_count,
+        count,
+        mode,
+        legal_creatures,
+        chosen,
+        events,
+    )?;
+    // CR 107.3a: the selected payment count defines X for this activation while
+    // its ability is on the stack — but *only* for the X-sentinel shape. The
+    // mode is the single authority here: `min_count == 0` is not a usable X
+    // signal, because an aggregate (Crew/Saddle/Teamwork, CR 208.1) selection
+    // also has a zero floor and must never redefine the ability's X.
+    if matches!(mode, TapCreaturesSelectionMode::VariableX) {
+        pending
+            .ability
+            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
+    }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -4854,6 +4915,9 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     }
 
     if let Some((requirement, filter)) = super::casting::find_tap_creatures_cost(cost) {
+        // CR 107.3a: compute the selection semantics once from the
+        // requirement and carry them verbatim to the completion handler.
+        let mode = requirement.selection_mode();
         let count = requirement.fixed_count().ok_or_else(|| {
             EngineError::ActionNotAllowed(
                 "Aggregate-power tap cost is not valid for this activation".into(),
@@ -4862,7 +4926,12 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         let eligible = super::casting::find_eligible_tap_creatures_for_cost(
             state, player, source_id, cost, filter,
         );
-        if eligible.len() < count as usize {
+        // CR 107.3a + CR 601.2b: mirror the adjacent Sacrifice arm above —
+        // a "Tap X untapped [type] you control" cost uses the u32::MAX
+        // sentinel for X, bounding the choice to [0, eligible.len()], not a
+        // literal exact/minimum match on u32::MAX.
+        let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, eligible.len());
+        if eligible.len() < min_count {
             return Err(EngineError::ActionNotAllowed(
                 "Not enough eligible creatures to tap".into(),
             ));
@@ -4877,10 +4946,10 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
         );
         return Ok(Some(WaitingFor::PayCost {
             player,
-            kind: PayCostKind::TapCreatures { aggregate: None },
+            kind: PayCostKind::TapCreatures { mode },
             choices: eligible,
-            count: count as usize,
-            min_count: 0,
+            count: max_count,
+            min_count,
             resume: CostResume::Spell {
                 spell: Box::new(pending),
             },
@@ -7620,23 +7689,30 @@ fn pay_additional_cost_with_source(
                     })
                 })
                 .collect();
-            // CR 601.2b: The two requirement shapes drive different prompts.
-            // Fixed-count taps exactly `count`; aggregate (Crew/Saddle/Teamwork)
+            // CR 601.2b: The requirement shapes drive different prompts.
+            // Fixed-count taps exactly `count`; the X-sentinel form (CR 107.3a)
+            // taps freely within [0, eligible]; aggregate (Crew/Saddle/Teamwork)
             // taps any number whose total positive power (CR 208.1) satisfies the
             // advertised comparator, so the player may select up to every
             // eligible creature.
+            //
+            // CR 107.3a: compute the selection semantics once from the
+            // requirement and carry them verbatim to the completion handler.
+            let mode = requirement.selection_mode();
             let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    if eligible.len() < *count as usize {
+                    // CR 601.2h: partial payments are not allowed — a fixed-count
+                    // additional cost has `min_count == count`, so an under-count
+                    // selection is refused by the shared validator. Only the
+                    // X-sentinel shape gets a zero floor (CR 107.3a).
+                    let (min_count, max_count) =
+                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                    if eligible.len() < min_count {
                         return Err(EngineError::ActionNotAllowed(
                             "Not enough eligible creatures to tap".into(),
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures { aggregate: None },
-                        *count as usize,
-                        0,
-                    )
+                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -7658,13 +7734,11 @@ fn pay_additional_cost_with_source(
                             "Eligible creatures' total power does not satisfy this cost".into(),
                         ));
                     }
-                    (
-                        PayCostKind::TapCreatures {
-                            aggregate: Some(aggregate),
-                        },
-                        eligible.len(),
-                        0,
-                    )
+                    // CR 208.1: the aggregate form legitimately has a zero floor
+                    // — any subset satisfying the power threshold is a complete
+                    // payment — which is precisely why `min_count == 0` is not a
+                    // usable X signal downstream; `mode` carries that distinction.
+                    (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
             return Ok(WaitingFor::PayCost {
@@ -8396,11 +8470,19 @@ pub(super) fn effective_replicate_additional_cost_instances(
         })
         .enumerate()
         .map(|(ordinal, cost)| {
+            // CR 601.2f: Additional costs must be concrete before affordability
+            // and payment; Hatchery Sliver's `SelfManaCost` is the recipient
+            // spell's mana cost, not a free placeholder.
+            let cost = super::keywords::resolve_self_mana_in_ability_cost(
+                state,
+                object_id,
+                &AbilityCost::Mana { cost },
+            );
             AdditionalCostInstance::new_with_ordinal(
                 AdditionalCostOrigin::Replicate,
                 u32::try_from(ordinal).unwrap_or(u32::MAX),
                 AdditionalCost::Optional {
-                    cost: AbilityCost::Mana { cost },
+                    cost,
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 },
             )
@@ -10168,6 +10250,9 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.casting_permissions[index] = CastingPermission::ExileWithAltCost {
                 cost: crate::types::mana::ManaCost::SelfManaCost,
+                // CR 609.4b + CR 118.9a: `SelfManaCost` is the card's own
+                // printed cost — a normal-payment shape, not an alternative.
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
                 cast_transformed: false,
                 constraint: None,
                 granted_to,
@@ -18788,6 +18873,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -18907,6 +18993,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -18978,6 +19065,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -19029,6 +19117,7 @@ mod tests {
                 .unwrap()
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -19086,6 +19175,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: selected_cost.clone(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -19104,6 +19194,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(5),
                     cast_transformed: false,
                     constraint: None,
@@ -19153,6 +19244,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -19219,6 +19311,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: selected_cost.clone(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -19237,6 +19330,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -19295,6 +19389,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: Some(CastPermissionConstraint::ManaValue {
@@ -19318,6 +19413,7 @@ mod tests {
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -23662,5 +23758,390 @@ its replicate cost was paid.)\nDraw a card.";
         assert_eq!(state.objects[&blue].zone, Zone::Hand);
         assert!(state.stack.iter().any(|entry| entry.source_id == march));
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    /// PROBE #7575: an exile-scoped grant (InZone{Exile} on the affected
+    /// filter) must reach a card in exile.
+    #[test]
+    fn granted_alternative_cost_reaches_an_exile_scoped_cast() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::OncePerTurn,
+        })
+        .affected(TargetFilter::Typed(typed));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Exiled Bear".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exiled),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the exile-scoped {{0}} grant must reach a card in exile"
+        );
+    }
+
+    /// #7575 review (mixed `Or`): a cast matching only the UNSCOPED branch of
+    /// a mixed filter must not unlock the non-hand reach — while the same
+    /// branch keeps working for a hand cast (default reach).
+    #[test]
+    fn a_mixed_or_grant_stays_hand_only_for_the_unscoped_branch() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Mixed Grant Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut hand_scoped = TypedFilter::card().controller(ControllerRef::You);
+        hand_scoped
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Hand });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(hand_scoped),
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            ],
+        });
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let exiled = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exiled),
+            None,
+            "the exile cast matches only the unscoped creature branch — hand-only reach"
+        );
+
+        let hand = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&hand)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, hand),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the same unscoped branch keeps its default hand reach"
+        );
+    }
+
+    /// #7575 review (stack origin): once the object sits ON the stack, the
+    /// pending cast's recorded origin drives the exile-scoped grant — an
+    /// exile origin receives it, a graveyard origin (zone mismatch) does not.
+    #[test]
+    fn the_pending_cast_origin_drives_the_exile_scoped_grant() {
+        use crate::types::ability::{Effect, FilterProp, ResolvedAbility, StaticDefinition};
+        use crate::types::game_state::PendingCast;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(typed));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Mid-Cast Spell".to_string(),
+            Zone::Stack,
+        );
+        let card_id = state.objects[&spell].card_id;
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut pending = PendingCast::new(
+            spell,
+            card_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), spell, caster),
+            ManaCost::generic(4),
+        );
+        pending.origin_zone = Zone::Exile;
+        state.pending_cast = Some(Box::new(pending));
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, spell),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "an exile-origin pending cast on the stack must receive the exile-scoped grant"
+        );
+
+        state.pending_cast.as_mut().unwrap().origin_zone = Zone::Graveyard;
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, spell),
+            None,
+            "a graveyard-origin pending cast is a zone mismatch for the exile-scoped grant"
+        );
+    }
+
+    /// #7782 round 2 (CodeRabbit): after `finalize_cast` the pending record is
+    /// gone and `cast_from_zone` is the surviving origin authority. A re-ask
+    /// must still see the true origin — a zone-less grant keeps matching the
+    /// finalized hand cast, and the exile-scoped grant the finalized exile
+    /// cast.
+    #[test]
+    fn the_stamped_cast_from_zone_survives_finalize_for_the_grant() {
+        use crate::types::ability::{FilterProp, StaticDefinition};
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Host".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let finalized = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Finalized Hand Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the zone-less grant must keep matching the finalized hand cast"
+        );
+
+        let mut typed = TypedFilter::card().controller(ControllerRef::You);
+        typed
+            .properties
+            .push(FilterProp::InZone { zone: Zone::Exile });
+        let exile_grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(typed));
+        let exile_source = create_object(
+            &mut state,
+            CardId(3),
+            caster,
+            "Warped Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&exile_source)
+            .unwrap()
+            .static_definitions
+            .push(exile_grant);
+        let exile_finalized = create_object(
+            &mut state,
+            CardId(4),
+            caster,
+            "Finalized Exile Cast".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&exile_finalized).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.cast_from_zone = Some(Zone::Exile);
+        }
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, exile_finalized),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            }),
+            "the exile-scoped grant must keep matching the finalized exile cast"
+        );
+    }
+
+    /// #7782 round 3 (order): during a NEW cast the pending record outranks a
+    /// stale `cast_from_zone` stamp from a PREVIOUS cast — a graveyard recast
+    /// with a leftover Hand stamp must not receive a zone-less (hand-reach)
+    /// grant. Discriminating: with the persisted stamp consulted first, the
+    /// stale Hand origin wins and the grant leaks.
+    #[test]
+    fn a_pending_recast_outranks_a_stale_cast_from_zone_stamp() {
+        use crate::types::ability::{Effect, ResolvedAbility, StaticDefinition};
+        use crate::types::game_state::PendingCast;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Rooftop Host".to_string(),
+            Zone::Battlefield,
+        );
+        let grant = StaticDefinition::new(StaticMode::CastWithAlternativeCost {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            timing_permission: None,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ));
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+
+        let recast = create_object(
+            &mut state,
+            CardId(2),
+            caster,
+            "Graveyard Recast".to_string(),
+            Zone::Graveyard,
+        );
+        let card_id = state.objects[&recast].card_id;
+        {
+            let obj = state.objects.get_mut(&recast).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Stale stamp from a previous hand cast (constructed directly to
+            // isolate the ordering; the zone-exit cleanup normally clears it).
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+        let mut pending = PendingCast::new(
+            recast,
+            card_id,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), recast, caster),
+            ManaCost::generic(4),
+        );
+        pending.origin_zone = Zone::Graveyard;
+        state.pending_cast = Some(Box::new(pending));
+
+        assert_eq!(
+            payable_spell_alternative_cost(&state, caster, recast),
+            None,
+            "the in-flight graveyard origin must outrank the stale Hand stamp"
+        );
     }
 }

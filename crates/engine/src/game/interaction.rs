@@ -19,8 +19,9 @@ use crate::analysis::decision_template::{
 use crate::types::ability::{
     AggregateFunction, ChoiceType, ChooseFromZoneConstraint, Comparator, CounterCostSelection,
     DoorLockOp, EffectKind, ObjectProperty, SearchSelectionConstraint, TapCreaturesAggregateStat,
-    TargetRef,
+    TapCreaturesSelectionMode, TargetRef,
 };
+use crate::types::action_rejection::{ActionRejection, ActionRejectionCode};
 use crate::types::actions::{
     AlternativeCastDecision, CastChoice, GameAction, MulliganChoice, OutsideGameSelection,
     PrecastCopyShortcutResponse, UnlessCostBranch,
@@ -30,8 +31,8 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, CastingVariant, CombatDamageAssignmentMode,
     ConvokeMode, CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, OutsideGameChoiceSource, PayCostKind, PileSide,
-    PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
+    ManaChoiceContext, ManaChoicePrompt, MayTriggerAutoChoiceScope, OutsideGameChoiceSource,
+    PayCostKind, PileSide, PtDirection, ShardChoice, ShardOptions, TargetEffectDetail, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
@@ -67,7 +68,8 @@ use super::combat::AttackTarget;
 use super::derived_views::{family_of, payload_seat, UnboundedFamily};
 use super::dungeon::DungeonId;
 use super::engine::{
-    apply_interaction, apply_interaction_for_simulation, EngineError, MAX_SHORTCUT_CYCLES,
+    action_rejection_for_engine_error, apply_interaction, apply_interaction_for_simulation,
+    apply_interaction_with_rejection, EngineError, MAX_SHORTCUT_CYCLES,
 };
 use super::game_object::{AttachTarget, RoomDoor};
 use super::merge::MergeSide;
@@ -76,6 +78,29 @@ use super::{mana_sources, turn_control, visibility};
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
 const MAX_INTERACTION_SERIAL_LEN: usize = 32;
+
+fn action_rejection_for_interaction_reason(reason: InteractionReasonCode) -> ActionRejection {
+    let code = match reason {
+        InteractionReasonCode::AuthorityUnbound | InteractionReasonCode::InvalidAuthorityState => {
+            ActionRejectionCode::InteractionUnavailable
+        }
+        InteractionReasonCode::NotAuthorized => ActionRejectionCode::InteractionNotAuthorized,
+        InteractionReasonCode::StaleInteraction => ActionRejectionCode::StaleInteraction,
+        InteractionReasonCode::UnknownChoice | InteractionReasonCode::MalformedResponse => {
+            ActionRejectionCode::InvalidInteractionResponse
+        }
+        InteractionReasonCode::PayloadTooLarge => ActionRejectionCode::InteractionPayloadTooLarge,
+        InteractionReasonCode::ConstraintUnsatisfied | InteractionReasonCode::NoLegalResponse => {
+            ActionRejectionCode::InteractionConstraintUnsatisfied
+        }
+        InteractionReasonCode::CancelOnly => ActionRejectionCode::InteractionCancelOnly,
+        InteractionReasonCode::ReducerRejected => ActionRejectionCode::InteractionReducerRejected,
+        InteractionReasonCode::UnsupportedResponse => {
+            ActionRejectionCode::UnsupportedInteractionResponse
+        }
+    };
+    ActionRejection::from_code(code, vec![])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WaitingClassification {
@@ -1271,10 +1296,15 @@ fn target_sequence_projection(
             action: TargetSequenceAction::SelectObjects,
             intent: InteractionIntentCode::Choose,
         },
-        WaitingFor::ChooseObjectsSelection { eligible, .. } => TargetSequenceProjection {
+        WaitingFor::ChooseObjectsSelection {
+            eligible, min, max, ..
+        } => TargetSequenceProjection {
             candidates: eligible.clone(),
-            min: 0,
-            max: eligible.len(),
+            min: *min as usize,
+            max: max
+                .map(|maximum| maximum as usize)
+                .unwrap_or(eligible.len())
+                .min(eligible.len()),
             unique: true,
             action: TargetSequenceAction::SelectTargets,
             intent: InteractionIntentCode::Choose,
@@ -3209,7 +3239,7 @@ fn selection_projection(
         } => {
             let constraint = match kind {
                 PayCostKind::TapCreatures {
-                    aggregate: Some(aggregate),
+                    mode: TapCreaturesSelectionMode::Aggregate(aggregate),
                 } => match aggregate.stat {
                     TapCreaturesAggregateStat::TotalPower => SelectionConstraint::Aggregate {
                         function: InteractionAggregateFunction::Sum,
@@ -3230,7 +3260,12 @@ fn selection_projection(
                     comparator: comparator_dto(*comparator),
                     amount: *value,
                 },
-                PayCostKind::TapCreatures { aggregate: None }
+                // CR 107.3a: both count-bounded forms project as a plain
+                // `[min_count, count]` selection; the X-sentinel's freedom is
+                // already encoded in the bounds the registration site published.
+                PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
+                }
                 | PayCostKind::Discard
                 | PayCostKind::Reveal
                 | PayCostKind::Sacrifice
@@ -4081,6 +4116,11 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 },
             }
         }
+        ManaRestriction::CannotCastSpellFromZone(zone) => {
+            InteractionManaRestriction::CannotCastSpellFromZone {
+                zone: zone_code(*zone),
+            }
+        }
         ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
         ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
             restrictions: restrictions
@@ -4173,6 +4213,13 @@ fn auto_may_choice_code(choice: AutoMayChoice) -> &'static str {
     match choice {
         AutoMayChoice::Accept => "accept",
         AutoMayChoice::Decline => "decline",
+    }
+}
+
+fn auto_may_scope_code(scope: MayTriggerAutoChoiceScope) -> &'static str {
+    match scope {
+        MayTriggerAutoChoiceScope::ExactInstance => "exactInstance",
+        MayTriggerAutoChoiceScope::SameCard => "sameCard",
     }
 }
 
@@ -4822,10 +4869,14 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::Splice, "decline");
             }
         }
-        GameAction::DecideOptionalEffectAndRemember { choice } => push_value_surface(
+        GameAction::DecideOptionalEffectAndRemember { choice, scope } => push_value_surface(
             surfaces,
             InteractionRoleCode::Choice,
-            auto_may_choice_code(*choice),
+            format!(
+                "{}:{}",
+                auto_may_choice_code(*choice),
+                auto_may_scope_code(*scope)
+            ),
         ),
         GameAction::ChooseUnlessCostBranch { choice } => match choice {
             UnlessCostBranch::Decline => {
@@ -8183,6 +8234,7 @@ fn bound_outbound_mana_restriction(
         | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
         | InteractionManaRestriction::OnlyForSpellColor { .. }
         | InteractionManaRestriction::OnlyForSpellFromZone { .. }
+        | InteractionManaRestriction::CannotCastSpellFromZone { .. }
         | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
         InteractionManaRestriction::OnlyForAny { restrictions } => {
             budget.list(restrictions.len())?;
@@ -9837,6 +9889,52 @@ pub fn preview_interaction(
     }
 }
 
+/// Preview an opaque interaction while returning the same safe rejection DTO
+/// used by ordinary actions. Failures before an interaction response has been
+/// materialized intentionally carry no object ids; the capability itself is
+/// opaque and must not reveal the rejected opportunity's contents.
+pub fn preview_interaction_with_rejection(
+    state: &GameState,
+    actor: PlayerId,
+    request: &InteractionPreviewRequest,
+) -> Result<InteractionPreview, ActionRejection> {
+    bound_string(request.request_id.as_str())
+        .and_then(|_| bound_string(request.interaction_id.as_str()))
+        .and_then(|_| validate_response_bounds(&request.response))
+        .map_err(action_rejection_for_interaction_reason)?;
+    let semantic_owner = slot_for_submission(state, actor, &request.interaction_id)
+        .map_err(action_rejection_for_interaction_reason)?
+        .semantic_owner;
+    let filtered = visibility::filter_state_for_viewer(state, actor);
+    let (action, progress) =
+        materialize_response(state, &filtered, &request.interaction_id, &request.response)
+            .map_err(action_rejection_for_interaction_reason)?;
+    let related_object_ids = action.related_object_ids();
+    let mut projected = state.clone();
+    apply_interaction_for_simulation(&mut projected, actor, PlayerId(semantic_owner), action)
+        .map_err(|error| {
+            visibility::filter_action_rejection_for_viewer(
+                state,
+                actor,
+                &action_rejection_for_engine_error(&error, related_object_ids),
+            )
+        })?;
+    Ok(InteractionPreview {
+        request_id: request.request_id.clone(),
+        interaction_id: request.interaction_id.clone(),
+        status: InteractionPreviewStatus::Confirmable,
+        progress: InteractionProgress {
+            confirmable: true,
+            ..progress
+        },
+        outcome: preview_outcome(state, &projected, &request.interaction_id),
+        summaries: vec![
+            InteractionSummaryCode::ConfirmAvailable,
+            InteractionSummaryCode::Progress,
+        ],
+    })
+}
+
 /// Materialize the `GameAction` an interaction response denotes, **without**
 /// applying it.
 ///
@@ -9895,9 +9993,66 @@ pub fn submit_interaction(
     Ok(AppliedInteraction { action, result })
 }
 
+/// Submits an opaque interaction with stable rejection metadata. The legacy
+/// [`submit_interaction`] result remains unchanged for existing transports.
+pub fn submit_interaction_with_rejection(
+    state: &mut GameState,
+    actor: PlayerId,
+    submission: InteractionSubmission,
+) -> Result<AppliedInteraction, ActionRejection> {
+    let action = resolve_interaction_response(state, actor, &submission)
+        .map_err(|error| action_rejection_for_interaction_reason(error.code))?;
+    let semantic_owner = PlayerId(
+        slot_for_submission(state, actor, &submission.interaction_id)
+            .map_err(action_rejection_for_interaction_reason)?
+            .semantic_owner,
+    );
+    let result = apply_interaction_with_rejection(state, actor, semantic_owner, action.clone())?;
+    Ok(AppliedInteraction { action, result })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cannot_cast_from_zone_projection_is_lossless() {
+        let projection =
+            interaction_mana_restriction(&ManaRestriction::CannotCastSpellFromZone(Zone::Hand));
+        assert_eq!(
+            projection,
+            InteractionManaRestriction::CannotCastSpellFromZone {
+                zone: InteractionZoneCode::Hand,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap(),
+            serde_json::json!({
+                "type": "cannotCastSpellFromZone",
+                "data": { "zone": "hand" }
+            })
+        );
+    }
+
+    #[test]
+    fn choose_objects_projection_preserves_runtime_cardinality() {
+        let waiting = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            min: 1,
+            max: Some(4),
+            trigger_event: None,
+        };
+        let projection = target_sequence_projection(&waiting)
+            .expect("projection must succeed")
+            .expect("choose-objects is a target sequence");
+        assert_eq!((projection.min, projection.max), (1, 3));
+        assert!(projection.unique);
+    }
 
     /// F4 — the preview's entry list is budgeted like every other outbound list on the
     /// shortcut spec.

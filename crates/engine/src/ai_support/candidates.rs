@@ -8,7 +8,9 @@ use crate::game::effects::prepare;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
-use crate::types::ability::{ChoiceType, CounterCostSelection, TargetRef};
+use crate::types::ability::{
+    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+};
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
     ResolveAllConsentDecision,
@@ -2212,13 +2214,13 @@ pub fn candidate_actions_broad_with_probe(
         // subsets (mirroring crew/saddle) so the AI/MP legal-action set offers
         // them; measure each creature via the same current-power authority, and
         // evaluate acceptance through the same `satisfied_by` the payment
-        // validator uses, so all three seams agree. The `aggregate: None`
-        // (fixed-count) form falls through to the exact-`count` selection below.
+        // validator uses, so all three seams agree. The `Fixed`/`VariableX`
+        // forms are handled by the range arm immediately below.
         WaitingFor::PayCost {
             player,
             kind:
                 PayCostKind::TapCreatures {
-                    aggregate: Some(aggregate),
+                    mode: TapCreaturesSelectionMode::Aggregate(aggregate),
                 },
             choices,
             ..
@@ -2230,6 +2232,23 @@ pub fn candidate_actions_broad_with_probe(
             crate::game::casting_costs::tap_creature_power_contribution,
             |cards| GameAction::SelectCards { cards },
         ),
+        // CR 107.3a + CR 118.3: mirror the Sacrifice/ExileFromZone arm above — the
+        // Fixed/VariableX tap-creatures forms select any count in [min_count, count]
+        // (a fixed requirement has min_count == count, degenerating to the single
+        // exact-count candidate unchanged). Without this arm the AI can only ever
+        // consider tapping every eligible creature for an X-sentinel cost, never a
+        // smaller announced X.
+        WaitingFor::PayCost {
+            player,
+            kind:
+                PayCostKind::TapCreatures {
+                    mode: TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX,
+                },
+            choices,
+            count,
+            min_count,
+            ..
+        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
         // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
         // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
         // subset whose summed `property` meets the comparator, so enumerate
@@ -2356,19 +2375,23 @@ pub fn candidate_actions_broad_with_probe(
         } => bounded_select_card_candidates(*player, legal_targets, *min_targets..=*max_targets),
         WaitingFor::CastOffer {
             player,
-            kind: CastOfferKind::Adventure { .. },
-        } => vec![
-            candidate(
-                GameAction::ChooseAdventureFace { creature: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseAdventureFace { creature: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+            kind: CastOfferKind::Adventure { object_id, .. },
+        } => [true, false]
+            .into_iter()
+            // CR 715.3a: A cast offer may expose only faces whose own
+            // characteristics make them castable. This matters for land-front
+            // Adventure cards, whose normal face cannot be cast as a spell.
+            .filter(|&creature| {
+                casting::can_cast_adventure_face_now(state, *player, *object_id, creature)
+            })
+            .map(|creature| {
+                candidate(
+                    GameAction::ChooseAdventureFace { creature },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 712.12: Both MDFC land faces are playable — offer front or back
         WaitingFor::ModalFaceChoice { player, .. } => vec![
             candidate(
@@ -2714,9 +2737,11 @@ pub fn candidate_actions_broad_with_probe(
         // CR 701.49a: Choose which dungeon to venture into.
         WaitingFor::ChooseDungeon { player, options } => options
             .iter()
-            .map(|&dungeon| {
+            .map(|option| {
                 candidate(
-                    GameAction::ChooseDungeon { dungeon },
+                    GameAction::ChooseDungeon {
+                        dungeon: option.dungeon,
+                    },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -2727,9 +2752,11 @@ pub fn candidate_actions_broad_with_probe(
             player, options, ..
         } => options
             .iter()
-            .map(|&room_index| {
+            .map(|option| {
                 candidate(
-                    GameAction::ChooseDungeonRoom { room_index },
+                    GameAction::ChooseDungeonRoom {
+                        room_index: option.index,
+                    },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -2879,39 +2906,45 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
-        // eligible battlefield permanents (or decline with an empty selection).
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — emit only distinct subsets
+        // within the resolution choice's printed cardinality.
         WaitingFor::ChooseObjectsSelection {
-            player, eligible, ..
+            player,
+            eligible,
+            min,
+            max,
+            ..
         } => {
-            let mut actions = vec![
-                // Pay for all affordable: select every eligible permanent.
-                candidate(
-                    GameAction::SelectTargets {
-                        targets: eligible.clone(),
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                // Decline: empty selection.
-                candidate(
-                    GameAction::SelectTargets {
-                        targets: Vec::new(),
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-            ];
+            let mut unique = Vec::with_capacity(eligible.len());
             for target in eligible {
-                actions.push(candidate(
-                    GameAction::SelectTargets {
-                        targets: vec![target.clone()],
-                    },
+                if !unique.contains(target) {
+                    unique.push(target.clone());
+                }
+            }
+            let floor = *min as usize;
+            let ceiling = max
+                .map(|maximum| maximum as usize)
+                .unwrap_or(unique.len())
+                .min(unique.len());
+            if floor > ceiling {
+                return Vec::new();
+            }
+
+            bounded_combinations_generic(
+                &unique,
+                floor..=ceiling,
+                SELECTION_POOL_CAP,
+                SELECTION_CANDIDATE_CAP,
+            )
+            .into_iter()
+            .map(|targets| {
+                candidate(
+                    GameAction::SelectTargets { targets },
                     TacticalClass::Selection,
                     Some(*player),
-                ));
-            }
-            actions
+                )
+            })
+            .collect()
         }
         // CR 701.36a: Populate — choose a creature token to copy.
         WaitingFor::PopulateChoice {
@@ -5758,6 +5791,65 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
+    #[test]
+    fn choose_objects_candidates_respect_bounds_and_distinctness() {
+        let mut state = GameState::new_two_player(42);
+        let eligible = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+            TargetRef::Object(ObjectId(3)),
+        ];
+        state.waiting_for = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible,
+            min: 0,
+            max: Some(2),
+            trigger_event: None,
+        };
+
+        let actions = candidate_actions(&state);
+        let selections: Vec<&Vec<TargetRef>> = actions
+            .iter()
+            .filter_map(|candidate| match &candidate.action {
+                GameAction::SelectTargets { targets } => Some(targets),
+                _ => None,
+            })
+            .collect();
+        assert!(selections.iter().any(|targets| targets.is_empty()));
+        assert!(selections.iter().any(|targets| targets.len() == 2));
+        assert!(selections.iter().any(|targets| {
+            targets.as_slice()
+                == [
+                    TargetRef::Object(ObjectId(2)),
+                    TargetRef::Object(ObjectId(3)),
+                ]
+        }));
+        assert!(selections.iter().all(|targets| {
+            targets.len() <= 2
+                && targets
+                    .iter()
+                    .enumerate()
+                    .all(|(index, target)| !targets[..index].contains(target))
+        }));
+
+        state.waiting_for = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            min: 2,
+            max: Some(2),
+            trigger_event: None,
+        };
+        let required_actions = candidate_actions(&state);
+        assert!(required_actions.iter().all(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectTargets { targets } if targets.len() == 2
+        )));
+    }
+
     /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
     /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
     /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
@@ -6820,6 +6912,73 @@ mod tests {
         ));
     }
 
+    /// CR 107.3a: the AI must be able to CONSIDER every legal announced X for
+    /// an X-sentinel tap-creatures cost, not just the maximum. Without the
+    /// Fixed/VariableX range arm this falls through to the generic
+    /// exact-`count` PayCost arm and only ever generates the single maximal
+    /// selection, so a smaller X is unreachable for the AI at every seam.
+    #[test]
+    fn candidate_actions_broad_generates_variable_x_range() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2)];
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::VariableX,
+            },
+            choices: choices.clone(),
+            count: 2,
+            min_count: 0,
+            resume: CostResume::Resolution,
+        };
+
+        let sizes: std::collections::BTreeSet<usize> = candidate_actions_broad(&state)
+            .iter()
+            .filter_map(|candidate| match &candidate.action {
+                GameAction::SelectCards { cards } => Some(cards.len()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            sizes.contains(&0) && sizes.contains(&1) && sizes.contains(&2),
+            "CR 107.3a: X=0, X=1 and X=2 must all be offered as candidates, got sizes {sizes:?}"
+        );
+    }
+
+    /// Non-regression pin: a FIXED tap-creatures requirement has
+    /// `min_count == count`, so the new range arm must still collapse to the
+    /// single exact-count candidate the generic arm produced before.
+    #[test]
+    fn candidate_actions_broad_keeps_fixed_tap_creatures_exact() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
+            choices: choices.clone(),
+            count: 3,
+            min_count: 3,
+            resume: CostResume::Resolution,
+        };
+
+        let sizes: Vec<usize> = candidate_actions_broad(&state)
+            .iter()
+            .filter_map(|candidate| match &candidate.action {
+                GameAction::SelectCards { cards } => Some(cards.len()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            sizes,
+            vec![3],
+            "CR 601.2h: a fixed count: 3 cost admits exactly one selection size"
+        );
+    }
+
     #[test]
     fn choose_from_zone_choice_large_pool_is_bounded() {
         let mut state = GameState::new_two_player(42);
@@ -7522,12 +7681,37 @@ mod tests {
     }
 
     #[test]
-    fn ai_adventure_generates_face_choice() {
+    fn ai_land_front_adventure_generates_only_spell_face_choice() {
         let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        let object_id = create_object(
+            &mut state,
+            CardId(70),
+            player,
+            "Land Adventure".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.mana_cost = ManaCost::NoCost;
+
+            let mut adventure = prepare_back_face_with_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            });
+            adventure.card_types.subtypes.push("Adventure".to_string());
+            adventure.layout_kind = Some(LayoutKind::Adventure);
+            obj.back_face = Some(adventure);
+        }
+        give_player_mana(&mut state, 0, ManaType::Red);
         state.waiting_for = WaitingFor::CastOffer {
-            player: PlayerId(0),
+            player,
             kind: CastOfferKind::Adventure {
-                object_id: crate::types::identifiers::ObjectId(1),
+                object_id,
                 card_id: CardId(70),
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
@@ -7536,12 +7720,9 @@ mod tests {
         let actions = candidate_actions(&state);
         assert_eq!(
             actions.len(),
-            2,
-            "Should generate creature and adventure face options"
+            1,
+            "a land-front Adventure must offer only its castable spell face"
         );
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a.action, GameAction::ChooseAdventureFace { creature: true })));
         assert!(actions.iter().any(|a| matches!(
             a.action,
             GameAction::ChooseAdventureFace { creature: false }

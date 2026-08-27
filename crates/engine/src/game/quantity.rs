@@ -5535,6 +5535,7 @@ fn damage_record_target_matches(
                 remainder,
                 player_id,
                 filter_ctx.source_controller,
+                Some(filter_ctx.source_id),
             )
         }
     }
@@ -14249,6 +14250,7 @@ mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 3,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -14263,6 +14265,7 @@ mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -14373,6 +14376,7 @@ mod tests {
                 colors: vec![ManaColor::Red],
                 mana_value: 1,
                 has_x_in_cost: false,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,

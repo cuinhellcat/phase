@@ -2,7 +2,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
-use nom::multi::separated_list1;
+use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -1737,6 +1737,26 @@ pub(super) fn change_zone_target_choice_timing(
 }
 
 pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
+    let has_untargeted_resolution_choice = match &clause_ir.parsed.effect {
+        // Equip's attachment is always `SelfRef`, so it remains a stack-time
+        // target even though the keyword's reminder text isn't in this fragment.
+        Effect::Attach { attachment, .. } => !attachment.is_context_ref(),
+        Effect::CastFromZone { .. } => true,
+        _ => false,
+    };
+    if has_untargeted_resolution_choice {
+        let lower = clause_ir
+            .source
+            .fragment()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // CR 115.10a + CR 608.2d: "attach an Equipment" and "cast that card"
+        // choose an untargeted object while resolving. Their explicit "target"
+        // counterparts remain stack-time choices.
+        if !nom_primitives::scan_contains(&lower, "target ") {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
     if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
@@ -2901,6 +2921,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::SpecificPlayer { .. }
             | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
             | TargetFilter::Neighbor { .. }
             | TargetFilter::ScopedPlayer
             | TargetFilter::AttachedTo
@@ -4467,6 +4488,28 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
+/// CR 101.4 + CR 608.2c + CR 109.5: Strip a prepositional player-scoped
+/// imperative, map its player set to `PlayerFilter`, and preserve the ordinary
+/// imperative body for the per-player resolution that follows. This is the narrow
+/// form that must precede generic `for each` quantity parsing; subject-form player
+/// scopes retain their existing route.
+pub(super) fn strip_prepositional_player_scope_subject(
+    text: &str,
+) -> (Option<PlayerFilter>, String) {
+    let lower = text.to_lowercase();
+    let scope_rest = nom_on_lower(text, &lower, |i| {
+        alt((
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
+        ))
+        .parse(i)
+    });
+    scope_rest.map_or_else(
+        || (None, text.to_string()),
+        |(scope, rest)| (Some(scope), rest.to_string()),
+    )
+}
+
 /// Parse the player anchor in an "each player other than ⟨anchor⟩" subject into
 /// the `PlayerFilter` whose population is excluded. Composable `alt()` so future
 /// anchors ("you", "that player") slot in without new `PlayerFilter` variants.
@@ -4528,6 +4571,8 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 },
             ),
             value(PlayerFilter::All, tag("each player ")),
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
             // Fenric I). The more-specific "for each player, you choose"/"choose
@@ -4972,7 +5017,8 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         },
         Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
-        | Effect::Mill { target, .. } => rebind(target),
+        | Effect::Mill { target, .. }
+        | Effect::DealDamage { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
         _ => {}
     }
@@ -7900,6 +7946,13 @@ pub(super) fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) 
     Some(effect)
 }
 
+/// CR 608.2c: Bind a bare "those cards" aggregate only to its typed chain antecedent.
+fn parse_contextual_bare_card_aggregate(text: &str, ctx: &ParseContext) -> Option<QuantityExpr> {
+    let source = ctx.bare_card_aggregate_source?;
+    let (rest, qty) = nom_quantity::parse_contextual_bare_card_aggregate_ref(text, source).ok()?;
+    rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
+}
+
 /// Parse damage effects, returning both the Effect and `parse_target`'s unconsumed
 /// remainder. The remainder is the compound boundary oracle — if it starts with
 /// `" and "`, the caller can chain the trailing clause as a sub_ability.
@@ -8016,7 +8069,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     } else {
                         parse_cda_quantity_with_context(amount_phrase, ctx)
                     }
-                });
+                })
+                .or_else(|| parse_contextual_bare_card_aggregate(amount_phrase, ctx));
             if let Some(qty) = qty {
                 // Route based on target phrase
                 if target_phrase == "itself" {
@@ -8200,10 +8254,11 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         // CDA quantity parser (`the number of … you control`, `your life total`,
         // …). Without this fallback the phrase degrades to a raw `Variable`, which
         // resolves to 0 at runtime — the damage silently no-ops.
-        let qty =
-            crate::parser::oracle_quantity::parse_event_context_quantity(qty_text).or_else(|| {
+        let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            .or_else(|| {
                 crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
-            });
+            })
+            .or_else(|| parse_contextual_bare_card_aggregate(qty_text, ctx));
         let qty = match qty {
             Some(qty) => qty,
             // CR 120.1 + CR 202.3: The typed quantity parsers declined this
@@ -11040,28 +11095,139 @@ pub(crate) fn parse_with_counters_suffix_spanned(
 /// Those two are the cards this combinator actually reaches, confirmed against
 /// the CI parse diff. The self-referential "…enters with two +1/+1 counters and
 /// a lifelink counter on it" shape (Dust Animus, Voidpouncer) prints the SAME
-/// conjoined grammar but is parsed at a different seam that calls
-/// `parse_counter_suffix_body_combinator` directly rather than through this
-/// list, so it still lifts only the first conjunct. Routing that seam through
-/// here is the follow-up; do not assume this function already covers it.
+/// conjoined grammar but never reaches this combinator: a CR 614.1c
+/// "[permanent] enters with …" line is an object-hosted REPLACEMENT, parsed by
+/// `oracle_replacement::parse_enters_with_counters`, which carries its own
+/// conjoined-list reader (`parse_enters_counter_entries`). That reader already
+/// lifts every conjunct — pinned by `gated_self_enters_with_conjoined_counters`
+/// there — so there is no missing routing to add. Do NOT "unify" the two by
+/// pointing the replacement seam at this list: the two count axes are not the
+/// same. The replacement reader opens each element with
+/// `oracle_util::parse_count_expr` (X, `twice X`, `half X, rounded up`,
+/// `N plus/minus X`) and rewrites X to the entering object's `CostXPaid`, while
+/// this list opens on `nom_primitives::parse_number`, which takes digits and
+/// English number words only. Routing the replacement path through here would
+/// REGRESS the X-counted enters-with cards (Astral Cornucopia, Sin, Unending
+/// Cataclysm), not extend them.
 ///
-/// `separated_list1` is the right combinator rather than a hand-rolled loop
-/// because nom backtracks the separator when the following element fails, which
-/// is what stops the list from swallowing a non-counter conjunct: on "…counters
-/// on it and you become the monarch" the `" and "` separator matches but
-/// `parse_counter_suffix_body_combinator` rejects "you" at its leading
-/// `parse_number`, so the list ends with the separator unconsumed and the
-/// monarch instruction stays in the remainder. Same for "and draw X cards"
-/// (Cosima) and "and with haste" (Voidpouncer) — every non-counter conjunct is
-/// rejected by the element's mandatory leading count/article.
+/// What the two readers DO share is the ELEMENT grammar, and both take the
+/// elided-count conjunct through the same combinator
+/// ([`parse_countless_counter_element`]) so they cannot drift on it.
+///
+/// `many0` over a `preceded(separator, element)` — rather than a hand-rolled
+/// loop — is what stops the list from swallowing a non-counter conjunct: nom
+/// backtracks the whole `preceded` when the element fails, so on "…counters on
+/// it and you become the monarch" the `" and "` separator matches, both element
+/// arms reject "you" (no leading count; "you become the monarch" is not a
+/// recognized counter type), and the list ends with the separator unconsumed so
+/// the monarch instruction stays in the remainder. Same for "and draw X cards"
+/// (Cosima) and "and with haste" (Voidpouncer).
+///
+/// It is `many0` over an explicit first element rather than `separated_list1`
+/// because the two positions no longer take the same parser: only a NON-LEADING
+/// element may elide its count.
 fn parse_enter_counters_clause_body(
     input: &str,
 ) -> OracleResult<'_, Vec<(CounterType, QuantityExpr)>> {
-    preceded(
-        tag("with "),
-        separated_list1(tag(" and "), parse_counter_suffix_body_combinator),
-    )
-    .parse(input)
+    let (rest, _) = tag("with ").parse(input)?;
+    // The LEADING element must carry its own count — that mandatory
+    // number is what anchors the list and stops it claiming arbitrary prose.
+    // Later elements may elide it (see `parse_countless_counter_element`), so
+    // the tail tries the counted form first and falls back to the elided one.
+    let (rest, first) = parse_counter_suffix_body_combinator(rest)?;
+    let (rest, tail) = many0(preceded(
+        parse_counter_list_separator,
+        alt((
+            parse_counter_suffix_body_combinator,
+            parse_countless_counter_element,
+        )),
+    ))
+    .parse(rest)?;
+    // "on it" terminates the LIST. A counted final element consumes it itself
+    // (the `opt` inside `parse_counter_suffix_body_combinator`), an elided one
+    // leaves it — strip it here either way so the consumed span is the same
+    // shape for both, which is what `parse_with_counters_suffix_spanned`'s
+    // callers slice on.
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" on it")).parse(rest)?;
+
+    let mut counters = Vec::with_capacity(1 + tail.len());
+    counters.push(first);
+    counters.extend(tail);
+    Ok((rest, counters))
+}
+
+/// The separator between two elements of a conjoined counter list.
+///
+/// Covers all three printed joins, matching the sibling reader in
+/// `oracle_replacement::parse_enters_counter_separator` so the two cannot
+/// disagree about what counts as a list: a bare `" and "` for a two-element
+/// list, and `", "` / `", and "` for the Oxford-comma form ("an additional
+/// +1/+1 counter, reach counter, and trample counter on it").
+///
+/// ORDER IS LOAD-BEARING: `", and "` must precede `", "`, because `", "` is a
+/// prefix of it and `alt` commits to the first arm that matches — leading arm
+/// order reversed, the Oxford form would consume only `", "` and then hand
+/// `"and trample counter"` to the element parser, which rejects it, silently
+/// truncating the list at its second element.
+///
+/// Widening this does not widen what the LIST claims: a separator only survives
+/// if the element after it parses, and `many0(preceded(sep, element))`
+/// backtracks the whole pair otherwise. So "…with a +1/+1 counter, then draw a
+/// card" still ends the list at the first counter, with the draw instruction
+/// left on the remainder for its own parse.
+fn parse_counter_list_separator(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(", and "), tag(" and "), tag(", ")))).parse(input)
+}
+
+/// ONE element of a conjoined counter list whose count is ELIDED —
+/// "…an additional +1/+1 counter and deathtouch counter on it" (March Toward
+/// Perfection), "…an additional +1/+1 counter, reach counter, and trample
+/// counter on it" (Arcane Archery), "…an additional +1/+1 counter, trample
+/// counter, and vigilance counter on it" (Tenacious Pup). A corpus sweep over
+/// every printed "enters/enter with … counter" and battlefield-rider line found
+/// those three and no others, so this is the whole class, not a sample of it.
+///
+/// English coordination lets the leading element's determiner distribute across
+/// the later conjuncts — "an additional [+1/+1 counter] and [deathtouch
+/// counter]" — so a later element can carry no count of its own. Each such
+/// element is a SINGULAR counter noun, so the elided count is exactly one.
+///
+/// NO CR section is cited on this function, deliberately. The elision is a fact
+/// about English determiner scope, and the singular-means-one reading follows
+/// from the noun, not from a rule — CR 122.1 only defines what a counter IS. The
+/// rules content of the surrounding clause (that an enters-with instruction is a
+/// replacement effect applied as the object enters, CR 614.1c) is annotated
+/// where the counters are APPLIED, not on this grammar leaf.
+///
+/// Two guards keep this from over-claiming. `parse_counter_suffix_body_combinator`
+/// is anchored by its mandatory leading number, and slices its counter type with
+/// an unbounded `take_until(" counter")`; with the number gone that slice would
+/// happily swallow any prose sitting in front of the word "counter". So instead:
+///
+///   * the type must be a RECOGNIZED counter — `parse_strict_counter_type`, i.e.
+///     the P/T-modifier, keyword-counter and named-counter arms WITHOUT the
+///     open-ended `take_till1 → Generic` fallback. An unrecognized token fails
+///     the element rather than becoming a bogus `Generic`.
+///   * the noun must be SINGULAR. A plural elided element ("two +1/+1 counters
+///     and trample counters") is genuinely ambiguous about whether the head
+///     count distributes across the conjunction; no card prints one, so it fails
+///     closed instead of guessing.
+///
+/// Valid only in NON-LEADING position — the first element must still carry its
+/// own count, which is what keeps the anchor on the list as a whole. Callers
+/// enforce that by reaching for this only after a separator has matched.
+///
+/// Deliberately does NOT consume a trailing " on it": that filler terminates the
+/// LIST, not the element, so both callers strip it once after their loop ends.
+pub(crate) fn parse_countless_counter_element(
+    input: &str,
+) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
+    let (rest, counter_type) = nom_primitives::parse_strict_counter_type(input)?;
+    let (rest, _) = tag(" counter").parse(rest)?;
+    // Singular-only guard — see the plural note above. `not` does not consume,
+    // so the terminator is left intact for the caller.
+    not(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
+    Ok((rest, (counter_type, QuantityExpr::Fixed { value: 1 })))
 }
 
 /// CR 122.6: the enter-with-counters rider in LEADING position, tolerating the
@@ -12124,6 +12290,145 @@ mod tests {
                 "reach guard: the rider itself must have parsed for {input:?}"
             );
         }
+    }
+
+    /// The list must carry elided conjuncts across ALL THREE printed joins, not
+    /// just a bare `" and "`. The Oxford-comma form is what Arcane Archery and
+    /// Tenacious Pup print, and it reaches this reader through the imperative
+    /// path's `parse_with_counters_suffix_spanned` as well as the
+    /// battlefield-rider path.
+    ///
+    /// Each case is DISCRIMINATING on element count: with a `" and "`-only
+    /// separator the three-element rows stop at 1, and the `", and "`-before-
+    /// `", "` ordering inside the separator is what keeps the Oxford row from
+    /// stopping at 2.
+    #[test]
+    fn counter_clause_list_carries_elided_conjuncts_across_separators() {
+        use crate::types::keywords::KeywordKind;
+
+        let one = || QuantityExpr::Fixed { value: 1 };
+        for (input, expected) in [
+            // Oxford comma: ", " then ", and ".
+            (
+                "with an additional +1/+1 counter, reach counter, and trample counter on it",
+                vec![
+                    (CounterType::Plus1Plus1, one()),
+                    (CounterType::Keyword(KeywordKind::Reach), one()),
+                    (CounterType::Keyword(KeywordKind::Trample), one()),
+                ],
+            ),
+            // Bare comma list, no trailing "and".
+            (
+                "with an additional +1/+1 counter, vigilance counter on it",
+                vec![
+                    (CounterType::Plus1Plus1, one()),
+                    (CounterType::Keyword(KeywordKind::Vigilance), one()),
+                ],
+            ),
+            // Mixed: counted element after a comma, elided after ", and".
+            (
+                "with two +1/+1 counters, a lifelink counter, and menace counter on it",
+                vec![
+                    (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 }),
+                    (CounterType::Keyword(KeywordKind::Lifelink), one()),
+                    (CounterType::Keyword(KeywordKind::Menace), one()),
+                ],
+            ),
+        ] {
+            let (rest, counters) = parse_enter_counters_clause_body(input)
+                .unwrap_or_else(|e| panic!("{input:?} must parse: {e:?}"));
+            assert_eq!(counters, expected, "wrong conjunct list for {input:?}");
+            assert_eq!(rest, "", "list must consume its terminator for {input:?}");
+        }
+    }
+
+    /// A comma is only a list separator when a counter actually follows it —
+    /// `many0(preceded(sep, element))` backtracks the pair otherwise. Pins that
+    /// widening the separator did not widen what the list claims.
+    #[test]
+    fn comma_separator_does_not_swallow_a_non_counter_clause() {
+        for (input, expected_rest) in [
+            (
+                "with a +1/+1 counter on it, then draw a card",
+                ", then draw a card",
+            ),
+            (
+                "with a +1/+1 counter, and you become the monarch",
+                ", and you become the monarch",
+            ),
+        ] {
+            let (rest, counters) =
+                parse_enter_counters_clause_body(input).expect("leading element must parse");
+            assert_eq!(counters.len(), 1, "over-claimed on {input:?}: {counters:?}");
+            assert_eq!(rest, expected_rest, "wrong stop point for {input:?}");
+        }
+    }
+
+    /// A NON-LEADING conjunct may elide its count, and the elided
+    /// count is one. Building-block coverage for the battlefield-rider list —
+    /// the printed cards for this shape (March Toward Perfection, Arcane
+    /// Archery, Tenacious Pup) all reach the sibling reader in
+    /// `oracle_replacement`, so without this the element grammar would only ever
+    /// be exercised from one of its two callers.
+    #[test]
+    fn counter_clause_list_accepts_elided_count_conjunct() {
+        use crate::types::keywords::KeywordKind;
+
+        let (rest, counters) = parse_enter_counters_clause_body(
+            "with an additional +1/+1 counter and deathtouch counter on it",
+        )
+        .expect("elided-count conjunct must parse");
+        assert_eq!(rest, "", "the list-level \" on it\" must be consumed");
+        assert_eq!(
+            counters,
+            vec![
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                (
+                    CounterType::Keyword(KeywordKind::Deathtouch),
+                    QuantityExpr::Fixed { value: 1 }
+                ),
+            ]
+        );
+    }
+
+    /// The elided element has no leading number to anchor it, so its two guards
+    /// carry the whole burden of not over-claiming. Each input must yield a
+    /// ONE-element list, with the unclaimed text left on the remainder:
+    ///
+    ///   * an unrecognized type is rejected by `parse_strict_counter_type`
+    ///     rather than becoming a `CounterType::Generic`. Note the conjunct here
+    ///     carries NO article — with one it would take the COUNTED arm, whose
+    ///     open-ended `take_until(" counter")` maps any token to `Generic`; that
+    ///     arm is anchored by its number and is out of scope for this guard.
+    ///   * a PLURAL elided conjunct is ambiguous about whether the head count
+    ///     distributes, so it fails closed;
+    ///   * the leading element still REQUIRES its count — an elided head would
+    ///     let the list start anywhere.
+    #[test]
+    fn elided_count_conjunct_guards() {
+        for (input, expected_rest) in [
+            // Not a counter type — must not become Generic("fresh idea").
+            (
+                "with a +1/+1 counter and fresh idea counter on it",
+                " and fresh idea counter on it",
+            ),
+            // Plural elided conjunct — fails closed.
+            (
+                "with two +1/+1 counters and trample counters on it",
+                " and trample counters on it",
+            ),
+        ] {
+            let (rest, counters) =
+                parse_enter_counters_clause_body(input).expect("leading element must still parse");
+            assert_eq!(counters.len(), 1, "over-claimed on {input:?}: {counters:?}");
+            assert_eq!(rest, expected_rest, "wrong stop point for {input:?}");
+        }
+
+        // An elided LEADING element is not a list at all.
+        assert!(
+            parse_enter_counters_clause_body("with trample counter on it").is_err(),
+            "the leading element must carry its own count"
+        );
     }
 
     fn variable_x() -> QuantityExpr {
@@ -13320,7 +13625,9 @@ mod strip_optional_effect_prefix_tests {
 /// lift helper, and the wrapper-vs-`_ref` non-domination guard.
 #[cfg(test)]
 mod dq_d_player_set_lift_tests {
-    use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
+    use super::{
+        for_each_repeatable_repeat_for, strip_for_each_repeat_suffix, strip_player_scope_subject,
+    };
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
     use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
 
@@ -13724,6 +14031,18 @@ mod dq_d_player_set_lift_tests {
             parse_each_of_target_distribution("up to two other targets"),
             None,
             "bare-plural `other targets` is intentionally NOT accepted"
+        );
+    }
+
+    #[test]
+    fn prepositional_player_scope_preserves_opponent_iteration() {
+        let (scope, body) = strip_player_scope_subject(
+            "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+        );
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
+        assert_eq!(
+            body,
+            "create a 2/2 black Zombie creature token unless they sacrifice a creature."
         );
     }
 }

@@ -17,9 +17,9 @@ use super::ability::{
     EffectKind, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition,
     ModalChoice, PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility,
     SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
-    StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef, ThisWayCause,
-    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionRef,
-    TriggerEntry,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
+    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry,
 };
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
@@ -1146,6 +1146,14 @@ pub struct SpellCastRecord {
     /// the underlying object (which may have left the stack).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_x_in_cost: bool,
+    /// CR 715.2a: Whether the spell's cast-time object has the alternative
+    /// characteristics of an Adventure spell, even when the creature face is
+    /// the face being cast. This is false when the Adventure face itself is
+    /// being cast: its alternative characteristics are then the normal face.
+    /// Captured so filtered cast-history queries do not need to inspect the
+    /// spell object after it leaves the stack.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_adventure: bool,
     /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
     /// so per-turn spell-history conditions can answer "from your hand" after
     /// the spell has moved on from the stack. Per CR 601.2a every cast spell
@@ -1215,6 +1223,7 @@ impl Default for SpellCastRecord {
             colors: Vec::new(),
             mana_value: 0,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Hand,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
@@ -1844,9 +1853,141 @@ pub struct MayTriggerAutoChoiceKey {
     pub origin: MayTriggerOrigin,
 }
 
+/// CR 603.5: The breadth of a stored optional-trigger answer. Exact instance
+/// remains the default; same-card is only accepted when the live prompt proves
+/// its direct printed provenance.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(tag = "type")]
+pub enum MayTriggerAutoChoiceScope {
+    #[default]
+    ExactInstance,
+    SameCard,
+}
+
+/// CR 603.5: The identity of a persisted optional-trigger answer.
+///
+/// `SameCard` deliberately carries a printed reference rather than `CardId`:
+/// `CardId` identifies one physical object, while `PrintedCardRef` identifies
+/// the printed face shared by physical copies. The `printed_occurrence` keeps
+/// independently functioning printed triggers separate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MayTriggerAutoChoiceSelector {
+    ExactInstance {
+        player: PlayerId,
+        source_id: ObjectId,
+        origin: MayTriggerOrigin,
+    },
+    SameCard {
+        player: PlayerId,
+        printed_ref: PrintedCardRef,
+        printed_occurrence: usize,
+    },
+}
+
+impl MayTriggerAutoChoiceSelector {
+    pub fn player(&self) -> PlayerId {
+        match self {
+            Self::ExactInstance { player, .. } | Self::SameCard { player, .. } => *player,
+        }
+    }
+
+    pub fn for_player(&self, player: PlayerId) -> Self {
+        match self {
+            Self::ExactInstance {
+                source_id, origin, ..
+            } => Self::ExactInstance {
+                player,
+                source_id: *source_id,
+                origin: origin.clone(),
+            },
+            Self::SameCard {
+                printed_ref,
+                printed_occurrence,
+                ..
+            } => Self::SameCard {
+                player,
+                printed_ref: printed_ref.clone(),
+                printed_occurrence: *printed_occurrence,
+            },
+        }
+    }
+
+    pub fn exact(key: MayTriggerAutoChoiceKey) -> Self {
+        Self::ExactInstance {
+            player: key.player,
+            source_id: key.source_id,
+            origin: key.origin,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum MayTriggerAutoChoiceSelectorTagged {
+    ExactInstance {
+        player: PlayerId,
+        source_id: ObjectId,
+        origin: MayTriggerOrigin,
+    },
+    SameCard {
+        player: PlayerId,
+        printed_ref: PrintedCardRef,
+        printed_occurrence: usize,
+    },
+}
+
+impl From<MayTriggerAutoChoiceSelectorTagged> for MayTriggerAutoChoiceSelector {
+    fn from(value: MayTriggerAutoChoiceSelectorTagged) -> Self {
+        match value {
+            MayTriggerAutoChoiceSelectorTagged::ExactInstance {
+                player,
+                source_id,
+                origin,
+            } => Self::ExactInstance {
+                player,
+                source_id,
+                origin,
+            },
+            MayTriggerAutoChoiceSelectorTagged::SameCard {
+                player,
+                printed_ref,
+                printed_occurrence,
+            } => Self::SameCard {
+                player,
+                printed_ref,
+                printed_occurrence,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MayTriggerAutoChoiceSelectorWire {
+    Tagged(MayTriggerAutoChoiceSelectorTagged),
+    LegacyExact(MayTriggerAutoChoiceKey),
+}
+
+impl<'de> Deserialize<'de> for MayTriggerAutoChoiceSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match MayTriggerAutoChoiceSelectorWire::deserialize(deserializer)? {
+            MayTriggerAutoChoiceSelectorWire::Tagged(selector) => Ok(selector.into()),
+            MayTriggerAutoChoiceSelectorWire::LegacyExact(key) => Ok(Self::exact(key)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MayTriggerAutoChoiceRecord {
-    pub key: MayTriggerAutoChoiceKey,
+    /// `key` is accepted only to deserialize pre-selector persisted records.
+    #[serde(alias = "key")]
+    pub selector: MayTriggerAutoChoiceSelector,
     pub choice: AutoMayChoice,
 }
 
@@ -3987,6 +4128,26 @@ pub struct PendingPlayerScopeSacrificeChoice {
     pub completion: PendingPlayerScopeSacrificeCompletion,
 }
 
+/// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
+/// token instruction whose declining players receive one aggregate token
+/// creation after every payer has answered. Kept independently of the current
+/// `UnlessPayment`/`WardSacrificeChoice`, which represent only one seat's
+/// decision and may be replaced mid-payment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPayment {
+    /// The unscoped token instruction to resolve exactly once at the terminal
+    /// poll boundary. Its count is replaced with the number of decliners.
+    pub pending_effect: Box<ResolvedAbility>,
+    /// Seats still to answer in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined the sacrifice payment.
+    pub declining_players: Vec<PlayerId>,
+    /// The seat whose `UnlessPayment` or `WardSacrificeChoice` is live.
+    pub current_player: PlayerId,
+    /// The typed sacrifice cost is retained to re-emit the next existing prompt.
+    pub cost: AbilityCost,
+}
+
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
 /// player-scope sacrifice action that may span one or more CR 616.1 choices.
 /// The individual choice queue can become empty while the final proposed
@@ -4226,10 +4387,7 @@ pub struct PendingDiscardFanOut {
     /// CR 607.2a: carried across the pause so the terminal publication makes the
     /// same linked-exile decision the un-paused postlude would.
     ///
-    /// ORDERING NOTE for the driver's hand-off (`resolve_chain_body`), recorded
-    /// here rather than at the call site so the CR 603.5 prompt-census pin in
-    /// `engine.rs` — which pins a line coordinate in `effects/mod.rs` BELOW that
-    /// call site — does not have to be re-derived for a comment. The hand-off is
+    /// ORDERING NOTE for the driver's hand-off (`resolve_chain_body`). The hand-off is
     /// placed AFTER `mark_exile_choice_tracks_by_source` so the batch pause route
     /// keeps the exact side-effect the ordinary per-seat leg route already had;
     /// placing it before would make the two pause routes for one clause diverge.
@@ -6643,9 +6801,16 @@ pub enum PendingCostMoveResume {
     },
     /// CR 118.12 + CR 122.1 + CR 616.1: A counter-addition unless-cost paused
     /// on a replacement choice. Covers Ward's player-counter payment and the
-    /// source-counter `EffectCost` used by cumulative upkeep. Retains the full
-    /// `WaitingFor::UnlessPayment` payload so Applied completes payment and a
-    /// prevented placement fails it instead of orphaning the pending ability.
+    /// source-counter `EffectCost` used by cumulative upkeep. The resume reads
+    /// `pending_effect` and `trigger_event` to settle the parked payment
+    /// instead of orphaning the pending ability; `cost`, `effect_description`
+    /// and `remaining` complete the serialized checkpoint payload and are read
+    /// on no resume path. CR 118.12: BOTH replacement
+    /// outcomes complete the payment — the "if they don't" clause checks whether
+    /// the player chose to pay, "regardless of what events actually occurred",
+    /// and this record's mere existence IS that choice (it is constructed only
+    /// on the `pay = true` path). The mapping is argued at its consumer,
+    /// `engine_payment_choices::resume_counter_addition_unless_payment`.
     #[serde(alias = "GetPlayerCountersUnlessPayment")]
     CounterAdditionUnlessPayment {
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
@@ -8193,19 +8358,24 @@ pub enum PayCostKind {
         #[serde(default)]
         selection: CounterCostSelection,
     },
-    /// CR 601.2b: Tap creatures as a cost. `aggregate` distinguishes the two
-    /// `TapCreaturesRequirement` shapes at the interactive payment layer: `None`
-    /// is the fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
-    /// creatures; Conspire/Convoke), while `Some(aggregate)` is the aggregate
-    /// "tap any number satisfying the constraint" form (Crew CR 702.122a / Saddle
-    /// CR 702.171a / Teamwork) — the chosen set may be any size whose total
-    /// positive power (CR 208.1) satisfies `aggregate`'s comparator vs its value.
-    /// Carrying the full `TapCreaturesAggregate` (not just a threshold int) keeps
-    /// the payment validator honoring the advertised comparator instead of
-    /// hard-coding `>=`.
+    /// CR 601.2b: Tap creatures as a cost. `mode` is the single authority for
+    /// which of the three `TapCreaturesRequirement` selection semantics this
+    /// payment carries (CR 107.3a + CR 208.1), computed once at registration
+    /// time via `TapCreaturesRequirement::selection_mode`: `Fixed` is the
+    /// fixed-count form (player taps exactly `WaitingFor::PayCost` `count`
+    /// creatures; Conspire/Convoke), `VariableX` is the "Tap X untapped … you
+    /// control" X-sentinel form whose chosen count *defines* the ability's X,
+    /// and `Aggregate(aggregate)` is the "tap any number satisfying the
+    /// constraint" form (Crew CR 702.122a / Saddle CR 702.171a / Teamwork
+    /// CR 702.194a) — the chosen set may be any size whose total positive power
+    /// (CR 208.1) satisfies `aggregate`'s comparator vs its value. Carrying the
+    /// full `TapCreaturesAggregate` inside the variant (not just a threshold
+    /// int) keeps the payment validator honoring the advertised comparator
+    /// instead of hard-coding `>=`; carrying the mode rather than an
+    /// `Option<TapCreaturesAggregate>` keeps `Fixed` and `VariableX` from
+    /// collapsing into one indistinguishable `None`.
     TapCreatures {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        aggregate: Option<TapCreaturesAggregate>,
+        mode: TapCreaturesSelectionMode,
     },
     Behold {
         action: BeholdCostAction,
@@ -10489,6 +10659,135 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
     Ok(())
 }
 
+/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried
+/// `options: Vec<DungeonId>` and `WaitingFor::ChooseDungeonRoom` carried
+/// `options: Vec<u8>` plus `option_names: Vec<String>` before each option grew
+/// the room's printed name and room-ability text (CR 309.4b-c).
+///
+/// A save paused at either prompt therefore cannot deserialize into the current
+/// shape. This migrates rather than rejects because the migration is TOTAL: the
+/// legacy payload's scalars are exactly the keys into the static dungeon table.
+/// A `DungeonId` resolves its own topmost room (CR 309.4a), and a room index
+/// resolves that room's name and text, so the rebuilt preview is identical to
+/// what the current engine would emit at that position — no saved game is lost
+/// and no field is guessed. `option_names` is dropped because `RoomPreview::name`
+/// now carries it from the same authority.
+///
+/// Rebuilt through `dungeon::dungeon_preview` / `dungeon::room_preview` rather
+/// than hand-written JSON, so this migration cannot drift from the shape the
+/// prompts actually emit.
+///
+/// Idempotent: legacy options are scalars (string / number) and current ones are
+/// objects, so a re-run over already-current state matches nothing. A `DungeonId`
+/// this engine does not know is a hard error — that is corrupt state, not a
+/// migratable shape.
+fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
+    use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
+    use std::str::FromStr;
+
+    fn parse_dungeon(value: &serde_json::Value, field: &str) -> Result<DungeonId, String> {
+        let name = value
+            .as_str()
+            .ok_or_else(|| format!("legacy dungeon prompt {field} must be a string"))?;
+        DungeonId::from_str(name)
+            .map_err(|_| format!("legacy dungeon prompt {field} names an unknown dungeon: {name}"))
+    }
+
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_dungeon_choice_previews(value)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let variant = object.get("type").and_then(serde_json::Value::as_str);
+            match variant {
+                Some("ChooseDungeon") => {
+                    if let Some(data) = object.get_mut("data").and_then(|d| d.as_object_mut()) {
+                        let is_legacy = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(serde_json::Value::is_string)
+                            });
+                        if is_legacy {
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("checked above")
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let id = parse_dungeon(option, "options entry")?;
+                                    serde_json::to_value(dungeon_preview(id))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                    }
+                }
+                Some("ChooseDungeonRoom") => {
+                    if let Some(data) = object.get_mut("data").and_then(|d| d.as_object_mut()) {
+                        let is_legacy = data
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|options| {
+                                options.iter().any(serde_json::Value::is_number)
+                            })
+                            || data.contains_key("option_names");
+                        if is_legacy {
+                            let dungeon = parse_dungeon(
+                                data.get("dungeon").ok_or_else(|| {
+                                    "legacy ChooseDungeonRoom is missing dungeon".to_string()
+                                })?,
+                                "dungeon",
+                            )?;
+                            let options = data
+                                .get("options")
+                                .and_then(serde_json::Value::as_array)
+                                .ok_or_else(|| {
+                                    "legacy ChooseDungeonRoom options must be an array".to_string()
+                                })?
+                                .clone();
+                            let previews = options
+                                .iter()
+                                .map(|option| {
+                                    let index = option.as_u64().ok_or_else(|| {
+                                        "legacy ChooseDungeonRoom options entry must be a number"
+                                            .to_string()
+                                    })?;
+                                    let index = u8::try_from(index).map_err(|_| {
+                                        format!("legacy ChooseDungeonRoom room index {index} is out of range")
+                                    })?;
+                                    serde_json::to_value(room_preview(dungeon, index))
+                                        .map_err(|error| error.to_string())
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            // `option_names` is superseded by `RoomPreview::name`.
+                            data.remove("option_names");
+                            data.insert(
+                                "dungeon_name".to_string(),
+                                serde_json::Value::from(
+                                    crate::game::dungeon::get_definition(dungeon).name,
+                                ),
+                            );
+                            data.insert("options".to_string(), serde_json::Value::Array(previews));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for value in object.values_mut() {
+                migrate_legacy_dungeon_choice_previews(value)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn delayed_trigger_install_command(
     entry: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -10811,6 +11110,34 @@ impl GameState {
         });
     }
 
+    /// CR 903.3 + CR 111.6 + CR 704.3 + CR 704.5d: a token cannot be the
+    /// commander card named by a command-zone return choice. Older snapshots
+    /// can retain such an impossible choice after a copied commander spell left
+    /// the battlefield, so resume at the normal SBA boundary and let the token
+    /// cease-to-exist sweep remove it.
+    ///
+    /// This is intentionally limited to token-backed choices. A real commander
+    /// card in a graveyard or exile retains its owner-facing CR 903.9a choice.
+    pub fn resume_stale_token_commander_zone_choice(&mut self) {
+        let WaitingFor::CommanderZoneChoice { commander_id, .. } = &self.waiting_for else {
+            return;
+        };
+        if !self
+            .objects
+            .get(commander_id)
+            .is_some_and(|object| object.is_token)
+        {
+            return;
+        }
+
+        crate::game::priority::reset_priority(self);
+        let waiting_for = WaitingFor::Priority {
+            player: self.active_player,
+        };
+        crate::game::public_state::sync_waiting_for(self, &waiting_for);
+        crate::game::sba::check_state_based_actions(self, &mut Vec::new());
+    }
+
     /// CR 732.2a: the seat whose driving period `last_loop_action_sequence` currently records.
     ///
     /// CR 732.2a lets "the player with priority … suggest a shortcut by describing a sequence of
@@ -10971,6 +11298,7 @@ impl PersistedGameState {
         //     <saved>, so the next `capture_rng_word_pos` `.expect`-panicked `HighWaterRegression`.
         // Offline tooling (`phase-ai`'s `load_saved_game_state`) simply inherits the repair.
         state.rehydrate_rng();
+        state.resume_stale_token_commander_zone_choice();
         state
     }
 }
@@ -11784,8 +12112,9 @@ pub enum WaitingFor {
         game_number: u8,
         score: MatchScore,
         /// CR 100.2a / CR 100.5: fewest cards this player's main deck may hold
-        /// when they submit. `deck_size` is a *minimum* — there is no maximum
-        /// deck size — so sideboarding need not be a one-for-one swap.
+        /// when they submit — `deck_size.min_cards()`, the floor of the
+        /// format's `DeckSizeRule`. Under a `Minimum` rule there is no maximum
+        /// deck size, so sideboarding need not be a one-for-one swap.
         ///
         /// Published here (rather than left for the UI to derive) so the
         /// submit gate is the engine's own acceptance predicate. Computed by
@@ -12108,6 +12437,11 @@ pub enum WaitingFor {
         description: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         may_trigger_key: Option<MayTriggerAutoChoiceKey>,
+        /// Engine-issued capability for the optional same-card scope. This is
+        /// deliberately a boolean: clients cannot construct or inspect the
+        /// private printed selector used to persist the answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        same_card_may_trigger_choice_available: bool,
     },
     /// CR 702.95a + CR 608.2d: Soulbond partner choice made while the PairWith
     /// effect resolves. The listed objects are legal choices, not targets.
@@ -12374,16 +12708,20 @@ pub enum WaitingFor {
         )>,
     },
     /// CR 701.49a: Player chooses which dungeon to venture into (no active dungeon).
+    /// Each option carries its topmost room (CR 309.4a) so the prompt can show
+    /// what choosing that dungeon immediately does.
     ChooseDungeon {
         player: PlayerId,
-        options: Vec<crate::game::dungeon::DungeonId>,
+        options: Vec<crate::game::dungeon::DungeonPreview>,
     },
     /// CR 309.5a: Player at a branching room chooses which room to advance to.
+    /// Each option carries the room's printed name and effect (CR 309.4b-c).
     ChooseDungeonRoom {
         player: PlayerId,
         dungeon: crate::game::dungeon::DungeonId,
-        options: Vec<u8>,
-        option_names: Vec<String>,
+        /// The dungeon's printed name, so the prompt never has to map the id.
+        dungeon_name: String,
+        options: Vec<crate::game::dungeon::RoomPreview>,
     },
     /// Digital-only Specialize: choose which color specialization to apply.
     SpecializeColor {
@@ -12806,15 +13144,21 @@ pub enum WaitingFor {
         eligible: Vec<TargetRef>,
         phase: TimeTravelPhase,
     },
-    /// CR 603.7e: The affected player of a `ChooseObjectsIntoTrackedSet` effect
-    /// selects any number of battlefield permanents from `eligible`. The
+    /// CR 608.2d: While applying `ChooseObjectsIntoTrackedSet`, the affected player
+    /// selects `min..=max` battlefield permanents from `eligible`. The
     /// chosen objects are written into a fresh tracked set so a downstream
     /// `PayCost { ScaledMana }` and `IfYouDo`/`Untap` reference the exact
-    /// selection. An empty selection is legal — the player declines.
+    /// selection. An empty selection is legal when `min == 0`.
     ChooseObjectsSelection {
         player: PlayerId,
         /// Eligible battlefield permanents matching the effect's filter.
         eligible: Vec<TargetRef>,
+        /// Minimum number of distinct eligible objects that must be selected.
+        #[serde(default)]
+        min: u32,
+        /// Maximum number selectable (`None` = all eligible objects).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<u32>,
         /// CR 608.2: triggering event of the ability whose `ChooseObjectsIntoTrackedSet`
         /// raised this prompt. Restored around the continuation drain so the stashed
         /// `PayCost { payer: TriggeringPlayer }` resolves to the correct player.
@@ -16161,6 +16505,10 @@ declare_game_state! {
     /// top-level chain entry (depth == 0) in `resolve_ability_chain`, and — when
     /// the chain is modal — again at each CR 700.2 mode boundary, keyed on
     /// [`Self::resolving_modal_instruction`].
+    ///
+    /// Resolution-scoped, so `normalize_for_loop` clears it for the CR 104.4b
+    /// position comparison: between resolutions it is the previous resolution's
+    /// residue and must not split two identical positions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain_tracked_set_id: Option<TrackedSetId>,
 
@@ -17128,6 +17476,10 @@ declare_game_state! {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 101.4 + CR 118.12a: player-scoped unless-payment poll retained
+    /// across one-seat sacrifice choices and replacement pauses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -17933,6 +18285,7 @@ impl GameStateDecode {
             )?;
         }
         migrate_legacy_turn_face_up_resume(&mut value)?;
+        migrate_legacy_dungeon_choice_previews(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         validate_trigger_firing_coherence(&state)?;
@@ -17964,6 +18317,10 @@ impl GameStateDecode {
         migrate_legacy_mana_target_roles(value)?;
         migrate_legacy_tap_effects(value);
         migrate_legacy_turn_face_up_resume(value)?;
+        // Protocol 36: a v2 resolution wire is still accepted, and a v2 save can
+        // be paused at either dungeon prompt, so the compatibility boundary has
+        // to rebuild those payloads before `RawGameStateFields` sees them.
+        migrate_legacy_dungeon_choice_previews(value)?;
         Ok(())
     }
 
@@ -21917,6 +22274,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
             pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
@@ -22061,11 +22419,84 @@ impl GameState {
         self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
     }
 
+    /// CR 603.5: Derive the only same-card selector the engine may issue for a
+    /// live optional-trigger prompt. Every provenance or identity mismatch
+    /// fails closed; clients only receive availability, never this selector.
+    pub fn same_card_may_trigger_auto_choice_selector(
+        &self,
+        key: &MayTriggerAutoChoiceKey,
+    ) -> Option<MayTriggerAutoChoiceSelector> {
+        let MayTriggerOrigin::Definition { definition_ref } = &key.origin else {
+            return None;
+        };
+        let TriggerDefinitionOccurrenceRef::Printed { printed_index, .. } =
+            &definition_ref.occurrence
+        else {
+            return None;
+        };
+        if definition_ref.source.object_id != key.source_id {
+            return None;
+        }
+        let source = self.objects.get(&key.source_id)?;
+        if source.incarnation != definition_ref.source.incarnation
+            || !source.is_represented_by_a_card()
+            || !source
+                .trigger_definitions
+                .iter_all()
+                .any(|entry| source.trigger_definition_ref(entry) == *definition_ref)
+        {
+            return None;
+        }
+        Some(MayTriggerAutoChoiceSelector::SameCard {
+            player: key.player,
+            printed_ref: source.base_printed_ref.clone()?,
+            printed_occurrence: *printed_index,
+        })
+    }
+
+    pub fn may_trigger_same_card_choice_available(&self, key: &MayTriggerAutoChoiceKey) -> bool {
+        self.same_card_may_trigger_auto_choice_selector(key)
+            .is_some()
+    }
+
+    /// CR 603.5: Legacy exact-instance lookup. Kept as the compatibility
+    /// boundary for callers that deliberately know only the old key shape.
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
+        let selector = MayTriggerAutoChoiceSelector::exact(key.clone());
         self.may_trigger_auto_choices
             .iter()
-            .find(|record| record.key == *key)
+            .find(|record| record.selector == selector)
             .map(|record| record.choice)
+    }
+
+    /// CR 603.5: Exact-instance preferences always win over same-card
+    /// preferences. The caller supplies a selector only after the live prompt
+    /// proved it eligible, so malformed persisted same-card entries never
+    /// manufacture authority.
+    pub fn may_trigger_auto_choice_for_prompt(
+        &self,
+        exact: &MayTriggerAutoChoiceKey,
+        same_card: Option<&MayTriggerAutoChoiceSelector>,
+    ) -> Option<AutoMayChoice> {
+        self.may_trigger_auto_choice(exact).or_else(|| {
+            same_card.and_then(|selector| {
+                self.may_trigger_auto_choices
+                    .iter()
+                    .find(|record| record.selector == *selector)
+                    .map(|record| record.choice)
+            })
+        })
+    }
+
+    /// CR 603.5: Resolve a stored answer for a live prompt. Same-card
+    /// preferences are eligible only when this exact live key derives an
+    /// engine-authorized selector; exact-instance choices always win.
+    pub fn may_trigger_auto_choice_for_live_prompt(
+        &self,
+        key: &MayTriggerAutoChoiceKey,
+    ) -> Option<AutoMayChoice> {
+        let same_card = self.same_card_may_trigger_auto_choice_selector(key);
+        self.may_trigger_auto_choice_for_prompt(key, same_card.as_ref())
     }
 
     pub fn set_may_trigger_auto_choice(
@@ -22073,15 +22504,23 @@ impl GameState {
         key: MayTriggerAutoChoiceKey,
         choice: AutoMayChoice,
     ) {
+        self.set_may_trigger_auto_choice_selector(MayTriggerAutoChoiceSelector::exact(key), choice);
+    }
+
+    pub fn set_may_trigger_auto_choice_selector(
+        &mut self,
+        selector: MayTriggerAutoChoiceSelector,
+        choice: AutoMayChoice,
+    ) {
         if let Some(record) = self
             .may_trigger_auto_choices
             .iter_mut()
-            .find(|record| record.key == key)
+            .find(|record| record.selector == selector)
         {
             record.choice = choice;
         } else {
             self.may_trigger_auto_choices
-                .push(MayTriggerAutoChoiceRecord { key, choice });
+                .push(MayTriggerAutoChoiceRecord { selector, choice });
         }
     }
 
@@ -22089,15 +22528,24 @@ impl GameState {
     /// optional ("may") trigger. The key already scopes to one player, source,
     /// and origin.
     pub fn remove_may_trigger_auto_choice(&mut self, key: &MayTriggerAutoChoiceKey) {
+        self.remove_may_trigger_auto_choice_selector(&MayTriggerAutoChoiceSelector::exact(
+            key.clone(),
+        ));
+    }
+
+    pub fn remove_may_trigger_auto_choice_selector(
+        &mut self,
+        selector: &MayTriggerAutoChoiceSelector,
+    ) {
         self.may_trigger_auto_choices
-            .retain(|record| record.key != *key);
+            .retain(|record| record.selector != *selector);
     }
 
     /// CR 603.5: Revoke all stored "don't ask again" auto-choices belonging to
     /// `player` for optional ("may") triggers.
     pub fn clear_may_trigger_auto_choices(&mut self, player: PlayerId) {
         self.may_trigger_auto_choices
-            .retain(|record| record.key.player != player);
+            .retain(|record| record.selector.player() != player);
     }
 
     /// CR 603.3b: upsert a trigger-ordering [`DecisionTemplate`], replacing any existing
@@ -22699,10 +23147,19 @@ impl GameState {
         // then differ here alone and never confirm a repeated position. It is
         // eq-compared (AI-search dedup legitimately reads it), so it is
         // normalized away HERE rather than excluded from `PartialEq`.
-        // NOTE: its lockstep partner `chain_tracked_set_id` carries the same
-        // residue and is deliberately NOT cleared here — that is pre-existing
-        // behavior with its own follow-up, not something this line may widen.
         clone.resolving_modal_instruction = None;
+        // CR 608.2c + CR 104.4b: the chain tracked-set pointer is that latch's
+        // lockstep partner and is resolution-scoped for the same reason — a chain's
+        // "those cards" anaphor names only what THIS resolution's instructions
+        // produced. Nothing narrows it at chain EXIT (a `repeat_for` drain even
+        // re-enters at depth 1 to preserve it), so between resolutions it still names
+        // the last resolution's set while the arena it points into
+        // (`tracked_object_sets` / `next_tracked_set_id` — real accumulated content,
+        // deliberately left compared) is unchanged. The pointer alone then splits two
+        // identical positions, so neither the CR 104.4b draw confirmation nor the
+        // CR 732.2a recurrence certification that shares this seam can confirm a
+        // repeat.
+        clone.chain_tracked_set_id = None;
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -23907,6 +24364,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     value is correctly not a fixed-point repeat and COMPARING it can never suppress a
         //     legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_player_scope_unless_payment: _,
         pending_discard_batch: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
@@ -24121,6 +24579,8 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_player_scope_unless_payment
+                == other.pending_player_scope_unless_payment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_combat_lifelink == other.pending_combat_lifelink
             && self.pending_mass_library_order_choice
@@ -24552,6 +25012,7 @@ mod forced_cascade_window_tests {
                     source_id: ObjectId(1),
                     description: None,
                     may_trigger_key: None,
+                    same_card_may_trigger_choice_available: false,
                 },
             ),
             (
@@ -25313,6 +25774,7 @@ mod tests {
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
     };
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn persisted_legacy_tap_effects_migrate_only_effect_payloads() {
@@ -25979,6 +26441,173 @@ mod tests {
                 "expected root-alias coherence failure, got {error}"
             );
         }
+    }
+
+    /// Rewrites a captured dungeon prompt back to its pre-protocol-36 payload:
+    /// `ChooseDungeon` held bare `DungeonId`s, and `ChooseDungeonRoom` held bare
+    /// room indices plus a parallel `option_names`, with no `dungeon_name`.
+    fn downgrade_dungeon_prompt_to_legacy(persisted: &mut serde_json::Value) {
+        let state = if persisted.get("state").is_some() {
+            persisted
+                .get_mut("state")
+                .expect("trusted fixture has an inner state")
+        } else {
+            persisted
+        };
+        let waiting = state
+            .get_mut("waiting_for")
+            .expect("fixture is paused at a prompt");
+        let variant = waiting
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .expect("waiting_for is adjacently tagged")
+            .to_string();
+        let data = waiting
+            .get_mut("data")
+            .and_then(|data| data.as_object_mut())
+            .expect("dungeon prompts carry data");
+        let options = data
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .expect("dungeon prompts carry options")
+            .clone();
+        match variant.as_str() {
+            "ChooseDungeon" => {
+                let legacy = options
+                    .iter()
+                    .map(|option| option["dungeon"].clone())
+                    .collect();
+                data.insert("options".to_string(), serde_json::Value::Array(legacy));
+            }
+            "ChooseDungeonRoom" => {
+                let names = options
+                    .iter()
+                    .map(|option| option["name"].clone())
+                    .collect();
+                let indices = options
+                    .iter()
+                    .map(|option| option["index"].clone())
+                    .collect();
+                data.remove("dungeon_name");
+                data.insert("option_names".to_string(), serde_json::Value::Array(names));
+                data.insert("options".to_string(), serde_json::Value::Array(indices));
+            }
+            other => panic!("not a dungeon prompt: {other}"),
+        }
+    }
+
+    fn restore_both_envelopes(state: GameState) -> [GameState; 2] {
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("serialize raw fixture");
+        let mut trusted =
+            serde_json::to_value(PersistedGameState::capture(state)).expect("serialize trusted");
+        downgrade_dungeon_prompt_to_legacy(&mut raw);
+        downgrade_dungeon_prompt_to_legacy(&mut trusted);
+        [
+            serde_json::from_value::<PersistedGameState>(raw)
+                .expect("raw legacy dungeon prompt migrates")
+                .into_game_state(),
+            serde_json::from_value::<PersistedGameState>(trusted)
+                .expect("trusted legacy dungeon prompt migrates")
+                .into_game_state(),
+        ]
+    }
+
+    /// Protocol 36: a save paused at `ChooseDungeon` predates `DungeonPreview`.
+    /// The migration must rebuild each option's topmost room (CR 309.4a) rather
+    /// than fail to deserialize, through BOTH persistence ingresses.
+    #[test]
+    fn legacy_choose_dungeon_prompt_migrates_through_both_envelopes() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [
+            DungeonId::LostMineOfPhandelver,
+            DungeonId::DungeonOfTheMadMage,
+            DungeonId::TombOfAnnihilation,
+        ]
+        .into_iter()
+        .map(dungeon_preview)
+        .collect();
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: expected.clone(),
+        };
+
+        for restored in restore_both_envelopes(state) {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeon { player, options } => {
+                    assert_eq!(*player, PlayerId(0));
+                    // Rebuilt from the static table, so it is not merely
+                    // parseable — it equals what the engine emits today.
+                    assert_eq!(options, &expected);
+                }
+                other => panic!("expected ChooseDungeon, got {other:?}"),
+            }
+        }
+    }
+
+    /// Protocol 36: a save paused at `ChooseDungeonRoom` predates `RoomPreview`,
+    /// `dungeon_name`, and the removal of `option_names`. Room indices resolve
+    /// their own name and printed effect (CR 309.4b-c), so the rebuild is total.
+    #[test]
+    fn legacy_choose_dungeon_room_prompt_migrates_through_both_envelopes() {
+        use crate::game::dungeon::{room_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        let expected: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|room| room_preview(DungeonId::LostMineOfPhandelver, room))
+            .collect();
+        state.waiting_for = WaitingFor::ChooseDungeonRoom {
+            player: PlayerId(0),
+            dungeon: DungeonId::LostMineOfPhandelver,
+            dungeon_name: "Lost Mine of Phandelver".to_string(),
+            options: expected.clone(),
+        };
+
+        for restored in restore_both_envelopes(state) {
+            match &restored.waiting_for {
+                WaitingFor::ChooseDungeonRoom {
+                    player,
+                    dungeon,
+                    dungeon_name,
+                    options,
+                } => {
+                    assert_eq!(*player, PlayerId(0));
+                    assert_eq!(*dungeon, DungeonId::LostMineOfPhandelver);
+                    // Recovered from `dungeon`, which the legacy payload kept.
+                    assert_eq!(dungeon_name, "Lost Mine of Phandelver");
+                    assert_eq!(options, &expected);
+                    assert_eq!(options[0].text, "Create a 1/1 red Goblin creature token.");
+                }
+                other => panic!("expected ChooseDungeonRoom, got {other:?}"),
+            }
+        }
+    }
+
+    /// The migration is a rebuild, not a guess: a dungeon name this engine does
+    /// not know is corrupt state and must surface, not silently drop an option.
+    #[test]
+    fn legacy_dungeon_prompt_rejects_an_unknown_dungeon() {
+        use crate::game::dungeon::{dungeon_preview, DungeonId};
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ChooseDungeon {
+            player: PlayerId(0),
+            options: vec![dungeon_preview(DungeonId::LostMineOfPhandelver)],
+        };
+        let mut raw = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("serialize raw fixture");
+        downgrade_dungeon_prompt_to_legacy(&mut raw);
+        raw["waiting_for"]["data"]["options"][0] = serde_json::Value::from("CatacombsOfNowhere");
+
+        let error = serde_json::from_value::<PersistedGameState>(raw)
+            .expect_err("an unknown dungeon must not migrate");
+        assert!(
+            error.to_string().contains("unknown dungeon"),
+            "expected an unknown-dungeon rejection, got {error}"
+        );
     }
 
     fn ordinary_pending_trigger(source: ObjectId, turn_number: u32) -> PendingTrigger {
@@ -27380,6 +28009,74 @@ mod tests {
                 .to_string()
                 .contains("paused trigger continuation has no firing carrier"),
             "expected direct-wire continuation failure, got {continuation_error}"
+        );
+    }
+
+    /// #7799 review follow-up (matthewevans, review 5012075716): `PayCostKind::
+    /// TapCreatures::mode` (added by the selection-mode-discriminator fix) has no
+    /// `#[serde(default)]`, replacing the prior `aggregate: Option<..>` field.
+    /// This is a deliberate wire-compatibility break, backed by
+    /// `lobby_broker::PROTOCOL_VERSION` 36 / `WIRE_PROTOCOL_VERSION` 27 (not a
+    /// backward-compatible decode shim) — the same convention entry 23
+    /// (`PayableResource::ManaGeneric`) established. This test proves the break
+    /// is a clean, non-silent deserialize failure through the actual production
+    /// restore path (`PersistedGameState`, the same type `server-core::session::
+    /// PersistedSession.state` uses), for BOTH prior `TapCreatures` shapes: the
+    /// fixed-count form (`aggregate` omitted/null) and the aggregate form
+    /// (`aggregate: {..}`) — proving the rejection isn't an artifact of one
+    /// particular legacy payload, and specifically that an aggregate-shaped
+    /// legacy payload cannot be silently admitted as a `Fixed` decode.
+    #[test]
+    fn tap_creatures_pre_mode_wire_shape_is_rejected() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::PayCost {
+            player: PlayerId(0),
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
+            choices: vec![ObjectId(1)],
+            count: 1,
+            min_count: 0,
+            resume: CostResume::Resolution,
+        };
+        let base = serde_json::to_value(state).expect("fixture state serializes");
+
+        // Prior fixed-count wire shape: `aggregate` omitted (the old field was
+        // `#[serde(default, skip_serializing_if = "Option::is_none")]`).
+        let mut legacy_fixed = base.clone();
+        legacy_fixed["waiting_for"]["data"]["kind"]
+            .as_object_mut()
+            .expect("kind is a JSON object")
+            .remove("mode");
+        let fixed_error = serde_json::from_value::<PersistedGameState>(legacy_fixed)
+            .expect_err("pre-mode fixed-count TapCreatures payload must fail to deserialize");
+        assert!(
+            fixed_error.to_string().contains("mode"),
+            "expected a missing-`mode` deserialize error, got: {fixed_error}"
+        );
+
+        // Prior aggregate wire shape: `aggregate: {..}` present, `mode` absent.
+        let mut legacy_aggregate = base;
+        let kind = legacy_aggregate["waiting_for"]["data"]["kind"]
+            .as_object_mut()
+            .expect("kind is a JSON object");
+        kind.remove("mode");
+        kind.insert(
+            "aggregate".to_string(),
+            serde_json::json!({
+                "stat": "TotalPower",
+                "comparator": "GE",
+                "value": 3
+            }),
+        );
+        let aggregate_error = serde_json::from_value::<PersistedGameState>(legacy_aggregate)
+            .expect_err(
+                "pre-mode aggregate TapCreatures payload must fail to deserialize, \
+                 not silently decode as a Fixed-mode payment",
+            );
+        assert!(
+            aggregate_error.to_string().contains("mode"),
+            "expected a missing-`mode` deserialize error, got: {aggregate_error}"
         );
     }
 
@@ -29454,6 +30151,101 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 104.4b: the chain-local tracked-set pointer is resolution-scoped
+    /// and is narrowed only at scope ENTRY, so between resolutions it still names the
+    /// last resolution's set as pure residue. Two identical positions — the SAME
+    /// published set at the SAME counter — must still confirm as a repeated position
+    /// when only the pointer differs.
+    ///
+    /// DISCRIMINATION: delete `clone.chain_tracked_set_id = None;` from
+    /// `normalize_for_loop` and this test FAILS on the equality assertion — the field
+    /// is eq-compared, so the residue alone defeats the repeat. The `!=` assertion is
+    /// the paired non-vacuity witness: it proves the two inputs really do differ
+    /// BEFORE normalization.
+    #[test]
+    fn normalize_for_loop_clears_the_chain_tracked_set_residue() {
+        let mut first = GameState::new_two_player(7);
+        // Content authority identical in both — the published set and the advanced
+        // counter are established BEFORE the clone, so the pointer is the only
+        // difference.
+        first
+            .tracked_object_sets
+            .insert(TrackedSetId(1), Vec::new());
+        first.next_tracked_set_id = 2;
+        let mut second = first.clone();
+        first.chain_tracked_set_id = Some(TrackedSetId(1));
+        second.chain_tracked_set_id = None;
+
+        assert!(
+            first != second,
+            "non-vacuity: the two states must differ before normalization, else the \
+             equality assertion below proves nothing"
+        );
+
+        assert!(
+            loop_states_equal(&first.normalize_for_loop(), &second.normalize_for_loop()),
+            "CR 104.4b: positions naming the same published set must confirm as a repeat \
+             whether or not the resolution-scoped pointer still holds it"
+        );
+    }
+
+    /// CR 104.4b: `tracked_object_sets` and `next_tracked_set_id` are the tracked-set
+    /// CONTENT authority — real accumulated progress, not resolution-scoped residue.
+    /// `normalize_for_loop` neutralizes the chain POINTER into that arena and must
+    /// leave the arena and its mint compared: normalizing them would collapse two
+    /// genuinely different positions into one and draw a game that is still
+    /// progressing.
+    ///
+    /// DISCRIMINATION: this row's failing arrangement is not the clear this change
+    /// adds but a widening of it — add `clone.tracked_object_sets.clear();` or
+    /// `clone.next_tracked_set_id = 0;` to `normalize_for_loop` and the matching
+    /// inequality FAILS. The first assertion is the paired reach-guard: it differs
+    /// only in a field normalization does neutralize, so a normalization that stopped
+    /// running reddens it instead of leaving the inequalities to pass by default.
+    #[test]
+    fn normalize_for_loop_leaves_the_tracked_set_content_authority_compared() {
+        let mut base = GameState::new_two_player(7);
+        base.tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(90_001)]);
+        base.next_tracked_set_id = 2;
+        base.chain_tracked_set_id = Some(TrackedSetId(1));
+
+        let mut volatile_only = base.clone();
+        volatile_only.state_revision = 99;
+        assert!(
+            loop_states_equal(
+                &base.normalize_for_loop(),
+                &volatile_only.normalize_for_loop()
+            ),
+            "reach guard: holding the arena equal, this pair must still confirm — else the \
+             inequalities below say nothing about the arena"
+        );
+
+        let mut other_members = base.clone();
+        other_members
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(90_002)]);
+        assert!(
+            !loop_states_equal(
+                &base.normalize_for_loop(),
+                &other_members.normalize_for_loop()
+            ),
+            "CR 104.4b: differing tracked-set membership is real accumulated content and \
+             must not be normalized into a repeat"
+        );
+
+        let mut other_counter = base.clone();
+        other_counter.next_tracked_set_id = 3;
+        assert!(
+            !loop_states_equal(
+                &base.normalize_for_loop(),
+                &other_counter.normalize_for_loop()
+            ),
+            "CR 104.4b: a further minted tracked set is real accumulated content and must \
+             not be normalized into a repeat"
+        );
+    }
+
     /// CR 104.4b: deferred-trigger timestamps are CR 603.3b scheduling history,
     /// not a changed recurring position. Their live values must remain distinct
     /// for ordering, while loop snapshots compare the same pending trigger
@@ -30726,7 +31518,9 @@ mod tests {
         // variant here does not lose mid-cast tracking.
         let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
-            kind: PayCostKind::TapCreatures { aggregate: None },
+            kind: PayCostKind::TapCreatures {
+                mode: TapCreaturesSelectionMode::Fixed,
+            },
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
@@ -30867,6 +31661,39 @@ mod tests {
         assert_eq!(wf, deserialized);
         // Verify tag format
         assert!(json.contains("\"TriggerTargetSelection\""));
+    }
+
+    #[test]
+    fn choose_objects_selection_serializes_bounds_and_defaults_legacy_shape() {
+        use crate::types::ability::TargetRef;
+
+        let waiting = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![TargetRef::Object(ObjectId(1))],
+            min: 1,
+            max: Some(2),
+            trigger_event: None,
+        };
+        let json = serde_json::to_value(&waiting).expect("serialize bounded prompt");
+        assert_eq!(json["data"]["min"], 1);
+        assert_eq!(json["data"]["max"], 2);
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(json).expect("roundtrip bounded prompt"),
+            waiting
+        );
+
+        let legacy = r#"{
+            "type":"ChooseObjectsSelection",
+            "data":{"player":0,"eligible":[]}
+        }"#;
+        assert!(matches!(
+            serde_json::from_str::<WaitingFor>(legacy).expect("legacy prompt remains parseable"),
+            WaitingFor::ChooseObjectsSelection {
+                min: 0,
+                max: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -31597,7 +32424,116 @@ mod tests {
             deserialized.may_trigger_auto_choice(&key),
             Some(AutoMayChoice::Accept)
         );
+        assert!(matches!(
+            deserialized.may_trigger_auto_choices[0].selector,
+            MayTriggerAutoChoiceSelector::ExactInstance { .. }
+        ));
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn may_trigger_auto_choice_selector_decodes_legacy_key_and_keeps_scopes_independent() {
+        let legacy: MayTriggerAutoChoiceRecord = serde_json::from_value(serde_json::json!({
+            "key": {
+                "player": 0,
+                "source_id": 5,
+                "origin": { "type": "Printed", "trigger_index": 1 }
+            },
+            "choice": { "type": "Accept" }
+        }))
+        .expect("legacy record decodes");
+        assert!(matches!(
+            legacy.selector,
+            MayTriggerAutoChoiceSelector::ExactInstance {
+                player: PlayerId(0),
+                source_id: ObjectId(5),
+                ..
+            }
+        ));
+
+        let exact = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(5),
+            origin: MayTriggerOrigin::Printed { trigger_index: 1 },
+        };
+        let same = MayTriggerAutoChoiceSelector::SameCard {
+            player: PlayerId(0),
+            printed_ref: PrintedCardRef {
+                oracle_id: "same-card".to_string(),
+                face_name: "Same Card".to_string(),
+            },
+            printed_occurrence: 1,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.set_may_trigger_auto_choice_selector(same.clone(), AutoMayChoice::Decline);
+        state.set_may_trigger_auto_choice(exact.clone(), AutoMayChoice::Accept);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&exact, Some(&same)),
+            Some(AutoMayChoice::Accept),
+            "exact-instance choices take precedence over same-card choices"
+        );
+        state.remove_may_trigger_auto_choice(&exact);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&exact, Some(&same)),
+            Some(AutoMayChoice::Decline),
+            "removing an exact-instance record leaves the same-card record intact"
+        );
+    }
+
+    #[test]
+    fn same_card_may_trigger_selector_uses_printed_ref_not_per_object_card_id() {
+        let printed_ref = PrintedCardRef {
+            oracle_id: "shared-oracle-id".to_string(),
+            face_name: "Shared Face".to_string(),
+        };
+        let mut state = GameState::new_two_player(42);
+        let make_source = |object_id, card_id| {
+            let mut source = GameObject::new(
+                object_id,
+                card_id,
+                PlayerId(0),
+                "Shared Face".to_string(),
+                Zone::Battlefield,
+            );
+            source.printed_ref = Some(printed_ref.clone());
+            source.base_printed_ref = Some(printed_ref.clone());
+            source.push_printed_trigger(TriggerDefinition::new(TriggerMode::ChangesZone));
+            source
+        };
+        let first = make_source(ObjectId(10), CardId(101));
+        let first_ref = first.trigger_definition_ref(&first.trigger_definitions[0]);
+        let second = make_source(ObjectId(11), CardId(202));
+        let second_ref = second.trigger_definition_ref(&second.trigger_definitions[0]);
+        state.objects.insert(ObjectId(10), first);
+        state.objects.insert(ObjectId(11), second);
+
+        let first_key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(10),
+            origin: MayTriggerOrigin::Definition {
+                definition_ref: first_ref,
+            },
+        };
+        let second_key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(11),
+            origin: MayTriggerOrigin::Definition {
+                definition_ref: second_ref,
+            },
+        };
+        let first_selector = state
+            .same_card_may_trigger_auto_choice_selector(&first_key)
+            .expect("direct printed trigger on a real card is eligible");
+        let second_selector = state
+            .same_card_may_trigger_auto_choice_selector(&second_key)
+            .expect("another physical copy with the same printed ref is eligible");
+        assert_eq!(first_selector, second_selector);
+
+        state.set_may_trigger_auto_choice_selector(first_selector, AutoMayChoice::Decline);
+        assert_eq!(
+            state.may_trigger_auto_choice_for_prompt(&second_key, Some(&second_selector)),
+            Some(AutoMayChoice::Decline)
+        );
     }
 
     #[test]
@@ -32128,6 +33064,7 @@ mod tests {
             colors: vec![],
             mana_value: 4,
             has_x_in_cost: false,
+            has_adventure: false,
             from_zone: Zone::Graveyard,
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
@@ -32137,6 +33074,25 @@ mod tests {
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, original);
         assert_eq!(round_tripped.from_zone, Zone::Graveyard);
+    }
+
+    /// CR 715.2a + CR 715.2b: The Adventure snapshot field is backward
+    /// compatible, omitted when false, and preserved when true.
+    #[test]
+    fn spell_cast_record_adventure_field_serde_contract() {
+        let legacy_json = serde_json::to_string(&SpellCastRecord::default()).unwrap();
+        let legacy: SpellCastRecord = serde_json::from_str(&legacy_json).unwrap();
+        assert!(!legacy.has_adventure);
+        assert!(!legacy_json.contains("has_adventure"));
+
+        let adventure = SpellCastRecord {
+            has_adventure: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&adventure).unwrap();
+        assert!(json.contains("has_adventure"));
+        let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
+        assert!(round_tripped.has_adventure);
     }
 
     // ---- CR 117.3d priority-yield accessors ----

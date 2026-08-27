@@ -24,6 +24,95 @@ use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
+/// CR 608.2c + CR 119.3: Palantir's final life loss reduces the exact cards
+/// milled by its preceding clause and applies to the opponent targeted when the
+/// trigger was put on the stack.
+#[test]
+fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, put an influence counter on Palantir of Orthanc and \
+         scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill \
+         X cards, where X is the number of influence counters on Palantir of Orthanc, and that \
+         player loses life equal to the total mana value of those cards.",
+        "Palantir of Orthanc",
+        &[],
+        &["Legendary".to_string(), "Artifact".to_string()],
+        &[],
+    );
+
+    let trigger = parsed.triggers.first().expect("Palantir end-step trigger");
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    let put = trigger.execute.as_deref().expect("counter effect");
+    assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
+    let scry = put.sub_ability.as_deref().expect("scry continuation");
+    assert!(matches!(scry.effect.as_ref(), Effect::Scry { .. }));
+    let draw = scry.sub_ability.as_deref().expect("opponent draw choice");
+    assert!(draw.optional);
+    assert_eq!(draw.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    let mill = draw.sub_ability.as_deref().expect("decline mill branch");
+    assert!(matches!(
+        mill.effect.as_ref(),
+        Effect::Mill {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+    let lose = mill.sub_ability.as_deref().expect("life-loss continuation");
+    let Effect::LoseLife { amount, target } = lose.effect.as_ref() else {
+        panic!("expected LoseLife, got {:?}", lose.effect);
+    };
+    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+    assert_eq!(
+        *amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            },
+        }
+    );
+    assert!(
+        matches!(lose.condition, Some(AbilityCondition::Not { .. })),
+        "life loss must remain gated on the opponent declining the draw"
+    );
+}
+
+#[test]
+fn combustible_gearhulk_damage_uses_milled_chain_set() {
+    let parsed = parse_oracle_text(
+        "First strike\nWhen Combustible Gearhulk enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then Combustible Gearhulk deals damage to that player equal to the total mana value of those cards.",
+        "Combustible Gearhulk",
+        &["First strike".to_string()],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Construct".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
+        .expect("Gearhulk enters trigger");
+    let draw = trigger.execute.as_deref().expect("draw choice");
+    let mill = draw.sub_ability.as_deref().expect("decline mill");
+    let damage = mill.sub_ability.as_deref().expect("damage continuation");
+    let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert!(matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: crate::types::ability::ObjectProperty::ManaValue,
+                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            }
+        }
+    ));
+    assert!(matches!(target, TargetFilter::ScopedPlayer));
+}
+
 #[test]
 fn extract_hand_cast_battlefield_threshold_leaves_effect_text() {
     let (cleaned, condition) = extract_if_condition(
@@ -3550,6 +3639,55 @@ fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
         ),
         "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
         grant.effect
+    );
+}
+
+/// CR 406.3, CR 406.3a-b, CR 601.2a, and CR 611.2a: Rev's exact Oracle text
+/// grants its controller permission to look at and cast the face-down card for
+/// as long as it remains exiled. The intervening Treasure creation must not
+/// make "that card" bind to the token or lower the permission as an immediate
+/// during-resolution cast.
+#[test]
+fn rev_tithe_extractor_grants_lingering_cast_permission() {
+    use crate::types::identifiers::TrackedSetId;
+
+    let def = parse_trigger_line(
+        "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token, then look at the top card of that player's library and exile it face down. You may cast that card for as long as it remains exiled.",
+        "Rev, Tithe Extractor",
+    );
+    let execute = def.execute.as_deref().expect("trigger should have execute");
+
+    let mut cursor = Some(execute);
+    let mut grant = None;
+    let mut immediate_cast = false;
+    while let Some(link) = cursor {
+        match link.effect.as_ref() {
+            effect @ Effect::GrantCastingPermission { .. } => grant = Some(effect),
+            Effect::CastFromZone { .. } => immediate_cast = true,
+            _ => {}
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+
+    assert!(
+        !immediate_cast,
+        "Rev grants a later casting permission; it must not cast during resolution"
+    );
+    assert!(
+        matches!(
+            grant,
+            Some(Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                ..
+            })
+        ),
+        "expected a permanent PlayFromExile grant on Rev's tracked face-down card, got: {grant:?}"
     );
 }
 
@@ -9302,7 +9440,7 @@ fn trigger_you_cast_legendary_creature_spell() {
     );
 }
 
-/// CR 205.2a + CR 205.4b + CR 601.2: "whenever you cast a noncreature
+/// CR 205.2a + CR 601.2: "whenever you cast a noncreature
 /// artifact spell" — Non(Creature) + Artifact conjunction.
 #[test]
 fn trigger_you_cast_noncreature_artifact_spell() {
@@ -14573,6 +14711,37 @@ fn trigger_coin_flip_rejects_partial_suffix() {
 }
 
 #[test]
+fn trigger_choose_ring_bearer_lowers_the_gated_temptation_mode() {
+    // Call of the Ring, second line (#7816): the same temptation event as
+    // "whenever the Ring tempts you", gated on a choice having been made.
+    let def = parse_trigger_line(
+        "Whenever you choose a creature as your Ring-bearer, you may pay 2 life. If you do, draw a card.",
+        "Call of the Ring",
+    );
+    assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    assert_eq!(
+        def.condition,
+        Some(crate::types::ability::TriggerCondition::ChoseRingBearer),
+        "the choice gate must ride in the trigger condition"
+    );
+    assert!(
+        def.execute.is_some(),
+        "the pay-life body must lower onto the trigger execute slot"
+    );
+}
+
+#[test]
+fn trigger_choose_ring_bearer_rejects_a_longer_suffix() {
+    // Regel 12: the head is all_consuming — trailing prose must fall through
+    // to Unknown, not silently truncate.
+    let def = parse_trigger_line(
+        "Whenever you choose a creature as your Ring-bearer or a food, draw a card.",
+        "Test Card",
+    );
+    assert!(matches!(def.mode, TriggerMode::Unknown(_)));
+}
+
+#[test]
 fn trigger_ring_tempts_you_whenever() {
     let def = parse_trigger_line(
         "Whenever the Ring tempts you, you may discard your hand.",
@@ -18289,6 +18458,24 @@ fn harsh_mentor_ability_activation_trigger_accepts_oxford_type_list() {
 }
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
+
+/// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
+/// ability activated by the source controller, so it carries no card filter.
+#[test]
+fn loyalty_ability_trigger_without_planeswalker_qualifier() {
+    let def = parse_trigger_line(
+        "Whenever you activate a loyalty ability, create a 2/2 colorless Wizard Soldier creature token named Cadet.",
+        "Ajani Unrelenting",
+    );
+    assert_eq!(def.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(def.valid_card, None);
+    let execute = def.execute.as_ref().expect("execute ability present");
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "Ajani's Cadet effect should parse, got {:?}",
+        execute.effect
+    );
+}
 
 /// CR 606.2 + CR 205.3j: Chandra's Regulator — "a Chandra planeswalker"
 /// parses to a typed Planeswalker + Subtype("Chandra") filter on
@@ -27250,7 +27437,7 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         "{card_name}: enter_tapped state ({enter_tapped:?})",
     );
 
-    // Node 2: GenericEffect keyword swap referencing OriginalSource, no duration.
+    // Node 2: GenericEffect keyword swap referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27267,8 +27454,9 @@ fn assert_reanimator_chain(oracle: &str, card_name: &str, expect_tapped: bool) {
         );
     };
     assert_eq!(
-        *duration, None,
-        "{card_name}: keyword-swap grant has no stated duration"
+        *duration,
+        Some(Duration::Permanent),
+        "{card_name}: keyword-swap grant is stamped to Duration::Permanent (CR 611.2a)"
     );
     assert_eq!(
         static_abilities.len(),
@@ -27469,7 +27657,7 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
     );
 
     // Node 2: GenericEffect grants (not swaps) — AddSubtype{Aura} + AddKeyword,
-    // referencing OriginalSource, no duration.
+    // referencing OriginalSource, stamped to Duration::Permanent (CR 611.2a).
     let generic = root
         .sub_ability
         .as_deref()
@@ -27485,7 +27673,11 @@ fn necromancy_etb_lowers_to_reanimator_grant_chain_640() {
             generic.effect
         );
     };
-    assert_eq!(*duration, None, "Necromancy: grant has no stated duration");
+    assert_eq!(
+        *duration,
+        Some(Duration::Permanent),
+        "Necromancy: grant is stamped to Duration::Permanent (CR 611.2a)"
+    );
     assert_eq!(static_abilities.len(), 1, "Necromancy: one grant static");
     let sd = &static_abilities[0];
     assert_eq!(
@@ -28483,6 +28675,36 @@ fn elder_brain_they_draw_binds_to_defending_player() {
         }
         other => panic!("expected Draw, got {other:?}"),
     }
+
+    use crate::types::identifiers::TrackedSetId;
+
+    let mut cursor = draw.sub_ability.as_deref();
+    let mut grant = None;
+    while let Some(link) = cursor {
+        if matches!(link.effect.as_ref(), Effect::GrantCastingPermission { .. }) {
+            grant = Some(link);
+            break;
+        }
+        cursor = link.sub_ability.as_deref();
+    }
+    let grant = grant.expect("the plural exile-play permission must remain in the effect chain");
+    assert!(
+        matches!(
+            grant.effect.as_ref(),
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    ..
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                ..
+            }
+        ),
+        "expected a permanent plural PlayFromExile grant on the tracked cards, got {:?}",
+        grant.effect
+    );
 }
 
 #[test]
@@ -29878,4 +30100,75 @@ fn whole_event_threshold_effect_does_not_read_event_context_amount() {
         execute_reads_event_context_amount(&reads_amount),
         "detector must fire on an effect that DOES read the event amount"
     );
+}
+
+/// Issue #7795 (Aragorn, Company Leader): the Ring-tempts trigger's effect —
+/// "put your choice of a counter from among first strike, vigilance,
+/// deathtouch, and lifelink on ~" — must lower to the counter-kind choice, not
+/// to `Unimplemented`. The standalone effect parser already handles this
+/// clause (`choose_one_of_detects_from_among_counter_choice`); this pins the
+/// TRIGGER path reaching the same reader.
+#[test]
+fn ring_tempts_put_choice_from_among_lowers_to_counter_choice() {
+    use crate::types::counter::CounterType;
+    use crate::types::keywords::KeywordKind;
+
+    const ORACLE: &str = "Whenever the Ring tempts you, if you chose a creature other than Aragorn as your Ring-bearer, put your choice of a counter from among first strike, vigilance, deathtouch, and lifelink on Aragorn.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Aragorn, Company Leader",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Noble".to_string()],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "parsed triggers: {:?}",
+        parsed.triggers
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::RingTemptsYou);
+    // CR 603.4: the intervening "if you chose a creature other than ~ as your
+    // Ring-bearer" must survive as a trigger-level condition — dropping it
+    // would fire the counter choice even when Aragorn himself is chosen.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::ChoseOtherRingBearer),
+        "intervening-if must lower to ChoseOtherRingBearer"
+    );
+
+    fn find_choice(def: &AbilityDefinition) -> Option<&Vec<AbilityDefinition>> {
+        if let Effect::ChooseOneOf { branches, .. } = &*def.effect {
+            return Some(branches);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            return find_choice(sub);
+        }
+        None
+    }
+
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let branches = find_choice(execute).unwrap_or_else(|| {
+        panic!(
+            "expected a ChooseOneOf in the trigger effect chain, got {:?}",
+            execute
+        )
+    });
+    let expected = [
+        KeywordKind::FirstStrike,
+        KeywordKind::Vigilance,
+        KeywordKind::Deathtouch,
+        KeywordKind::Lifelink,
+    ];
+    assert_eq!(branches.len(), expected.len());
+    for (branch, kind) in branches.iter().zip(expected) {
+        match &*branch.effect {
+            Effect::PutCounter { counter_type, .. } => {
+                assert_eq!(counter_type, &CounterType::Keyword(kind));
+            }
+            other => panic!("expected PutCounter branch, got {other:?}"),
+        }
+    }
 }

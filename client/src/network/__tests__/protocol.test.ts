@@ -36,8 +36,8 @@ const viewerInteractionWithProducedMana = {
 } as never;
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v24", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(24);
+  it("pins the P2P wire protocol to v32", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(32);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -87,12 +87,31 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "game_resumed" },
     { type: "lobby_progress", joined: 1, total: 3 },
     { type: "emote", emote: "🔥" },
-    { type: "reconnect", playerToken: "token-123" },
+    { type: "reconnect", playerToken: "token-123", wireProtocolVersion: WIRE_PROTOCOL_VERSION },
     { type: "reconnect_rejected", reason: "Unknown token" },
-    { type: "action_rejected", reason: "Player kicked" },
+    {
+      type: "action_rejected",
+      rejection: {
+        code: "action_not_allowed",
+        disposition: "unavailable",
+        message: "Player kicked",
+        related_object_ids: [],
+      },
+    },
+    { type: "action_failed", message: "Host failed to submit action" },
     { type: "action_noop" },
     { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
-    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
+    {
+      type: "mana_payment_preview_rejected",
+      requestId: 4,
+      rejection: {
+        code: "not_your_priority",
+        disposition: "unavailable",
+        message: "Not your turn",
+        related_object_ids: [],
+      },
+    },
+    { type: "mana_payment_preview_failed", requestId: 4, message: "Preview unavailable" },
     {
       type: "action",
       senderPlayerId: 0,
@@ -238,38 +257,6 @@ describe("encodeWireMessage / decodeWireMessage", () => {
 
   it("rejects empty payload", async () => {
     await expect(decodeWireMessage(new Uint8Array())).rejects.toThrow(/empty/);
-  });
-
-  const setupFrameAt = (wireProtocolVersion: number) => ({
-    type: "game_setup",
-    wireProtocolVersion,
-    assignedPlayerId: 1,
-    playerToken: "token-123",
-    state: buildGameState(),
-    events: [],
-    legalActions: [],
-    manaPaymentShortcutActions: [],
-  });
-
-  it("rejects stale setup wire protocol versions", () => {
-    expect(() => validateMessage(setupFrameAt(4))).toThrow(/Wire protocol mismatch/);
-  });
-
-  // The ADJACENT-peer pairing, which the far-stale v4 row above cannot exercise:
-  // 4 is refused whatever this client speaks, so that row proves the mechanism
-  // and nothing about the version. Both halves here stamp LITERALS — a frame
-  // built from WIRE_PROTOCOL_VERSION cannot tell a bumped client from an
-  // unbumped one, which is why every other handshake fixture in the suite is
-  // useless as an instrument for a bump. Revert 24 → 23 and BOTH halves red:
-  // the v23 frame stops being refused, and the v24 frame stops being admitted.
-  // The admitting half is the reach-guard: without it "refuses v23" is also
-  // satisfied by a client that refuses everything.
-  it("refuses the previous wire protocol (v23) and admits its own (v24)", () => {
-    expect(() => validateMessage(setupFrameAt(23))).toThrow(/Wire protocol mismatch/);
-    expect(validateMessage(setupFrameAt(24))).toMatchObject({
-      type: "game_setup",
-      wireProtocolVersion: 24,
-    });
   });
 
   // (e) Compressed payload still gates through validateMessage so unknown

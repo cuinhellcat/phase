@@ -2,6 +2,7 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "So funktioniert es",
     "startDrafting": "Mit dem Draften beginnen",
     "quick": {
@@ -15,6 +16,10 @@
       "step2": "Öffne 3 Booster mit 14 Karten — wähle eine, gib den Rest weiter",
       "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
       "step4": "Baue nach dem Draften ein 40-Karten-Deck und spiele Turnierpartien"
+    },
+    "commander": {
+      "step2": "Wähle zwei Karten aus jedem Booster und gib den Rest weiter",
+      "step4": "Baue nach dem Draften ein Commander-Deck mit 60 Karten und spiele eine Mehrspielerpartie"
     }
   },
   "steps": {
@@ -82,7 +87,8 @@
     "waitingNext": "Warten auf nächsten Booster...",
     "cardsInPack": "{{count}} Karten im Booster",
     "picking": "Wird ausgewählt…",
-    "autoPick": "Auto-Pick"
+    "autoPick": "Auto-Pick",
+    "selectionProgress": "{{selected}} von {{required}} ausgewählt"
   },
   "sealedOpening": {
     "title": "Öffne deinen Sealed-Pool",
@@ -103,6 +109,7 @@
     "sortColor": "Farbe",
     "sortType": "Typ",
     "sortCmc": "CMC",
+    "grantedFiller": "+ bis zu {{maximum}} × {{name}} (nur als Kommandeur)",
     "groups": {
       "white": "Weiß",
       "blue": "Blau",
@@ -165,7 +172,10 @@
     "landCount_one": "{{count}} Land",
     "landCount_other": "{{count}} Länder",
     "readyToSubmit": "bereit zum Einreichen",
-    "moreNeeded": "{{count}} weitere benötigt"
+    "moreNeeded": "{{count}} weitere benötigt",
+    "commanderRequired": "Bestimme einen Kommandeur aus deinem Pool, um abzugeben.",
+    "commanderUnavailable": "Die Kommandeur-Bestimmung ist derzeit nicht verfügbar — die Kartendatenbank konnte nicht geladen werden.",
+    "grantedFiller": "Dein Pool enthält außerdem bis zu {{maximum}} × {{name}}, nur als Kommandeur verwendbar."
   },
   "landing": {
     "title": "Draft",
@@ -188,12 +198,25 @@
       "title": "Pod Draft",
       "description": "Hoste einen Pod mit bis zu 8 Spielern oder tritt einem bei, draftet live gemeinsam und spielt dann ein Schweizer System- oder K.-o.-Turnier."
     },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draftet zwei Karten gleichzeitig in einem Pod, baut ein Commander-Deck mit 60 Karten und spielt dann eine Mehrspielerpartie."
+    },
     "podInProgress": "Pod Draft läuft",
+    "guestPodInProgress": "Beigetretener Pod bereit zum Wiederverbinden",
     "podLabel": "{{kind}}-Pod",
-    "seatCount": "{{count}} Plätze",
+    "guestPodLabel": "Draft-Pod",
+    "seatCount_one": "{{count}} Platz",
+    "seatCount_few": "{{count}} Plätze",
+    "seatCount_many": "{{count}} Plätze",
+    "seatCount_other": "{{count}} Plätze",
     "roomLabel": "Raum {{code}}",
-    "cardsPicked": "{{count}} Karten ausgewählt",
+    "cardsPicked_one": "{{count}} Karte ausgewählt",
+    "cardsPicked_few": "{{count}} Karten ausgewählt",
+    "cardsPicked_many": "{{count}} Karten ausgewählt",
+    "cardsPicked_other": "{{count}} Karten ausgewählt",
     "resume": "Fortsetzen",
+    "reconnect": "Wiederverbinden",
     "draftInProgress": "Draft läuft",
     "draftComplete": "Draft abgeschlossen",
     "resumeMatch": "Partie fortsetzen",
@@ -319,6 +342,8 @@
     "kindTraditionalDesc": "Best-of-Three-Turnierpartien nach dem Deckbau, mit Sideboarding zwischen den Spielen.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Öffne sechs Booster direkt für den Pool jedes Spielers und baue dann ein Best-of-One-Turnierdeck.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Jeder Spieler draftet zwei Karten gleichzeitig und baut ein Commander-Deck mit 60 Karten; danach spielt der Pod eine Mehrspielerpartie.",
     "tournamentFormat": "Turnierformat",
     "tournamentSwiss": "Schweizer System",
     "tournamentSwissDesc": "Alle spielen drei Runden lang weiter, auch nach einer Niederlage.",
@@ -373,16 +398,22 @@
     "sideboardGame": "Sideboard — Spiel {{number}}",
     "sideboardHint": "Nimm Sideboard-Änderungen vor und reiche dann ein. Dein Pool ist unten verfügbar.",
     "submitSideboard": "Sideboard einreichen",
-    "preparingNext": "Nächstes Spiel wird vorbereitet..."
+    "preparingNext": "Nächstes Spiel wird vorbereitet...",
+    "hideOverlay": "Diesen Bildschirm ausblenden",
+    "showOverlay": "Diesen Bildschirm anzeigen",
+    "hiddenNotice": "Das Sideboarding ist für dieses Spiel weiterhin offen.",
+    "hiddenNoticePlayDraw": "Für dieses Spiel steht die Wahl zwischen Spielen und Ziehen noch aus."
   },
   "podComplete": {
     "title": "Draft abgeschlossen",
+    "launchCommanderGame": "Commander-Spiel starten",
     "returnToMenu": "Zurück zum Menü"
   },
   "podError": {
     "kicked": "Du wurdest aus dem Pod geworfen",
     "hostLeft": "Der Host hat den Draft verlassen",
-    "connection": "Verbindungsfehler"
+    "connection": "Verbindungsfehler",
+    "retry": "Erneut verbinden"
   },
   "lobby": {
     "title": "Draft-Pod-Lobby",

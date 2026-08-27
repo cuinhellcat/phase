@@ -10,7 +10,7 @@ use crate::types::ability::{
     ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
     OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
     SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter,
+    SubAbilityLink, TargetFilter, ThisWayCause,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -457,6 +457,11 @@ pub(crate) enum ContinuationAst {
         /// cards route to a fixed library position (Fertile Thicket).
         #[serde(default)]
         reveal_verb: bool,
+        /// CR 608.2c: The producer action named by an explicit tracked-set suffix
+        /// such as "milled this way". Generic "from among" selection remains
+        /// action-agnostic (`None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caused_by: Option<ThisWayCause>,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.
@@ -1504,7 +1509,9 @@ pub(crate) enum ChooseImperativeAst {
     /// sub_ability lattice.
     TwoTargets {
         target_a: TargetFilter,
-        target_b: TargetFilter,
+        target_a_multi_target: Option<MultiTargetSpec>,
+        target_b: Box<TargetFilter>,
+        target_b_multi_target: Option<MultiTargetSpec>,
     },
     /// CR 608.2d + CR 122.1: "choose a counter on it / that permanent" — pick one
     /// of the distinct counter kinds present on the anaphoric object (The Caves
@@ -1976,8 +1983,9 @@ pub(crate) fn with_clause_duration(
     clause
 }
 
-fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
-    match duration {
+pub(crate) fn is_play_from_exile_lifetime_duration(duration: &Duration) -> bool {
+    matches!(
+        duration,
         Duration::ForAsLongAs {
             condition: StaticCondition::Unrecognized { text },
         } if matches!(
@@ -1986,8 +1994,13 @@ fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
                 | "that card remains exiled"
                 | "those cards remain exiled"
                 | "they remain exiled"
-        ) =>
-        {
+        )
+    )
+}
+
+fn normalize_play_from_exile_duration(duration: Duration) -> Duration {
+    match duration {
+        duration if is_play_from_exile_lifetime_duration(&duration) => {
             // CR 400.7i + CR 611.2a: exile-play permissions persist until the
             // referenced object leaves exile; zone-exit cleanup removes the
             // object-tagged permission.

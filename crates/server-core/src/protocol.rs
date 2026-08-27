@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -14,7 +15,7 @@ use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
-use crate::session::FullSessionKey;
+use crate::session::{AiDriverFault, FullSessionKey};
 use crate::takeback::{RewindOption, RewindTarget};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
@@ -318,6 +319,13 @@ pub enum ClientMessage {
     CreateDraftWithSettings {
         display_name: String,
         set_code: String,
+        /// The string encoding of the draft kind. `DraftKind` carries no
+        /// `#[serde(other)]`, no `#[serde(default)]` and no `Default`, so an
+        /// unrecognized kind name fails deserialization of the WHOLE frame
+        /// rather than resolving to a fallback variant. That is what makes a
+        /// version-skewed peer loud instead of silently creating the wrong
+        /// kind of draft; do not add any of those three attributes to
+        /// `DraftKind`.
         kind: draft_core::types::DraftKind,
         public: bool,
         password: Option<String>,
@@ -520,6 +528,17 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        rejection: ActionRejection,
+    },
+    /// An operational failure while processing one submitted game action or
+    /// interaction. This deliberately carries no engine-rejection DTO.
+    ActionFailed {
+        message: String,
+    },
+    /// A request outside the engine game-action boundary was refused. This is
+    /// deliberately prose: takeback and match-lifecycle requests have no
+    /// engine action/rejection provenance to expose.
+    RequestRejected {
         reason: String,
     },
     /// Confirms an authenticated action that intentionally produced no state
@@ -530,7 +549,14 @@ pub enum ServerMessage {
     /// identifier prevents unrelated action failures from settling this promise.
     ResolveAllRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a native Resolve All batch.
+    /// The request identifier prevents unrelated failures from settling this
+    /// promise.
+    ResolveAllFailed {
+        request_id: u64,
+        message: String,
     },
     /// Requester-only acknowledgement for a native Resolve All batch. The
     /// matching StateUpdate is sent first and carries the authoritative state.
@@ -551,7 +577,12 @@ pub enum ServerMessage {
     },
     ManaPaymentPreviewRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a mana-payment preview.
+    ManaPaymentPreviewFailed {
+        request_id: u64,
+        message: String,
     },
     OpponentDisconnected {
         grace_seconds: u32,
@@ -569,6 +600,12 @@ pub enum ServerMessage {
         /// rating changes for both seats.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ranked_result: Option<Vec<RankedPlayerResult>>,
+    },
+    /// A durable native AI driver failure. The referenced revision is the
+    /// final authoritative state frame that must be delivered before clients
+    /// surface the fault.
+    AiDriverFault {
+        fault: AiDriverFault,
     },
     /// Terminal-only bootstrap response. `None` means the exact keyed Full
     /// session has no prepared terminal artifact, so the caller may attempt
@@ -737,6 +774,7 @@ impl ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::AiDriverFailure;
     use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::format::GameFormat;
     use engine::types::game_state::ProductionOverride;
@@ -949,6 +987,37 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_message_ai_driver_fault_roundtrips_with_client_wire_keys() {
+        let msg = ServerMessage::AiDriverFault {
+            fault: AiDriverFault {
+                id: 7,
+                after_state_revision: 3,
+                cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+            },
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "AiDriverFault");
+        assert_eq!(json["data"]["fault"]["id"], 7);
+        assert_eq!(json["data"]["fault"]["after_state_revision"], 3);
+        assert_eq!(
+            json["data"]["fault"]["cause"]["ActionSafetyCapReached"]["limit"],
+            200
+        );
+
+        let parsed: ServerMessage = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::AiDriverFault {
+                fault: AiDriverFault {
+                    id: 7,
+                    after_state_revision: 3,
+                    cause: AiDriverFailure::ActionSafetyCapReached { limit: 200 },
+                },
+            }
+        ));
     }
 
     #[test]
@@ -2073,10 +2142,19 @@ mod tests {
             draft_code: "ABCD12".to_string(),
             action: draft_core::types::DraftAction::Pick {
                 seat: 3,
-                card_instance_id: "card-001".to_string(),
+                card_instance_ids: vec!["card-001".to_string()],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // Pin the wire KEY, not just the Rust round-trip: a round-trip alone
+        // passes for any field name, since both sides move together. The
+        // client emits this exact literal (`server-draft-adapter.test.ts`), and
+        // `DraftAction` carries no `serde(rename)`/`alias` on this field, so
+        // this assertion is what ties the two halves of the contract together.
+        assert!(
+            json.contains(r#""card_instance_ids":["card-001"]"#),
+            "unexpected wire shape: {json}"
+        );
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ClientMessage::DraftAction { draft_code, action } => {
@@ -2085,7 +2163,7 @@ mod tests {
                     action,
                     draft_core::types::DraftAction::Pick {
                         seat: 3,
-                        card_instance_id: "card-001".to_string(),
+                        card_instance_ids: vec!["card-001".to_string()],
                     }
                 );
             }
@@ -2172,15 +2250,22 @@ mod tests {
             pick_number: 2,
             pass_direction: PassDirection::Left,
             current_pack: None,
+            required_pick_count: 0,
             pool,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),
             seats: Vec::new(),
             cards_per_pack: 14,
+            // `cards_per_pack.div_ceil(cards_per_pick)` with Sealed's
+            // `cards_per_pick: 1` -- a degenerate axis value under
+            // `PackDistribution::AllAtOnce`, which has no pick step at all.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
+            draft_set_code: None,
             timer_remaining_ms: Some(5000),
             standings: Vec::new(),
             current_round: 0,
@@ -2334,9 +2419,12 @@ mod tests {
             pass_direction: PassDirection::Right,
             seats: Vec::new(),
             cards_per_pack: 14,
+            // CR 905.1a: Premier takes one card per step.
+            pick_steps_per_pack: 14,
             pack_count: 3,
             min_deck_size: 40,
             addable_cards: Vec::new(),
+            grantable_commander_filler: None,
             standings: Vec::new(),
             current_round: 0,
             tournament_format: TournamentFormat::Swiss,
@@ -2360,8 +2448,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_33() {
-        assert_eq!(PROTOCOL_VERSION, 33);
+    fn protocol_version_is_42() {
+        assert_eq!(PROTOCOL_VERSION, 42);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2371,7 +2459,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_33` stays
+    /// this guards — and this test reds while `protocol_version_is_42` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2418,11 +2506,37 @@ mod tests {
 
         let rejected = ServerMessage::ResolveAllRejected {
             request_id: 7,
-            reason: "Resolve All requires your priority".to_string(),
+            rejection: ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ResolveAllNotReady,
+            ),
         };
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
-            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"rejection":{"code":"resolve_all_not_ready","disposition":"unavailable","message":"Resolve All is not ready to run.","related_object_ids":[]}}}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ActionFailed {
+                message: "session storage failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ActionFailed","data":{"message":"session storage failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ResolveAllFailed {
+                request_id: 7,
+                message: "batch persistence failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ResolveAllFailed","data":{"request_id":7,"message":"batch persistence failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ManaPaymentPreviewFailed {
+                request_id: 7,
+                message: "preview lookup failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ManaPaymentPreviewFailed","data":{"request_id":7,"message":"preview lookup failed"}}"#
         );
     }
 
