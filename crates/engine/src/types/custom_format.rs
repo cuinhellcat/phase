@@ -146,9 +146,13 @@ impl CommanderEligibilityRule {
     /// `None` a caller would otherwise have to disambiguate from context.
     pub fn from_source_format(format: GameFormat) -> Result<Option<Self>, FormatConfigError> {
         match format {
-            GameFormat::Commander | GameFormat::DuelCommander | GameFormat::PauperCommander => {
-                Ok(Some(Self::Standard))
-            }
+            // CR 903.13g: Commander Draft games follow Commander's rules, and
+            // CR 903.13f routes its deck construction through CR 903.5 — so
+            // CR 903.3's commander eligibility test applies unchanged.
+            GameFormat::Commander
+            | GameFormat::DuelCommander
+            | GameFormat::PauperCommander
+            | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),
             GameFormat::TinyLeaders => Ok(Some(Self::TinyLeaders)),
             GameFormat::Oathbreaker => Ok(Some(Self::OathbreakerSignatureSpell)),
             GameFormat::Brawl | GameFormat::HistoricBrawl => Ok(Some(Self::BrawlColorIdentity)),
@@ -204,9 +208,11 @@ pub struct StructuralRules {
     #[serde(default)]
     pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
-    /// The DECLARED sideboard policy for this custom format. Not yet mirrored
-    /// by a RESOLVED `FormatConfig.sideboard_policy` field — that's a later
-    /// phase's widening.
+    /// The DECLARED sideboard policy for this custom format.
+    /// `FormatConfig.sideboard_policy` (Phase 1a) is the RESOLVED mirror for
+    /// built-in formats today; deriving it for `Custom` from this field via
+    /// the real resolver is Phase 1c's widening (see
+    /// `docs/proposals/custom-format-engine/IMPLEMENTATION_PLAN.md`).
     pub sideboard_policy: SideboardPolicy,
 }
 

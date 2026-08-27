@@ -52,11 +52,11 @@ use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
 use super::super::oracle_target::{
-    match_mass_union_separator, parse_anaphoric_target_ref, parse_event_context_ref,
-    parse_fight_target, parse_mass_type_union, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_type_phrase, parse_type_phrase_with_ctx, parse_word_bounded,
-    resolve_pronoun_target, resolve_singular_exiled_card_target, starts_with_type_word,
-    TargetSyntax,
+    match_mass_union_separator, parse_anaphoric_target_ref, parse_definite_parent_reference,
+    parse_event_context_ref, parse_fight_target, parse_mass_type_union, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase, parse_type_phrase_with_ctx,
+    parse_word_bounded, resolve_pronoun_target, resolve_singular_exiled_card_target,
+    starts_with_type_word, TargetSyntax,
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, merge_or_filters, parse_count_expr,
@@ -782,7 +782,10 @@ fn parse_target_relative_life_change_this_turn(qty_text: &str) -> Option<Quantit
     Some(QuantityExpr::Ref { qty })
 }
 
-fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
+fn parse_life_equal_quantity(
+    after_verb_lower: &str,
+    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
+) -> Option<QuantityExpr> {
     let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
         .parse(after_verb_lower)
         .ok()?;
@@ -796,8 +799,13 @@ fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
     if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
         return Some(qty);
     }
-    crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
-        .map(|qty| QuantityExpr::Ref { qty })
+    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+    let source = bare_card_source?;
+    let (rest, qty) =
+        nom_quantity::parse_contextual_bare_card_aggregate_ref(qty_text, source).ok()?;
+    rest.trim().is_empty().then_some(QuantityExpr::Ref { qty })
 }
 
 /// CR 119.3 + CR 102.1: "gain 1 life for each player" (a/an/1) → the count of
@@ -830,6 +838,22 @@ fn parse_gain_life_per_player(after_gain_lower: &str) -> Option<QuantityExpr> {
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, None)
+}
+
+fn parse_numeric_imperative_ast_with_context(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx.bare_card_aggregate_source)
+}
+
+fn parse_numeric_imperative_ast_with_bare_card_source(
+    text: &str,
+    lower: &str,
+    bare_card_source: Option<crate::types::ability::TrackedAnaphorSource>,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
         .or_else(|| {
@@ -919,7 +943,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // CR 119.3: target-relative quantity refs ("target creature's
         // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
         // Heron's Grace Champion, Lifeblood Hydra, etc.
-        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str(), bare_card_source) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
         // CR 119.3: "gain that much life" / "gain that many life" —
@@ -979,7 +1003,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // power/toughness/mana value", etc.) — Final Punishment, Tomb
         // Blade-class drain, Genesis of the Daleks. Delegates to the
         // shared `parse_quantity_ref` building block.
-        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str(), bare_card_source) {
             return Some(NumericImperativeAst::LoseLife { amount });
         }
         // CR 119.3: "lose that much life" / "lose that many life" —
@@ -2914,6 +2938,61 @@ fn is_bare_battlefield_permanent_leg(filter: &TargetFilter) -> bool {
         // Any other filter shape is not a bare permanent-type union.
         _ => false,
     }
+}
+
+/// CR 608.2c + CR 701.13a: a bounded exile choice whose alternatives live in
+/// different zones: "a <card filter> from their hand or the chosen <type>".
+/// The possessive hand leg is relative to an earlier targeted opponent, while
+/// the definite object leg names one unique declared target slot. Both operands
+/// are carried by one `Or` filter so the existing zone-choice resolver offers a
+/// single choice across Hand and Battlefield.
+fn try_parse_heterogeneous_chosen_exile(input: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    type E<'a> = OracleError<'a>;
+
+    let opponent_slots = ctx
+        .declared_target_slots
+        .iter()
+        .filter(|slot| {
+            matches!(
+                slot,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.is_empty()
+                        && tf.properties.is_empty()
+                        && tf.controller == Some(ControllerRef::Opponent)
+            )
+        })
+        .count();
+    if opponent_slots != 1 {
+        return None;
+    }
+
+    let (input, _) = opt(nom_primitives::parse_article).parse(input).ok()?;
+    let (chosen_text, hand_head) = terminated(
+        take_until::<_, _, E>(" from their hand or "),
+        tag(" from their hand or "),
+    )
+    .parse(input)
+    .ok()?;
+    let (mut hand_filter, hand_rem) = parse_type_phrase(hand_head.trim());
+    if !hand_rem.trim().is_empty() || !matches!(hand_filter, TargetFilter::Typed(_)) {
+        return None;
+    }
+    let (chosen_filter, chosen_rem) =
+        parse_definite_parent_reference(chosen_text, &ctx.declared_target_slots)?;
+    all_consuming((opt(tag::<_, _, E>(".")), eof))
+        .parse(chosen_rem.trim())
+        .ok()?;
+
+    attach_controller_if_absent(&mut hand_filter, ControllerRef::TargetOpponent);
+    let hand_filter =
+        super::add_filter_props(hand_filter, &[FilterProp::InZone { zone: Zone::Hand }]);
+    let chosen_filter = super::add_filter_props(
+        chosen_filter,
+        &[FilterProp::InZone {
+            zone: Zone::Battlefield,
+        }],
+    );
+    Some(merge_or_filters(hand_filter, chosen_filter))
 }
 
 /// CR 404.1 + CR 108.2: parse a trailing whole-zone union tail after the
@@ -4939,14 +5018,22 @@ fn parse_choose_zone_list(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleEr
 fn try_parse_two_targets(rest: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
-    // CR 601.2c connector parser: "and target " or "and another target ".
+    // CR 601.2c connector parser. Cardinality belongs to the target slot whose
+    // target phrase carries it; it is not an ability-wide optionality flag.
     // `scan_split_at_phrase` advances at word boundaries (jumping past each
     // space), so the connector body itself is matched without a leading
     // space — the word boundary is enforced by the scan loop. Trailing
     // space is required so the next character is the start of the second
     // target's type/quantity phrase.
-    fn parse_connector(input: &str) -> nom::IResult<&str, (), E<'_>> {
-        value((), alt((tag("and target "), tag("and another target ")))).parse(input)
+    fn parse_connector(input: &str) -> nom::IResult<&str, Option<MultiTargetSpec>, E<'_>> {
+        alt((
+            value(
+                Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+                tag("and up to one target "),
+            ),
+            value(None, alt((tag("and target "), tag("and another target ")))),
+        ))
+        .parse(input)
     }
 
     let lower = rest.to_ascii_lowercase();
@@ -4959,21 +5046,49 @@ fn try_parse_two_targets(rest: &str, ctx: &mut ParseContext) -> Option<ChooseImp
     // is part of the prefix.
     let prefix_orig = &rest[..lower_prefix.len()];
     let match_start_orig = &rest[rest.len() - lower_match_start.len()..];
+    let (_, target_b_multi_target) = parse_connector(match_start_orig).ok()?;
 
     // CR 115.1c slot A: the prefix must be a targeting phrase. `parse_target`
     // returning `Any` means "no recognized target" — we refuse to split.
-    let (target_a, _rem_a) = parse_target(prefix_orig.trim_end());
+    let (target_a_text, explicit_target_a_multi_target) =
+        super::strip_optional_target_prefix(prefix_orig.trim_end());
+    let (target_a, rem_a) = parse_target_with_ctx(target_a_text, ctx);
     if matches!(target_a, TargetFilter::Any) {
         return None;
+    }
+    if target_b_multi_target.is_some() {
+        all_consuming((space0::<_, E>, opt(alt((tag(","), tag(".")))), space0, eof))
+            .parse(rem_a)
+            .ok()?;
     }
 
     // CR 115.1c slot B: skip the leading "and " on the matched connector
     // and parse the second target. `tag("and ").parse(input)` returns
     // `(remainder, matched)` so we bind the first element.
     let (after_and_orig, _) = tag::<_, _, E>("and ").parse(match_start_orig).ok()?;
-    let (target_b, _rem_b) = parse_target(after_and_orig);
+    let target_b_text = if target_b_multi_target.is_some() {
+        tag::<_, _, E>("up to one ").parse(after_and_orig).ok()?.0
+    } else {
+        after_and_orig
+    };
+    let target_a_is_opponent = matches!(
+        &target_a,
+        TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)
+    );
+    let (target_b, rem_b) = if target_a_is_opponent {
+        ctx.with_player_scope(ControllerRef::TargetOpponent, |ctx| {
+            parse_target_with_ctx(target_b_text, ctx)
+        })
+    } else {
+        parse_target_with_ctx(target_b_text, ctx)
+    };
     if matches!(target_b, TargetFilter::Any) {
         return None;
+    }
+    if target_b_multi_target.is_some() {
+        all_consuming((space0::<_, E>, opt(tag(".")), space0, eof))
+            .parse(rem_b)
+            .ok()?;
     }
 
     // CR 601.2c + CR 608.2c: Register the two announced slot filters (A then B)
@@ -4988,7 +5103,17 @@ fn try_parse_two_targets(rest: &str, ctx: &mut ParseContext) -> Option<ChooseImp
     // heads in one chain; the single-declaration form is the whole class.)
     ctx.declared_target_slots = vec![target_a.clone(), target_b.clone()];
 
-    Some(ChooseImperativeAst::TwoTargets { target_a, target_b })
+    let target_a_multi_target = explicit_target_a_multi_target.or_else(|| {
+        target_b_multi_target
+            .as_ref()
+            .map(|_| MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }))
+    });
+    Some(ChooseImperativeAst::TwoTargets {
+        target_a,
+        target_a_multi_target,
+        target_b: Box::new(target_b),
+        target_b_multi_target,
+    })
 }
 
 /// Parse anaphoric "choose N of them/those [cards]" patterns using nom combinators.
@@ -8909,20 +9034,14 @@ pub(super) fn parse_exile_ast(
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
-    // CR 608.2c + CR 115.10a: an anaphoric ALTERNATIVE referent — "… or the
-    // chosen creature/permanent" — composes this exile with an object chosen
-    // by an EARLIER instruction in the same ability ("choose target opponent
-    // and up to one target creature they control. … You may exile a nonland
-    // card from their hand or the chosen creature …", Cloak and Dagger,
-    // Entwined — issue #4235 review). No object-anaphor filter exists to
-    // represent that alternative yet, and every arm below would silently
-    // narrow the choice to its own operand (the hand-card leg), making the
-    // card look supported while dropping the printed alternative entirely.
-    // Decline the whole imperative so the clause stays an honest
-    // `Effect::Unimplemented` strict failure until the chosen-object anaphor
-    // is representable.
-    if nom_primitives::scan_contains(rest_lower, "or the chosen ") {
-        return None;
+    if let Some(target) = try_parse_heterogeneous_chosen_exile(rest_lower, ctx) {
+        return Some(ZoneCounterImperativeAst::Exile {
+            origin: None,
+            target,
+            all: false,
+            enter_with_counters: vec![],
+            multi_target: None,
+        });
     }
 
     // CR 701.13a: "exile a card from the top of your library" — synonymous with
@@ -10673,9 +10792,11 @@ pub(super) fn parse_imperative_family_ast(
                 target: TargetFilter::Controller,
             }))
         }
-        "draw" => parse_numeric_imperative_ast(text, lower)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))),
-        "scry" | "surveil" | "mill" => parse_numeric_imperative_ast(text, lower)
+        _ if nom_on_lower(text, lower, |input| parse_word_bounded(input, "draw")).is_some() => {
+            parse_numeric_imperative_ast_with_context(text, lower, ctx)
+                .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
+        }
+        "scry" | "surveil" | "mill" => parse_numeric_imperative_ast_with_context(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))),
 
         // Targeted action verbs (CR 701)
@@ -11342,7 +11463,7 @@ pub(super) fn parse_imperative_family_ast(
                 // life-gain clauses ("gain 3 life") still fall through below.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
                 None
@@ -11364,7 +11485,7 @@ pub(super) fn parse_imperative_family_ast(
                 // its target for the parse_target call below.
                 Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else if !nom_primitives::scan_contains(lower, "mana") {
                 try_parse_gain_keyword(text).map(ImperativeFamilyAst::LoseKeyword)
@@ -11397,7 +11518,7 @@ pub(super) fn parse_imperative_family_ast(
         "gets" | "get" => try_parse_player_counter(lower)
             .or_else(|| coalesce_pump_with_modifications(text).map(ImperativeFamilyAst::GainKeyword))
             .or_else(|| {
-                parse_numeric_imperative_ast(text, lower)
+                parse_numeric_imperative_ast_with_context(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             }),
 
@@ -11438,7 +11559,7 @@ pub(super) fn parse_imperative_family_ast(
                 return Some(ImperativeFamilyAst::GainKeyword(effect));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
-            if let Some(ast) = parse_numeric_imperative_ast(text, lower) {
+            if let Some(ast) = parse_numeric_imperative_ast_with_context(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)));
             }
             // Shuffle: "that player shuffles" / "target player shuffles" have
@@ -12586,13 +12707,21 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // instructions are followed in order; later text may modify earlier
         // text).
         ImperativeFamilyAst::Structured(ImperativeAst::Choose(
-            ChooseImperativeAst::TwoTargets { target_a, target_b },
+            ChooseImperativeAst::TwoTargets {
+                target_a,
+                target_a_multi_target,
+                target_b,
+                target_b_multi_target,
+            },
         )) => {
             let mut clause = parsed_clause(Effect::TargetOnly { target: target_a });
-            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+            clause.multi_target = target_a_multi_target;
+            let mut target_b_clause = AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::TargetOnly { target: target_b },
-            )));
+                Effect::TargetOnly { target: *target_b },
+            );
+            target_b_clause.multi_target = target_b_multi_target;
+            clause.sub_ability = Some(Box::new(target_b_clause));
             clause
         }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
@@ -19349,7 +19478,9 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
-            Some(ChooseImperativeAst::TwoTargets { target_a, target_b }) => {
+            Some(ChooseImperativeAst::TwoTargets {
+                target_a, target_b, ..
+            }) => {
                 let tf_a = match &target_a {
                     TargetFilter::Typed(tf) => tf,
                     other => panic!("target_a should be Typed, got {other:?}"),
@@ -19359,7 +19490,7 @@ mod tests {
                     vec![TypeFilter::Artifact],
                     "target_a should be Artifact"
                 );
-                let tf_b = match &target_b {
+                let tf_b = match target_b.as_ref() {
                     TargetFilter::Typed(tf) => tf,
                     other => panic!("target_b should be Typed, got {other:?}"),
                 };
@@ -19390,6 +19521,216 @@ mod tests {
         }
     }
 
+    /// CR 115.1d + CR 601.2c: cardinality is per printed instance of
+    /// "target". The opponent remains mandatory while the creature they
+    /// control is independently optional.
+    #[test]
+    fn parse_choose_two_targets_with_optional_dependent_second_slot() {
+        let text = "choose target opponent and up to one target creature they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        let Some(ChooseImperativeAst::TwoTargets {
+            target_a,
+            target_a_multi_target,
+            target_b,
+            target_b_multi_target,
+        }) = result
+        else {
+            panic!("expected TwoTargets, got {result:?}");
+        };
+
+        assert!(matches!(
+            target_a,
+            TargetFilter::Typed(ref tf)
+                if tf.controller == Some(ControllerRef::Opponent)
+        ));
+        assert_eq!(
+            target_a_multi_target,
+            Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }))
+        );
+        assert!(matches!(
+            *target_b,
+            TargetFilter::Typed(ref tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::TargetOpponent)
+        ));
+        assert_eq!(
+            target_b_multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+    }
+
+    #[test]
+    fn optional_dependent_second_slot_does_not_accept_two_targets() {
+        let text = "choose target opponent and up to two target creatures they control";
+        let lower = text.to_lowercase();
+        assert!(
+            !matches!(
+                parse_choose_ast(text, &lower, &mut ParseContext::default()),
+                Some(ChooseImperativeAst::TwoTargets { .. })
+            ),
+            "the up-to-one connector must not consume a different cardinality"
+        );
+    }
+
+    #[test]
+    fn optional_dependent_second_slot_rejects_trailing_garbage() {
+        let text =
+            "choose target opponent and up to one target creature they control trailing garbage";
+        let lower = text.to_lowercase();
+        assert!(!matches!(
+            parse_choose_ast(text, &lower, &mut ParseContext::default()),
+            Some(ChooseImperativeAst::TwoTargets { .. })
+        ));
+    }
+
+    #[test]
+    fn teferi_optional_second_slot_does_not_steal_a_three_target_list() {
+        let text =
+            "choose up to one target artifact, up to one target creature, and up to one target land";
+        let lower = text.to_lowercase();
+        assert!(!matches!(
+            parse_choose_ast(text, &lower, &mut ParseContext::default()),
+            Some(ChooseImperativeAst::TwoTargets { .. })
+        ));
+    }
+
+    #[test]
+    fn great_aerie_keeps_both_optional_creature_targets() {
+        let text = "choose up to one target creature you control and up to one target creature an opponent controls";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TwoTargets {
+            target_a,
+            target_a_multi_target,
+            target_b,
+            target_b_multi_target,
+        }) = parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected the two-target Great Aerie head");
+        };
+        assert!(matches!(
+            target_a,
+            TargetFilter::Typed(ref tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::You)
+        ));
+        assert!(matches!(
+            target_b.as_ref(),
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::Opponent)
+        ));
+        assert_eq!(
+            target_a_multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+        assert_eq!(
+            target_b_multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
+    }
+
+    #[test]
+    fn mouth_to_mouth_binds_creature_to_target_opponent() {
+        let text = "choose target opponent and target creature they control";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TwoTargets { target_b, .. }) =
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected the two-target Mouth to Mouth head");
+        };
+        assert!(matches!(
+            target_b.as_ref(),
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.controller == Some(ControllerRef::TargetOpponent)
+        ));
+    }
+
+    #[test]
+    fn heterogeneous_chosen_exile_binds_hand_and_declared_creature_slots() {
+        let ctx = ParseContext {
+            declared_target_slots: vec![
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetOpponent),
+                ),
+            ],
+            ..Default::default()
+        };
+        let target = try_parse_heterogeneous_chosen_exile(
+            "a nonland card from their hand or the chosen creature",
+            &ctx,
+        )
+        .expect("heterogeneous exile choice");
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or filter, got {target:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(
+            &filters[0],
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::TargetOpponent)
+                    && tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.type_filters.iter().any(|ty| matches!(
+                        ty,
+                        TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                    ))
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Hand })
+        ));
+        assert!(matches!(
+            &filters[1],
+            TargetFilter::And { filters }
+                if filters.contains(&TargetFilter::ParentTargetSlot { index: 1 })
+        ));
+        assert!(filters[1].extract_zones().contains(&Zone::Battlefield));
+    }
+
+    #[test]
+    fn heterogeneous_chosen_exile_requires_unique_slot_and_full_consumption() {
+        let empty = ParseContext::default();
+        assert!(try_parse_heterogeneous_chosen_exile(
+            "a nonland card from their hand or the chosen creature",
+            &empty,
+        )
+        .is_none());
+
+        let no_opponent = ParseContext {
+            declared_target_slots: vec![TargetFilter::Typed(TypedFilter::creature())],
+            ..Default::default()
+        };
+        assert!(try_parse_heterogeneous_chosen_exile(
+            "a nonland card from their hand or the chosen creature",
+            &no_opponent,
+        )
+        .is_none());
+
+        let mut ctx = ParseContext {
+            declared_target_slots: vec![
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetOpponent),
+                ),
+            ],
+            ..Default::default()
+        };
+        assert!(try_parse_heterogeneous_chosen_exile(
+            "a nonland card from their hand or the chosen creature and draw a card",
+            &ctx,
+        )
+        .is_none());
+
+        ctx.declared_target_slots.insert(
+            1,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        );
+        assert!(try_parse_heterogeneous_chosen_exile(
+            "a nonland card from their hand or the chosen creature",
+            &ctx,
+        )
+        .is_none());
+    }
+
     /// CR 115.1c + CR 601.2c: TwoTargets lowering must emit a primary
     /// `TargetOnly` for slot A with a chained `TargetOnly` sub_ability for
     /// slot B so both targets are announced at activation.
@@ -19402,10 +19743,12 @@ mod tests {
                     type_filters: vec![TypeFilter::Artifact],
                     ..Default::default()
                 }),
-                target_b: TargetFilter::Typed(TypedFilter {
+                target_a_multi_target: None,
+                target_b: Box::new(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Card],
                     ..Default::default()
-                }),
+                })),
+                target_b_multi_target: None,
             },
         ));
         let clause = lower_imperative_family_ast(ast);

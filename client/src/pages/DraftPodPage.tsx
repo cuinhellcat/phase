@@ -8,9 +8,9 @@
  * 4. Deckbuilding: LimitedDeckBuilder (reuses Quick Draft component)
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
@@ -31,6 +31,7 @@ import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
+import { COMMANDER_DRAFT_ENTRY, type DraftKind } from "../components/draft/draftKind";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuShell } from "../components/menu/MenuShell";
 import {
@@ -38,6 +39,7 @@ import {
   intergamePromptKey,
   useMultiplayerDraftStore,
   type DraftPodScreen,
+  type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../stores/draftPodStore";
 
@@ -64,11 +66,16 @@ function PodSetup() {
   const poolMode = useDraftPodStore((s) => s.poolMode);
   const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
   const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
-  const kindDescription = {
+  // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than a
+  // blank line under the radios. Values are already-resolved strings because
+  // `react-i18next.d.ts` types `t`'s key against the `en` catalog, so a `t(variable)`
+  // lookup would not typecheck.
+  const kindDescription: Record<DraftKind, string> = {
     Premier: t("podSetup.kindPremierDesc"),
     Traditional: t("podSetup.kindTraditionalDesc"),
     Sealed: t("podSetup.kindSealedDesc"),
-  }[config.kind];
+    CommanderDraft: t("podSetup.kindCommanderDraftDesc"),
+  };
   const tournamentDescription = config.tournamentFormat === "Swiss"
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
@@ -200,8 +207,18 @@ function PodSetup() {
               />
               {t("podSetup.kindSealed")}
             </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "CommanderDraft"}
+                onChange={() => setConfig({ kind: "CommanderDraft" })}
+                className="accent-emerald-400"
+              />
+              {t("podSetup.kindCommanderDraft")}
+            </label>
           </div>
-          <p className="text-xs text-white/40">{kindDescription}</p>
+          <p className="text-xs text-white/40">{kindDescription[config.kind]}</p>
         </div>
 
         {/* Tournament Format (D-04) */}
@@ -660,7 +677,6 @@ function DraftingPhaseContent() {
   const { t } = useTranslation("draft");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
-  const podSize = useDraftPodStore((s) => s.config.podSize);
   const view = useMultiplayerDraftStore((s) => s.view);
   const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
@@ -671,7 +687,24 @@ function DraftingPhaseContent() {
   const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
 
   if (!introDismissed) {
-    return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
+    // CR 903.13a/b: the Commander procedure differs from the other pod kinds, so the
+    // intro copy does too. BOTH the variant and the player count come from the
+    // ENGINE-published view, never from `draftPodStore.config` — a guest's local
+    // config is never populated from the host's pod, so it still holds this client's
+    // own `kind: "Premier", podSize: 8` defaults. Reading the kind from the view and
+    // the count from the config would render "8 players" over a 4-seat Commander pod.
+    //
+    // `phase` can reach "drafting" from a `statusChanged` event that carries no view,
+    // so `view` is genuinely nullable here. In that window the seat count is unknown
+    // and nothing is rendered: an intro sentence stating a confident wrong number is
+    // worse than a frame with no intro, and the following `viewUpdated` supplies it.
+    return view ? (
+      <DraftIntro
+        mode={view.kind === "CommanderDraft" ? "commander" : "pod"}
+        podSize={view.seats.length}
+        onContinue={() => setIntroDismissed(true)}
+      />
+    ) : null;
   }
 
   // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
@@ -740,10 +773,34 @@ function PodDeckBuilder() {
 
 function CompleteView({ onLeave }: { onLeave: () => void }) {
   const { t } = useTranslation("draft");
+  const navigate = useNavigate();
+  // Three primitive selectors, matching this file's existing convention. The
+  // component reads state and dispatches; it derives nothing — the seat count
+  // the launch carries is read inside the store from `view.seats`.
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const role = useMultiplayerDraftStore((s) => s.role);
+  const launchCommanderGame = useMultiplayerDraftStore((s) => s.launchCommanderGame);
+  // CR 903.13a: only a Commander pod has a multiplayer game to launch, and only
+  // the host holds the session the decks are assembled from. The four
+  // CR 905.1a kinds render exactly as they do today.
+  const canLaunch = view?.kind === "CommanderDraft" && role === "host";
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
+      {/* `launchCommanderGame` reports a payload refusal by writing `error` and
+          NOT navigating, so without this banner that failure is invisible and
+          the launch button reads as dead. Same placement as the other phase
+          views (`PairingPhaseView`, `MatchInProgressView`, ...). */}
+      <PodErrorBanner />
       <h1 className="menu-display text-3xl text-white">{t("podComplete.title")}</h1>
       <FormatStandings />
+      {canLaunch && (
+        <button
+          onClick={() => void launchCommanderGame(navigate)}
+          className={menuButtonClass({ tone: "indigo", size: "md" })}
+        >
+          {t("podComplete.launchCommanderGame")}
+        </button>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "emerald", size: "md" })}
@@ -757,20 +814,31 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
 function PodErrorView({
   phase,
   onLeave,
+  onRetry,
 }: {
   phase: "error" | "kicked" | "hostLeft";
   onLeave: () => void;
+  onRetry: () => void;
 }) {
   const { t } = useTranslation("draft");
+  const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : t("podError.connection");
+        : recoveryFailure?.message ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
+      {phase === "error" && recoveryFailure?.kind === "retryable" && (
+        <button
+          onClick={onRetry}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          {t("podError.retry")}
+        </button>
+      )}
       <button
         onClick={onLeave}
         className={menuButtonClass({ tone: "neutral", size: "md" })}
@@ -787,6 +855,7 @@ function phaseContent(
   screen: DraftPodScreen,
   onLeave: () => void,
   onDismissOverlay: () => void,
+  onRetry: () => void,
 ): React.ReactNode {
   // No `default` arm: `tsc` is what makes a future `DraftPodScreen` member
   // impossible to forget here.
@@ -813,7 +882,7 @@ function phaseContent(
     case "error":
     case "kicked":
     case "hostLeft":
-      return <PodErrorView phase={screen} onLeave={onLeave} />;
+      return <PodErrorView phase={screen} onLeave={onLeave} onRetry={onRetry} />;
   }
 }
 
@@ -830,15 +899,80 @@ export function DraftPodPage() {
   const playDrawPending = useMultiplayerDraftStore((s) => s.playDrawPrompt !== null);
   const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const leave = useMultiplayerDraftStore((s) => s.leave);
+  const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
+  const enterKind = useDraftPodStore((s) => s.enterKind);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
+  const entryGeneration = useRef(0);
+  const retryController = useRef<AbortController | null>(null);
+  const entry = searchParams.get("entry");
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+    ? entry
+    : searchParams.get("resume") === "1" ? "host" : "auto";
 
   useEffect(() => {
-    if (searchParams.get("resume") !== "1") return;
-    void resumeHostedPod();
-  }, [resumeHostedPod, searchParams]);
+    const generation = entryGeneration;
+    const routeToken = ++generation.current;
+    const controller = new AbortController();
+
+    void (async () => {
+      if (entryMode === "host" || entryMode === "auto") {
+        // A host locator gets first claim on automatic entry. A guest locator
+        // is considered only after a terminal/invalid host locator has actually
+        // been cleared, so a damaged host record cannot steal a guest's route.
+        const outcome = await resumeHostedPod({
+          silent: entryMode === "auto",
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken) return;
+        if (entryMode === "host" || outcome === "resumed" || outcome === "superseded") return;
+
+        if (outcome === "absent" || outcome === "terminal" || outcome === "invalid") {
+          const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+            routeToken,
+            signal: controller.signal,
+          });
+          if (generation.current !== routeToken || guestOutcome === "superseded") return;
+          if (guestOutcome === "resumed" || guestOutcome === "failed") return;
+        }
+      } else {
+        const guestOutcome: GuestDraftResumeOutcome = await resumeDraft({
+          routeToken,
+          signal: controller.signal,
+        });
+        if (generation.current !== routeToken || guestOutcome === "superseded") return;
+        return;
+      }
+    })();
+    return () => {
+      controller.abort();
+      retryController.current?.abort();
+      retryController.current = null;
+      if (generation.current === routeToken) generation.current++;
+    };
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod]);
+
+  const retryGuestRecovery = useCallback(() => {
+    retryController.current?.abort();
+    const controller = new AbortController();
+    retryController.current = controller;
+    const routeToken = ++entryGeneration.current;
+    void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
+      if (retryController.current === controller) retryController.current = null;
+    });
+  }, [resumeDraft]);
+
+  useEffect(() => {
+    // A resumed pod's kind comes from its persisted session, which is the higher
+    // authority — a URL intent must never overwrite it.
+    if (searchParams.get("resume") === "1") return;
+    if (searchParams.get("kind") !== COMMANDER_DRAFT_ENTRY) return;
+    void enterKind("CommanderDraft");
+  }, [enterKind, searchParams]);
 
   const handleLeave = useCallback(async () => {
     await leave(true);
@@ -888,7 +1022,7 @@ export function DraftPodPage() {
           </div>
         )}
         <div className="flex w-full flex-col">
-          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey))}
+          {phaseContent(visibleScreen, handleLeave, () => setDismissedPromptKey(promptKey), retryGuestRecovery)}
         </div>
       </MenuShell>
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DRAFT_PROTOCOL_VERSION,
+  deckSubmissionFingerprint,
   encodeDraftWireMessage,
   decodeDraftWireMessage,
   validateDraftMessage,
@@ -9,9 +10,15 @@ import {
 import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
+  it("uses a locale-independent multiset fingerprint for deck submissions", () => {
+    expect(deckSubmissionFingerprint(["Ångler", "Island", "Island"])).toBe(
+      deckSubmissionFingerprint(["Island", "Ångler", "Island"]),
+    );
+  });
+
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 12", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(12);
+    it("is version 18", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(18);
     });
   });
 
@@ -87,14 +94,163 @@ describe("draftProtocol", () => {
 
   describe("validateDraftMessage", () => {
     it("accepts valid draft_join message", () => {
-      const msg = validateDraftMessage({ type: "draft_join", displayName: "Alice" });
+      const msg = validateDraftMessage({
+        type: "draft_join",
+        displayName: "Alice",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      });
       expect(msg.type).toBe("draft_join");
     });
 
     it("accepts valid draft_pick message", () => {
-      const msg = validateDraftMessage({ type: "draft_pick", cardInstanceId: "card-001" });
-      expect(msg.type).toBe("draft_pick");
+      const msg = validateDraftMessage({ type: "draft_pick", cardInstanceIds: ["card-001"] });
+      expect(msg).toMatchObject({ type: "draft_pick", cardInstanceIds: ["card-001"] });
     });
+
+    // CR 903.13b: a Commander pod's pick step is two cards, and an odd pack's
+    // final step is one. The wire bound is therefore a RANGE — a `=== 2` check
+    // would reject every CR 905.1a kind, and a `=== 1` check every Commander
+    // step.
+    it("accepts a two-card draft_pick step", () => {
+      const msg = validateDraftMessage({
+        type: "draft_pick",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+      expect(msg).toMatchObject({
+        type: "draft_pick",
+        cardInstanceIds: ["card-001", "card-002"],
+      });
+    });
+
+    it.each([
+      { cardInstanceIds: undefined },
+      { cardInstanceIds: null },
+      { cardInstanceIds: {} },
+      { cardInstanceIds: "card-001" },
+      { cardInstanceIds: [] },
+      { cardInstanceIds: ["card-001", "card-002", "card-003"] },
+      { cardInstanceIds: ["card-001", "card-001"] },
+      { cardInstanceIds: [null] },
+      { cardInstanceIds: ["card-001", 7] },
+      { cardInstanceIds: [""] },
+      { cardInstanceIds: ["x".repeat(257)] },
+    ])("rejects malformed draft_pick payloads", (payload) => {
+      expect(() => validateDraftMessage({ type: "draft_pick", ...payload })).toThrow(
+        "Invalid draft pick",
+      );
+    });
+
+    // ── draft_submit_deck: the CR 903.3 designation's wire bound ──────
+    //
+    // This suite is the ONLY one in client/src that runs
+    // `validateDraftMessage` at all, so every claim about the new validator's
+    // bound is owed here and nowhere else. The P2P host-seam suite invokes
+    // `handleGuestMessage` directly and never reaches this code.
+
+    it("accepts a deck submission carrying a designation", () => {
+      const msg = validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains", "Island"],
+        commanders: ["Kenrith, the Returned King"],
+      });
+      expect(msg).toMatchObject({
+        type: "draft_submit_deck",
+        mainDeck: ["Plains", "Island"],
+        commanders: ["Kenrith, the Returned King"],
+      });
+    });
+
+    // CR 702.124h designates two legendary CARDS, and CR 903.13e's filler case
+    // is two copies of ONE name — so a distinctness check would wrongly refuse
+    // a legal payload. Neither landed sibling's form (`[0] === [1]`, or
+    // `new Set(...).size`) may be copied into `validateSubmitDeck`, and this is
+    // the row that pins it.
+    it("accepts two designations with the same name", () => {
+      const msg = validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["The Prismatic Piper", "The Prismatic Piper"],
+        commanders: ["The Prismatic Piper", "The Prismatic Piper"],
+      });
+      expect(msg).toMatchObject({
+        commanders: ["The Prismatic Piper", "The Prismatic Piper"],
+      });
+    });
+
+    // THE FLOOR IS 0, and this is the only instrument in the phase that reds
+    // on a floor of 1. CR 903.1 scopes the commander designation to the
+    // Commander variant, and a P2P host pod is `Exclude<DraftKind, "Quick">` —
+    // Premier, Traditional and Sealed all submit `commanders: []`. Copying
+    // `validatePick`'s middle disjunct (`length === 0`) here would refuse every
+    // one of those submissions, and `draftPeerSession`'s decode `.catch` would
+    // drop the refusal silently. Assert on the RETURNED VALUE, not merely that
+    // nothing threw: `[]` must be neither refused nor defaulted into a name.
+    it("accepts an empty designation and returns it empty", () => {
+      const msg = validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains", "Island"],
+        commanders: [],
+      });
+      expect(msg).toMatchObject({ type: "draft_submit_deck", commanders: [] });
+    });
+
+    it.each([
+      { commanders: undefined },
+      { commanders: null },
+      { commanders: {} },
+      { commanders: "Kenrith, the Returned King" },
+      // Over the bound of 2 (CR 702.124g). Written as a literal three-name
+      // array, the way this file's landed `draft_pick` sweep writes every
+      // over-bound payload: the bound is module-private in `draftProtocol.ts`
+      // and this suite imports no constant. If the bound ever moves, this row
+      // goes stale LOUDLY — a third name becomes legal and `toThrow` finds no
+      // throw.
+      { commanders: ["Kenrith", "Gyruda", "Ludevic"] },
+      { commanders: [null] },
+      { commanders: ["Kenrith", 7] },
+      { commanders: [""] },
+      { commanders: ["x".repeat(257)] },
+    ])("rejects malformed draft_submit_deck payloads", (payload) => {
+      expect(() =>
+        validateDraftMessage({
+          type: "draft_submit_deck",
+          submissionId: "submission-1",
+          mainDeck: ["Plains"],
+          ...payload,
+        }),
+      ).toThrow("Invalid deck submission: commanders");
+    });
+
+    // v14's `submissionId` and v17's `commanders` are independent required
+    // fields on this one message. Each half carries the OTHER field valid, so
+    // neither refusal can be satisfied by the other's guard firing first.
+    it("requires a stable identifier on a deck submission", () => {
+      expect(validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Island"],
+        commanders: [],
+      })).toMatchObject({ type: "draft_submit_deck", submissionId: "submission-1" });
+      expect(() => validateDraftMessage({
+        type: "draft_submit_deck",
+        mainDeck: ["Island"],
+        commanders: [],
+      })).toThrow("Invalid deck submission: submissionId");
+    });
+
+    it("rejects a malformed deck acknowledgement before it can clear an outbox", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        submissionId: "submission-1",
+      })).toThrow("Invalid draft deck acknowledgement");
+      expect(() => validateDraftMessage({
+        type: "draft_deck_submit_ack",
+        view: {},
+      })).toThrow("Invalid deck acknowledgement");
+    });
+
 
     it("accepts a draft-effect pick message", () => {
       const msg = validateDraftMessage({
@@ -195,6 +351,30 @@ describe("draftProtocol", () => {
       expect(() => validateDraftMessage({ type: "game_setup" })).toThrow("Invalid draft message type");
     });
 
+    it("rejects a malformed typed reconnect rejection", () => {
+      expect(() => validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        kind: "NotARejectionKind",
+        reason: "Unknown token",
+      })).toThrow("Invalid draft reconnect rejection");
+      expect(validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        kind: "UnknownToken",
+        reason: "Unknown token",
+      })).toMatchObject({ kind: "UnknownToken" });
+    });
+
+    it("normalizes a pre-v13 untyped reconnect rejection to a credential-preserving protocol mismatch", () => {
+      expect(validateDraftMessage({
+        type: "draft_reconnect_rejected",
+        reason: "Unknown token",
+      })).toMatchObject({
+        type: "draft_reconnect_rejected",
+        kind: "ProtocolMismatch",
+        reason: "Unknown token",
+      });
+    });
+
     it.each([
       "draft_join",
       "draft_reconnect",
@@ -205,6 +385,7 @@ describe("draftProtocol", () => {
       "draft_reconnect_ack",
       "draft_reconnect_rejected",
       "draft_state_update",
+      "draft_deck_submit_ack",
       "draft_pick_ack",
       "draft_error",
       "draft_kicked",
@@ -231,27 +412,70 @@ describe("draftProtocol", () => {
       "draft_bo3_score_update",
       "draft_bo3_match_complete",
     ])("accepts message type '%s'", (msgType) => {
-      const msg = validateDraftMessage(
-        msgType === "draft_pick_with_draft_effect"
-          ? {
-              type: msgType,
-              effectCardInstanceId: "cogwork-1",
-              cardInstanceIds: ["card-001", "card-002"],
-            }
-          : { type: msgType },
-      );
+      // Types with a bespoke validator need a well-formed payload; every other
+      // member still reaches `validateDraftMessage`'s bare fall-through. One
+      // row per bespoke validator, so the next one costs a line rather than
+      // another nesting level.
+      const BESPOKE_PAYLOADS: Record<string, Record<string, unknown>> = {
+        draft_pick: { cardInstanceIds: ["card-001"] },
+        draft_pick_with_draft_effect: {
+          effectCardInstanceId: "cogwork-1",
+          cardInstanceIds: ["card-001", "card-002"],
+        },
+        draft_reconnect_rejected: { kind: "NoReconnectWindow", reason: "No grace window" },
+        // `draft_submit_deck` reaches a bespoke branch instead of the bare
+        // fall-through, and that branch requires BOTH the v14 submission id and
+        // the v17 CR 903.3 designation, so this sweep needs a payload carrying
+        // both.
+        draft_submit_deck: {
+          submissionId: "submission-1",
+          mainDeck: ["Plains"],
+          commanders: ["Kenrith, the Returned King"],
+        },
+        draft_deck_submit_ack: { submissionId: "submission-1", view: {} },
+      };
+      const msg = validateDraftMessage({ type: msgType, ...BESPOKE_PAYLOADS[msgType] });
       expect(msg.type).toBe(msgType);
     });
   });
 
   describe("wire encoding/decoding round-trip", () => {
     it("round-trips a small message (raw path)", async () => {
-      const msg: DraftP2PMessage = { type: "draft_join", displayName: "Bob" };
+      const msg: DraftP2PMessage = {
+        type: "draft_join",
+        displayName: "Bob",
+        draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      };
       const encoded = await encodeDraftWireMessage(msg);
       // Small messages use raw format (0x00 prefix)
       expect(encoded[0]).toBe(0x00);
 
       const decoded = await decodeDraftWireMessage(encoded);
+      expect(decoded).toEqual(msg);
+    });
+
+    it("round-trips a deck submission carrying its designation", async () => {
+      // `decodeDraftWireMessage` runs `validateDraftMessage`, so this covers
+      // the production path a guest's deck submission actually takes
+      // (CR 903.3).
+      const msg: DraftP2PMessage = {
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains", "Island"],
+        commanders: ["Kenrith, the Returned King"],
+      };
+      const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));
+      expect(decoded).toEqual(msg);
+    });
+
+    it("round-trips a whole two-card pick step through the validator", async () => {
+      // `decodeDraftWireMessage` runs `validateDraftMessage`, so this covers
+      // the production path a guest's pick actually takes (CR 903.13b).
+      const msg: DraftP2PMessage = {
+        type: "draft_pick",
+        cardInstanceIds: ["card-001", "card-002"],
+      };
+      const decoded = await decodeDraftWireMessage(await encodeDraftWireMessage(msg));
       expect(decoded).toEqual(msg);
     });
 
