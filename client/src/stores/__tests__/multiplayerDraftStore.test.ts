@@ -1043,7 +1043,7 @@ describe("multiplayerDraftStore", () => {
 
   describe("bot-match concede", () => {
     it("binds the pod match concession through startMatch and concedes the local game seat", async () => {
-      const dispatch = vi.fn(async () => {});
+      const dispatch = vi.fn(async () => []);
       useGameStore.setState({ dispatch });
       useMultiplayerDraftStore.setState({
         matchPairing: {
