@@ -608,6 +608,25 @@ pub struct DerivedViews {
     /// can render the compact strip without reinterpreting keyword timing.
     /// Keyed by object ID; absent when a permanent has no display-relevant
     /// keyword.
+    ///
+    /// CR 708.2 + CR 708.2a: face-down permanents are INCLUDED, unlike
+    /// `copied_permanents` below. A face-down permanent has "no characteristics
+    /// other than those listed by the ability or rules that allowed" it to be
+    /// face down, so every keyword it carries is public: the face-down rules'
+    /// own grant (cloak's ward {2}, CR 701.58a; disguise's, CR 702.168a) or an
+    /// external effect. The hidden card's own text is not here — the authority
+    /// for that is `morph::apply_face_down_creature_characteristics`, which
+    /// blanks `keywords`/`base_keywords` to the profile, plus layer 1's reseed
+    /// on every pass (pinned by `morph::tests::manifest_puts_top_card_face_down_as_2_2`).
+    ///
+    /// That invariant is deliberately NOT asserted in this loop: an externally
+    /// granted keyword legitimately lands in `base_keywords` too
+    /// (`PerpetualModification::GrantKeywords` puts it there on purpose so it
+    /// survives the layer reset, CR 613.1), so no local predicate here can tell
+    /// a leaked printed keyword from a granted one. Issue #7822 is what a real
+    /// leak looks like — a manifested planeswalker kept its loyalty and badged
+    /// it — and it was fixed at the stripping authority, which is where the
+    /// next one belongs too.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
 
@@ -3846,6 +3865,120 @@ mod tests {
             Zone::Battlefield,
         );
         assert!(derive_views(&state, None).copied_permanents.is_empty());
+    }
+
+    /// CR 708.2 + CR 708.2a: a face-down permanent has "no characteristics
+    /// other than those listed by the ability or rules that allowed" it to be
+    /// face down, and the plain default carries "no text" — none of the hidden
+    /// card's own
+    /// abilities — `manifest` strips them into `back_face` and layer 1 reseeds
+    /// the face-down profile on every pass. What such a permanent still carries
+    /// is public either way: the face-down rules' OWN grant (cloak enters with ward {2}, CR 701.58a;
+    /// disguise likewise, CR 702.168a — both via
+    /// `apply_face_down_creature_characteristics`)
+    /// or an external effect (an Aura's menace, a lord's flying). Neither is the
+    /// hidden card's text, which is why the badge strip can be rendered.
+    /// `PermanentCard` relies on exactly this contract; pin it here so the
+    /// client never has to re-derive it.
+    ///
+    /// What this test does NOT prove: it stays green with and without the
+    /// client change it backs (the diff touches no engine runtime), and it
+    /// writes the granted keyword straight onto the object instead of resolving
+    /// an Aura — the layer pass that would grant it is not exercised. The
+    /// stripping half is covered by `morph::tests::manifest_puts_top_card_face_down_as_2_2`,
+    /// CR 701.58a (cloak) + CR 702.168a (disguise): the OTHER half of the same
+    /// contract — such a permanent's ward {2} is part of being face down, not
+    /// the hidden card's text, so it belongs on the strip. Measured because the
+    /// sibling test's vanilla manifest profile carries no keyword at all and
+    /// would let a "face-down permanents never badge anything" reading pass.
+    ///
+    /// The profile is built by the authority that writes it
+    /// (`apply_face_down_creature_characteristics` + `FaceDownProfile::cloaked_2_2`)
+    /// and the expectation is read back out of that same profile, so a change
+    /// to the face-down ward moves the test with it instead of silently
+    /// leaving it green.
+    #[test]
+    fn a_face_down_profile_ward_is_badged_like_any_public_keyword() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let cloaked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cloaked Card".into(),
+            Zone::Battlefield,
+        );
+        let profile = crate::types::ability::FaceDownProfile::cloaked_2_2();
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&cloaked).unwrap(),
+            &profile,
+        );
+
+        let expected = Keyword::Ward(
+            profile
+                .ward
+                .clone()
+                .expect("the cloaked profile is the warded one"),
+        );
+        let views = derive_views(&state, None);
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&cloaked),
+            Some(&vec![expected]),
+            "the face-down profile's own ward is public and belongs on the strip",
+        );
+    }
+
+    /// Like its ward sibling, this test stays green with and without the
+    /// client change it backs — it pins the engine-side contract, not the diff.
+    #[test]
+    fn face_down_keyword_badges_carry_only_granted_keywords() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let player = PlayerId(0);
+        let hidden = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Hidden Flyer".into(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hidden).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.keywords = vec![Keyword::Flying];
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        let mut events = Vec::new();
+        crate::game::morph::manifest(&mut state, player, &mut events)
+            .expect("manifest the top card face down");
+        assert!(
+            state.objects[&hidden].face_down,
+            "the fixture must actually be face down",
+        );
+
+        // What layer 6 writes onto the permanent while an Aura grants menace.
+        state.objects.get_mut(&hidden).unwrap().keywords = vec![Keyword::Menace];
+
+        let views = derive_views(&state, None);
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&hidden),
+            Some(&vec![Keyword::Menace]),
+            "the granted keyword is public and belongs on the strip",
+        );
+        assert_eq!(
+            state.objects[&hidden]
+                .back_face
+                .as_ref()
+                .expect("the hidden card is kept for the turn-up")
+                .keywords,
+            vec![Keyword::Flying],
+            "the hidden card's own keyword still exists — and stayed off the strip",
+        );
     }
 
     #[test]
