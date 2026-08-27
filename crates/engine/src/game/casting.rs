@@ -9328,6 +9328,20 @@ pub(super) fn consume_pending_spell_cost_reduction(
 fn swap_to_alternative_spell_face(obj: &mut crate::game::game_object::GameObject) {
     // #7565: the shared swap preserves the stored slot's layout_kind.
     super::printed_cards::swap_object_faces(obj);
+    // CR 715.2a (#7714): while the Adventure/Omen face IS in use, the stored
+    // slot holds the NORMAL face — it must not read as "has an Adventure"
+    // (`SpellCastRecord.has_adventure`, Garenbrig Squire's qualifier).
+    // `restore_alternative_spell_normal_face` re-stamps the marker from the
+    // cast's variant when the normal face returns. Split/MDFC markers are a
+    // different semantic (card-level layout class) and stay preserved.
+    if let Some(back) = obj.back_face.as_mut() {
+        if matches!(
+            back.layout_kind,
+            Some(LayoutKind::Adventure) | Some(LayoutKind::Omen)
+        ) {
+            back.layout_kind = None;
+        }
+    }
 }
 
 /// CR 715 / CR 720: Returns the Adventure-family spell layout if this object
