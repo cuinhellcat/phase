@@ -2762,6 +2762,207 @@ fn a_room_recast_after_a_back_half_round_trip_offers_the_choice_again() {
     );
 }
 
+/// Shared fixture for the off-hand recast tests: a zero-cost split Room in
+/// `zone` with both halves printed, so the only cast gate under test is the
+/// per-cast face choice itself.
+fn split_room_in_zone(state: &mut GameState, card_id: CardId, zone: Zone) -> ObjectId {
+    let room = create_object(
+        state,
+        card_id,
+        PlayerId(0),
+        "Moldering Gym".to_string(),
+        zone,
+    );
+    let obj = state.objects.get_mut(&room).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Room".to_string());
+    obj.mana_cost = ManaCost::generic(0);
+    let mut back = room_back_face("Weight Room");
+    back.card_types.core_types.push(CoreType::Enchantment);
+    back.card_types.subtypes.push("Room".to_string());
+    obj.back_face = Some(back);
+    room
+}
+
+/// Drives one full front-half cast of `room` and pins the per-cast choice
+/// contract (CR 601.2b + CR 709.3, #7565): the cast prompts, the SAME cast
+/// never re-prompts after the choice, and the chosen face resolves onto the
+/// battlefield.
+fn cast_room_choosing_front(state: &mut GameState, room: ObjectId, card_id: CardId, label: &str) {
+    use crate::game::stack;
+
+    let first = apply_as_current(
+        state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id,
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(first.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the {label} cast must offer the face choice, got {:?}",
+        first.waiting_for
+    );
+    let after_choice =
+        apply_as_current(state, GameAction::ChooseModalFace { back_face: false }).unwrap();
+    assert!(
+        !matches!(after_choice.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SAME {label} cast must not re-prompt after the choice"
+    );
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == room),
+        "the chosen face must be on the stack for the {label} cast"
+    );
+    let mut events = Vec::new();
+    stack::resolve_top(state, &mut events);
+    assert_eq!(
+        state.objects[&room].zone,
+        Zone::Battlefield,
+        "the Room must resolve onto the battlefield for the {label} cast"
+    );
+}
+
+/// CR 601.2a + CR 709.3 (#7565): the per-cast face choice is zone-agnostic.
+/// A split Room cast out of the GRAVEYARD under a static graveyard-cast
+/// permission (Conduit class) must announce its half per CR 601.2b on every
+/// cast: the initial cast prompts, that cast never re-prompts, and the next
+/// cast from the graveyard prompts afresh.
+#[test]
+fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
+    use crate::types::ability::CardPlayMode;
+
+    let mut state = setup_game_at_main_phase();
+    let permission_source = create_object(
+        &mut state,
+        CardId(905),
+        PlayerId(0),
+        "Graveyard Conduit".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&permission_source)
+        .unwrap()
+        .static_definitions
+        .push(
+            // CR 601.2a: graveyard cast via static permission;
+            // `Unlimited` (Conduit class) so the recast needs no new turn.
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+            })
+            .affected(TargetFilter::Any),
+        );
+    let room = split_room_in_zone(&mut state, CardId(906), Zone::Graveyard);
+
+    cast_room_choosing_front(&mut state, room, CardId(906), "graveyard");
+
+    // Destroyed back into the graveyard; the same permission backs the recast.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Graveyard, &mut events);
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(906),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND graveyard cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
+/// CR 601.2a + CR 709.3 (#7565): the EXILE leg of the recast class. A split
+/// Room cast out of exile under a persistent static exile-cast permission
+/// (The Matrix of Time class, pay-normal-cost) must announce its half per
+/// CR 601.2b on every cast: the initial cast prompts, that cast never
+/// re-prompts, and a later cast after the source re-exiles it prompts afresh.
+#[test]
+fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
+    use crate::types::ability::CardPlayMode;
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
+    use crate::types::statics::{ExileCardPool, ExileCastCost, ExileCastTiming};
+
+    let mut state = setup_game_at_main_phase();
+    let permission_source = create_object(
+        &mut state,
+        CardId(907),
+        PlayerId(0),
+        "Exile Conduit".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&permission_source)
+        .unwrap()
+        .static_definitions
+        .push(
+            // CR 601.2a: exile cast via static permission; the
+            // persistent pool + `Unlimited` keep the recast in the same turn.
+            StaticDefinition::new(StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::Persistent,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+            })
+            .affected(TargetFilter::Any),
+        );
+    let room = split_room_in_zone(&mut state, CardId(908), Zone::Exile);
+    state.exile_links.push(ExileLink {
+        exiled_id: room,
+        source_id: permission_source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+
+    cast_room_choosing_front(&mut state, room, CardId(908), "exile");
+
+    // The source exiles it again. Leaving exile for the stack dropped the
+    // old link (CR 400.7: the `move_to_zone` exit path retains
+    // `exile_links` away), so the fresh exile event installs a fresh link.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, room, Zone::Exile, &mut events);
+    assert!(
+        !state.exile_links.iter().any(|link| link.exiled_id == room),
+        "leaving exile must have dropped the stale link"
+    );
+    state.exile_links.push(ExileLink {
+        exiled_id: room,
+        source_id: permission_source,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    let second = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: room,
+            card_id: CardId(908),
+            targets: vec![],
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(second.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "the SECOND exile cast must offer the face choice again (#7565), got {:?}",
+        second.waiting_for
+    );
+}
+
 /// CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge produces {R}{R} restricted
 /// to "cast Room spells and unlock doors". The door-unlock half lowers to
 /// `OnlyForSpecialAction(UnlockDoor)`; paying a Room's unlock cost routes
