@@ -3132,10 +3132,16 @@ fn normal_cost_grant_supports_cast(
 /// casting or two alternative costs to a single spell"): a permission that is
 /// itself an alternative cost — cast "without paying its mana cost" or for a
 /// substitute cost (`ExileWithAltCost`, ability costs, energy, plot, foretell)
-/// — cannot lend zone authority to the `FaceDown` {3} cast, which is a second
-/// alternative method+cost. Normal-cost routes (Adventure creature face,
-/// Warp's later cast, `PlayFromExile`, battlefield exile-cast statics) are
-/// method-agnostic zone authority and remain available to every variant.
+/// — cannot lend zone authority to a variant that brings its own independent
+/// alternative cost, which would be a second alternative method+cost. That
+/// class is `CastingVariant::is_independent_alternative_cost_rider`: the
+/// `FaceDown` {3} cast (#7948) and its siblings — Evoke, Bestow, Overload,
+/// Dash, Mutate, Warp's hand cast, … Route-coupled variants (madness, suspend,
+/// plot, foretell, the graveyard keywords) are NOT in it: their alternative
+/// cost IS the cost of their own permission, one procedure rather than two.
+/// Normal-cost routes (Adventure creature face, Warp's later cast,
+/// `PlayFromExile`, battlefield exile-cast statics) are method-agnostic zone
+/// authority and remain available to every variant.
 fn has_exile_cast_permission(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -6461,6 +6467,12 @@ fn prepare_spell_cast_with_variant_override_inner(
     // graveyard alt-cost.
     let has_during_resolution_alt_cost =
         has_during_resolution_alt_cost_permission(state, obj, player);
+    // CR 118.9a: does the chosen method bring its own, independent alternative
+    // cost? Read before the permission is elected, because an elected
+    // permission that is ITSELF an alternative cost must reject such a rider —
+    // see the override branch below and `castable_zone` further down.
+    let alt_rider_variant =
+        variant_override.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     // CR 601.2a: A static exile permission is identified by
     // `CastingVariant::ExilePermission.source`; every other cast path that is
     // authorized by an object-attached grant records that exact vector slot.
@@ -6483,6 +6495,19 @@ fn prepare_spell_cast_with_variant_override_inner(
         {
             return Err(EngineError::ActionNotAllowed(
                 "The casting permission selected for this offer no longer authorizes the cast"
+                    .to_string(),
+            ));
+        }
+        // CR 118.9a + CR 601.2b: this offer is BOUND to that permission, and
+        // the permission is itself an alternative cost ("without paying its
+        // mana cost"). A sibling normal-cost grant is not the route this cast
+        // takes, so it cannot lend authority to a method that brings its own
+        // alternative cost — `castable_zone`'s sibling fallback below would
+        // otherwise admit the rider on the strength of a grant never used.
+        if alt_rider_variant {
+            return Err(EngineError::ActionNotAllowed(
+                "This spell was offered without paying its mana cost, so it can't also be cast \
+                 for an alternative cost of its own"
                     .to_string(),
             ));
         }
@@ -6528,8 +6553,6 @@ fn prepare_spell_cast_with_variant_override_inner(
     // PlayFromExile/Adventure/Warp, Lurrus-class graveyard permissions,
     // top-of-library play) admit every variant: there the rider's cost is
     // the single alternative applied.
-    let alt_rider_variant =
-        variant_override.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     let castable_zone = ((has_unowned_exile_permission || has_during_resolution_alt_cost)
         && (!alt_rider_variant || normal_cost_grant_supports_cast(state, obj, player)))
         || has_object_tagged_play_permission
@@ -6704,7 +6727,15 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
 
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
-    let energy_cost_from_exile = if obj.zone == Zone::Exile {
+    //
+    // CR 118.9a: this scan reads every attached permission, not the elected
+    // one (an energy permission is never electable — see
+    // `exile_alt_cost_permission_supports_cast`), so it must not answer for a
+    // cast that brings its own independent alternative cost. Such a cast is
+    // authorized by a normal-cost grant (`has_exile_cast_permission` rejects
+    // the energy permission as rider authority) and owes the rider's cost, not
+    // a free one borrowed from a route it never took.
+    let energy_cost_from_exile = if obj.zone == Zone::Exile && !alt_rider_variant {
         obj.casting_permissions.iter().any(|p| {
             matches!(
                 p,

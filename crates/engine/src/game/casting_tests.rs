@@ -45270,6 +45270,119 @@ fn a_free_grant_keeps_the_prototype_election_from_exile() {
     assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
 }
 
+/// A cast offered during the resolution of the spell that exiled the card: the
+/// offer's own permission carries `resolution_cleanup`, which is what binds a
+/// `casting_permission_index_override` to it.
+fn resolution_offer_grant(
+    player: PlayerId,
+    source_id: ObjectId,
+) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::ExileWithAltCost {
+        cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+        cost: ManaCost::zero(),
+        cast_transformed: false,
+        constraint: None,
+        granted_to: Some(player),
+        resolution_cleanup: Some(crate::types::ability::ResolutionCastCleanup {
+            source_id,
+            exiled_misses: vec![],
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+        }),
+        duration: None,
+        graveyard_replacement: None,
+        enters_with_counter: None,
+        enters_with_modifications: vec![],
+        mana_spend_permission: None,
+    }
+}
+
+/// CR 118.9a + CR 601.2b (#7981 review, finding 1): a cast OFFERED during
+/// resolution is bound to that offer's permission, and that permission is an
+/// alternative cost. A sibling normal-cost grant is not the route this cast
+/// takes, so it must not lend zone authority to an evoke election riding the
+/// offer — the offer would otherwise carry two alternative costs.
+#[test]
+fn a_resolution_offer_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    let offered = {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        let index = CastingPermissionIndex(obj.casting_permissions.len());
+        obj.casting_permissions
+            .push(resolution_offer_grant(player, exiled));
+        obj.casting_permissions
+            .push(normal_cost_grant(player, ManaCost::generic(4)));
+        index
+    };
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+        None,
+        Some(offered),
+        CastingMode::Actual,
+    );
+    assert!(
+        result.is_err(),
+        "a resolution offer must not admit the evoke election through a sibling \
+         normal-cost grant (CR 118.9a), got {:?}",
+        result.map(|p| p.casting_variant),
+    );
+
+    // Positive direction: the offer itself still authorizes its own free cast,
+    // so the denial above is about the rider and not a broken fixture.
+    let free = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        player,
+        exiled,
+        None,
+        None,
+        Some(offered),
+        CastingMode::Actual,
+    )
+    .expect("the resolution offer must still authorize the plain free cast it was made for");
+    assert_ne!(free.casting_variant, CastingVariant::Evoke);
+    assert!(matches!(free.mana_cost, ManaCost::NoCost));
+}
+
+/// CR 118.9a + CR 107.14 (#7981 review, finding 2): an energy permission is
+/// never the elected authority (it is not electable at all), so it must not
+/// zero the cost of an evoke election that a sibling normal-cost grant
+/// authorized. The evoke cost is the one alternative cost on that cast.
+#[test]
+fn an_unelected_energy_permission_does_not_zero_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.casting_permissions
+            .push(crate::types::ability::CastingPermission::ExileWithEnergyCost);
+        obj.casting_permissions
+            .push(normal_cost_grant(player, ManaCost::generic(4)));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    )
+    .expect("the normal-cost grant authorizes the evoke election from exile");
+    assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+    assert_eq!(
+        prepared.mana_cost,
+        ManaCost::generic(1),
+        "the evoke cost must be paid, not zeroed by an energy permission this cast never used",
+    );
+}
+
 /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static
 /// from `spell_objects_available_to_cast` after a single cast through it
 /// this turn, then come back at turn cleanup.
