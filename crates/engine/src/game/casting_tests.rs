@@ -37175,6 +37175,40 @@ mod prototype_cast_flow {
         obj_id
     }
 
+    /// CR 718.2 + CR 718.3b: the prototype cost is an alternative
+    /// CHARACTERISTIC, not an alternative cost (CR 118.9) — the one-shot
+    /// free-cast rider is the single alternative cost applied, so it zeroes
+    /// a prototyped cast exactly as it zeroes a normal cast. Mirror image of
+    /// `next_spell_without_paying_does_not_replace_overload_cost` (Overload
+    /// IS an alternative cost, so there the rider must NOT apply).
+    #[test]
+    fn next_spell_without_paying_zeroes_a_prototyped_cast() {
+        let mut state = setup_game_at_main_phase();
+        let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::WithoutPayingManaCost,
+                spell_filter: None,
+                source_id: None,
+            },
+        );
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            obj,
+            Some(CastingVariant::Prototype),
+        )
+        .expect("prototype prepare succeeds");
+        assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
+        assert!(
+            matches!(prepared.mana_cost, ManaCost::NoCost),
+            "the free-cast rider must zero the prototyped cast (CR 718.2), got {:?}",
+            prepared.mana_cost
+        );
+    }
+
     #[test]
     fn offer_prototype_when_both_costs_affordable() {
         let mut state = setup_game_at_main_phase();
@@ -45076,6 +45110,164 @@ fn legacy_play_from_exile_form_round_trips_without_the_companion_marker() {
     let back: crate::types::ability::CastingPermission =
         serde_json::from_str(&json).expect("deserialize legacy form");
     assert_eq!(back, grant);
+}
+
+/// CR 702.74a: an exiled creature with printed Evoke — printed cost {4},
+/// evoke cost {1}. Off-zone keyword reads flow through `base_keywords`
+/// (`off_zone_characteristics`); stamp both views.
+fn exiled_evoker(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let exiled = add_exiled_card(state, player, "Exiled Evoker");
+    let obj = state.objects.get_mut(&exiled).unwrap();
+    obj.mana_cost = ManaCost::generic(4);
+    obj.base_mana_cost = obj.mana_cost.clone();
+    obj.keywords.push(crate::types::keywords::Keyword::Evoke(
+        crate::types::keywords::EvokeCost::Mana(ManaCost::generic(1)),
+    ));
+    obj.base_keywords = obj.keywords.clone();
+    exiled
+}
+
+/// CR 118.9a + CR 601.2b (#7948 follow-up): an Alternative-provenance grant
+/// is itself an alternative cost — it lends NO zone authority to an Evoke
+/// election, which would be a second alternative cost on the same cast.
+/// The face-down cast got this gate in #7948; Evoke is the same class.
+#[test]
+fn an_alternative_grant_lends_no_zone_authority_to_an_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_cast_grant(player));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    );
+    assert!(
+        result.is_err(),
+        "an alternative-cost grant must not authorize the evoke election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b + CR 702.103a (#7948 follow-up): the same denial
+/// for a Bestow election riding a free grant's zone authority.
+#[test]
+fn an_alternative_grant_lends_no_zone_authority_to_a_bestow_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // A legal creature target for the would-be Aura.
+    add_creature_with_mv(&mut state, CardId(45_901), PlayerId(1), "Bear", 2);
+    let exiled = exiled_evoker(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.keywords.push(crate::types::keywords::Keyword::Bestow(
+            crate::types::keywords::BestowCost::Mana(ManaCost::generic(2)),
+        ));
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions.push(free_cast_grant(player));
+    }
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let result = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Bestow),
+    );
+    assert!(
+        result.is_err(),
+        "an alternative-cost grant must not authorize the bestow election (CR 118.9a), \
+         got {:?}",
+        result.map(|p| p.casting_variant)
+    );
+}
+
+/// CR 118.9a + CR 601.2b: a `NormalCost` grant restates the card's own
+/// printed cost — a normal cast route. Electing Evoke against it applies
+/// exactly ONE alternative cost, so the election keeps its zone authority.
+#[test]
+fn a_normal_cost_grant_keeps_the_evoke_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(normal_cost_grant(player, ManaCost::generic(4)));
+    add_mana(&mut state, player, ManaType::Colorless, 4);
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Evoke),
+    )
+    .expect("a normal-cost grant must keep the evoke election");
+    assert_eq!(prepared.casting_variant, CastingVariant::Evoke);
+}
+
+/// CR 118.9: the free grant itself stays a legal (single) alternative cost —
+/// the plain cast of the evoker through it must keep working. The denial
+/// above gates the ELECTION, never the card.
+#[test]
+fn a_free_grant_still_casts_the_evoker_without_the_evoke_election() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_evoker(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(free_cast_grant(player));
+
+    let prepared = prepare_spell_cast_with_variant_override(&state, player, exiled, None)
+        .expect("the free grant must still cast the card normally");
+    assert_ne!(prepared.casting_variant, CastingVariant::Evoke);
+}
+
+/// CR 718.2 + CR 718.3b: prototyped casting swaps alternative
+/// CHARACTERISTICS — the prototype mana cost IS the spell's mana cost, not
+/// an alternative cost per CR 118.9. A free grant plus the Prototype
+/// election is therefore legal and must stay admitted.
+#[test]
+fn a_free_grant_keeps_the_prototype_election_from_exile() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = add_exiled_card(&mut state, player, "Exiled Prototype");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.mana_cost = ManaCost::generic(7);
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.keywords
+            .push(crate::types::keywords::Keyword::Prototype {
+                cost: ManaCost::generic(2),
+                power: Some(1),
+                toughness: Some(1),
+            });
+        obj.base_keywords = obj.keywords.clone();
+        obj.casting_permissions.push(free_cast_grant(player));
+    }
+
+    let prepared = prepare_spell_cast_with_variant_override(
+        &state,
+        player,
+        exiled,
+        Some(CastingVariant::Prototype),
+    )
+    .expect("a free grant plus the prototype election is one alternative cost (CR 718.2)");
+    assert_eq!(prepared.casting_variant, CastingVariant::Prototype);
 }
 
 /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static

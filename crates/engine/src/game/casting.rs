@@ -3143,15 +3143,19 @@ fn has_exile_cast_permission(
     turn_number: u32,
     variant: Option<CastingVariant>,
 ) -> bool {
-    // CR 601.2b: the face-down cast may only ride a normal-cost route.
-    let face_down = matches!(variant, Some(CastingVariant::FaceDown));
+    // CR 118.9a + CR 601.2b (#7948, generalized to the rider class): a variant
+    // that brings its own INDEPENDENT alternative cost — the face-down {3}, an
+    // Evoke or Bestow election, … — may only ride a normal-cost route; an
+    // alternative-cost grant underneath it would be a second alternative cost
+    // on the same cast.
+    let alt_rider = variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     // CR 118.9a + CR 601.2b + CR 305.1: elected-authority provenance — the
     // land/look companion installed alongside an alt-cost grant
     // (`PlayFromExileProvenance::LandLookCompanion`, see `cast_from_zone.rs`) is not cast authority,
-    // so the face-down cast accepts only a genuine impulse-class grant as its
+    // so a rider cast accepts only a genuine impulse-class grant as its
     // normal-cost route. Every other variant keeps the plain scan: where a
     // companion exists, its alt-cost sibling authorizes those casts anyway.
-    let play_from_exile_route = if face_down {
+    let play_from_exile_route = if alt_rider {
         obj.casting_permissions
             .iter()
             .enumerate()
@@ -3178,15 +3182,15 @@ fn has_exile_cast_permission(
         || obj.casting_permissions.iter().any(|p| match p {
             crate::types::ability::CastingPermission::AdventureCreature => obj.owner == player,
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
-                !face_down && obj.owner == player
+                !alt_rider && obj.owner == player
             }
             crate::types::ability::CastingPermission::ExileWithAltCost {
                 cost_provenance, ..
             } => {
                 // CR 702.168b + CR 118.9a: a `NormalCost` grant restates the
                 // card's own printed cost — a normal cast route that admits
-                // the face-down cast; an `Alternative` grant does not.
-                (!face_down
+                // an alternative-cost rider; an `Alternative` grant does not.
+                (!alt_rider
                     || matches!(
                         cost_provenance,
                         crate::types::ability::ExileGrantCostProvenance::NormalCost
@@ -3194,17 +3198,17 @@ fn has_exile_cast_permission(
                     && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
-                !face_down && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+                !alt_rider && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::PlayFromExile { .. } => false,
             crate::types::ability::CastingPermission::WarpExile {
                 castable_after_turn,
             } => obj.owner == player && turn_number > *castable_after_turn,
             crate::types::ability::CastingPermission::Plotted { turn_plotted } => {
-                !face_down && obj.owner == player && turn_number > *turn_plotted
+                !alt_rider && obj.owner == player && turn_number > *turn_plotted
             }
             crate::types::ability::CastingPermission::Foretold { turn_foretold, .. } => {
-                !face_down && obj.owner == player && turn_number > *turn_foretold
+                !alt_rider && obj.owner == player && turn_number > *turn_foretold
             }
         })
         // CR 601.2a + CR 113.6b: A `StaticMode::ExileCastPermission` static on a
@@ -3220,12 +3224,12 @@ fn has_exile_cast_permission(
         // Time class) stays a normal-cost route. The face-down case SEARCHES
         // for an eligible normal-cost source — an earlier free source must
         // not hide a later normal-cost authority (first-match hazard).
-        || if face_down {
+        || if alt_rider {
             exile_cast_permission_source_matching(
                 state,
                 player,
                 obj.id,
-                static_source_eligible_for_face_down,
+                static_source_is_normal_cost_authority,
             )
             .is_some()
         } else {
@@ -3848,13 +3852,14 @@ fn selected_object_cast_permission_index(
                 exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                     .then_some(CastingPermissionIndex(index))
             }),
-        // CR 702.168b + CR 118.9a: the face-down cast never elects an
-        // `ExileWithAltCost` slot — even a `NormalCost` grant only lends zone
-        // authority (`has_exile_cast_permission`), while the cast's cost is
-        // the face-down {3}; electing the slot would let cost preparation
-        // substitute the grant's restated cost for the {3}. Named limit: a
-        // `single_use` normal-cost grant is therefore not consumed by a
-        // face-down cast through it.
+        // CR 702.168b + CR 118.9a: an alternative-cost-rider cast (face down,
+        // Evoke, Bestow, … — and every other non-Normal variant below) never
+        // elects an `ExileWithAltCost` slot — even a `NormalCost` grant only
+        // lends zone authority (`has_exile_cast_permission`), while the
+        // cast's cost is the rider's own; electing the slot would let cost
+        // preparation substitute the grant's restated cost for it. Named
+        // limit: a `single_use` normal-cost grant is therefore not consumed
+        // by a rider cast through it.
         Some(CastingVariant::FaceDown) => None,
         _ => None,
     };
@@ -4501,14 +4506,17 @@ pub(crate) fn exile_cast_permission_source(
     exile_cast_permission_source_matching(state, player, exiled_id, |_| true)
 }
 
-/// CR 118.9a: THE face-down eligibility predicate for a static exile source
+/// CR 118.9a: THE normal-cost-authority predicate for a static exile source
 /// — `PayNormalCost` base mode AND no `CastCostMode::Alternative` extra-cost
 /// rider (a Valgavoth-class rider replaces the mana payment and makes the
 /// source an alternative-cost authority; an `Additional` rider preserves
-/// ordinary payment). Shared by the admission (`has_exile_cast_permission`)
-/// and every rider/cost read (`elected_exile_permission_source`), so the
-/// admitted authority and the paying authority can never diverge.
-fn static_source_eligible_for_face_down(source: &ExilePermissionSource<'_>) -> bool {
+/// ordinary payment). Only such a source may admit a variant that brings its
+/// own independent alternative cost (`is_independent_alternative_cost_rider`:
+/// the face-down {3}, Evoke, Bestow, …). Shared by the admission
+/// (`has_exile_cast_permission`) and every rider/cost read
+/// (`elected_exile_permission_source`), so the admitted authority and the
+/// paying authority can never diverge.
+fn static_source_is_normal_cost_authority(source: &ExilePermissionSource<'_>) -> bool {
     matches!(source.cost, ExileCastCost::PayNormalCost)
         && !matches!(
             source.extra_cost,
@@ -4701,18 +4709,18 @@ pub(crate) fn elected_exile_permission_source(
     variant
         .and_then(CastingVariant::exile_permission_source)
         .or_else(|| {
-            // CR 118.9a + CR 601.2a: the face-down cast reselects with the
-            // SAME eligibility predicate its admission used — the ordinary
-            // first-match scan could elect an earlier ineligible source
-            // (Valgavoth alternative rider) and charge ITS cost treatment,
-            // while admission was granted by a later eligible normal-cost
-            // source.
-            if variant == Some(CastingVariant::FaceDown) {
+            // CR 118.9a + CR 601.2a: an alternative-cost-rider cast (face
+            // down, Evoke, Bestow, …) reselects with the SAME eligibility
+            // predicate its admission used — the ordinary first-match scan
+            // could elect an earlier ineligible source (Valgavoth alternative
+            // rider) and charge ITS cost treatment, while admission was
+            // granted by a later eligible normal-cost source.
+            if variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider) {
                 exile_cast_permission_source_matching(
                     state,
                     player,
                     exiled_id,
-                    static_source_eligible_for_face_down,
+                    static_source_is_normal_cost_authority,
                 )
                 .map(|(source, _, _)| source)
             } else {
@@ -6514,14 +6522,16 @@ fn prepare_spell_cast_with_variant_override_inner(
     // methods of casting or two alternative costs to a single spell"): an
     // alternative-cost authority — exile/graveyard alt-cost grants,
     // during-resolution free-cast windows, graveyard cast keywords — cannot
-    // admit the {3} face-down cast, which is itself an alternative
-    // method+cost. Normal-cost authorities (hand, command zone,
-    // `has_object_tagged_play_permission` = PlayFromExile/Adventure/Warp,
-    // Lurrus-class graveyard permissions, top-of-library play) admit every
-    // variant: there the face-down {3} is the single alternative applied.
-    let face_down_variant = variant_override == Some(CastingVariant::FaceDown);
+    // admit a variant that brings its own independent alternative cost (the
+    // {3} face-down cast, an Evoke/Bestow election, …). Normal-cost
+    // authorities (hand, command zone, `has_object_tagged_play_permission` =
+    // PlayFromExile/Adventure/Warp, Lurrus-class graveyard permissions,
+    // top-of-library play) admit every variant: there the rider's cost is
+    // the single alternative applied.
+    let alt_rider_variant =
+        variant_override.is_some_and(CastingVariant::is_independent_alternative_cost_rider);
     let castable_zone = ((has_unowned_exile_permission || has_during_resolution_alt_cost)
-        && (!face_down_variant || normal_cost_grant_supports_cast(state, obj, player)))
+        && (!alt_rider_variant || normal_cost_grant_supports_cast(state, obj, player)))
         || has_object_tagged_play_permission
         || (obj.owner == player
             && (obj.zone == Zone::Hand
@@ -6534,7 +6544,7 @@ fn prepare_spell_cast_with_variant_override_inner(
                     && oathbreaker_on_battlefield(state, player))
                 || has_madness
                 || ((has_graveyard_cast_keyword || has_mayhem || has_graveyard_alt_cost)
-                    && (!face_down_variant
+                    && (!alt_rider_variant
                         || normal_cost_grant_supports_cast(state, obj, player)))
                 || has_graveyard_permission
                 || has_top_of_library_permission));
