@@ -44659,7 +44659,13 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
                 ManaCost::generic(5).into(),
             ));
     }
-    state.players[0].mana_pool.mana = vec![
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .mana_pool
+        .mana = vec![
         crate::types::mana::ManaUnit::new(
             crate::types::mana::ManaType::Colorless,
             ObjectId(0),
