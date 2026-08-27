@@ -3221,8 +3221,20 @@ fn has_exile_cast_permission(
         // for an eligible normal-cost source — an earlier free source must
         // not hide a later normal-cost authority (first-match hazard).
         || if face_down {
-            exile_cast_permission_source_matching(state, player, obj.id, |cost| {
-                matches!(cost, ExileCastCost::PayNormalCost)
+            exile_cast_permission_source_matching(state, player, obj.id, |source| {
+                // CR 118.9a: a normal-cost static is a normal-cost route only
+                // when its extra-cost rider does not REPLACE the mana payment
+                // — a `CastCostMode::Alternative` rider (Valgavoth pay-life)
+                // makes the source an alternative-cost authority; an
+                // `Additional` rider (Dawnhand) preserves ordinary payment.
+                matches!(source.cost, ExileCastCost::PayNormalCost)
+                    && !matches!(
+                        source.extra_cost,
+                        Some(crate::types::statics::CastExtraCost {
+                            mode: crate::types::statics::CastCostMode::Alternative,
+                            ..
+                        })
+                    )
             })
             .is_some()
         } else {
@@ -4499,19 +4511,21 @@ pub(crate) fn exile_cast_permission_source(
     exile_cast_permission_source_matching(state, player, exiled_id, |_| true)
 }
 
-/// Cost-aware sibling of [`exile_cast_permission_source`]: returns the first
-/// authorizing static whose [`ExileCastCost`] satisfies `cost_ok`, applying
-/// the same source gates (frequency slot, your-turn timing, pool membership,
-/// affected filter). CR 118.9a: the face-down admission must SEARCH for a
-/// `PayNormalCost` source — filtering the result of a first-match scan lets
-/// an earlier free source hide a later normal-cost authority (the
-/// multi-source first-match hazard documented on
-/// [`exile_cast_permission_source_full`]).
+/// Predicate-aware sibling of [`exile_cast_permission_source`]: returns the
+/// first authorizing static whose SOURCE satisfies `source_ok`, applying the
+/// same source gates (frequency slot, your-turn timing, pool membership,
+/// affected filter). CR 118.9a: the face-down admission must SEARCH for an
+/// eligible source — filtering the result of a first-match scan lets an
+/// earlier ineligible source hide a later eligible one (the multi-source
+/// first-match hazard documented on [`exile_cast_permission_source_full`]).
+/// The predicate sees the whole source so it can weigh the cost mode AND the
+/// extra-cost rider (a `CastCostMode::Alternative` rider makes a
+/// `PayNormalCost` source an alternative-cost authority — Valgavoth).
 fn exile_cast_permission_source_matching(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
-    cost_ok: impl Fn(&ExileCastCost) -> bool,
+    source_ok: impl Fn(&ExilePermissionSource<'_>) -> bool,
 ) -> Option<(ObjectId, CastFrequency, ExileCastCost)> {
     let obj = state.objects.get(&exiled_id)?;
     if !exile_object_can_enter_cast_path(obj) {
@@ -4542,7 +4556,7 @@ fn exile_cast_permission_source_matching(
         if !super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx) {
             return None;
         }
-        if !cost_ok(&source.cost) {
+        if !source_ok(&source) {
             return None;
         }
         Some((source.source_id, source.frequency, source.cost))

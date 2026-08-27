@@ -44677,6 +44677,129 @@ fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId)
     exiled
 }
 
+/// CR 118.9a (#7948 round 4): a `PayNormalCost` static carrying an
+/// ALTERNATIVE extra-cost rider (Valgavoth pay-life) is an alternative-cost
+/// authority — it must not authorize disguise. The GameAction cast still
+/// works through the static's own route: face UP, mana untouched, life paid.
+#[test]
+fn an_alternative_rider_static_cannot_authorize_disguise() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_valgavoth_exile_cast_source(&mut state, player);
+    let exiled = exiled_disguiser_with_three_floating(&mut state, player);
+    link_exiled_to_source(&mut state, exiled, source);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        !has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "an Alternative-rider source is alternative-cost authority — no face-down"
+    );
+    assert!(!face_down_cast_is_permitted(&state, player, exiled));
+
+    let life_before = state.players[0].life;
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    runner.cast(exiled).resolve();
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "the static's own route must cast"
+    );
+    assert!(
+        !obj.face_down,
+        "the alternative-rider source must never produce a face-down cast"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        3,
+        "the pay-life alternative leaves the pool untouched"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before - 5,
+        "Valgavoth's rider charges life equal to the mana value"
+    );
+}
+
+/// Counter-direction (#7948 round 4): an ADDITIONAL extra-cost rider
+/// preserves ordinary mana payment — the source stays a normal-cost route
+/// and disguise remains legal through it.
+#[test]
+fn an_additional_rider_static_still_authorizes_disguise() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = {
+        use crate::types::ability::StaticDefinition;
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            card_id,
+            player,
+            "Dawnhand-Class Source".to_string(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: Some(crate::types::statics::CastExtraCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                mode: crate::types::statics::CastCostMode::Additional,
+            }),
+            enters_with_counter: None,
+        })
+        .affected(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        source
+    };
+    let exiled = exiled_disguiser_with_three_floating(&mut state, player);
+    link_exiled_to_source(&mut state, exiled, source);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(
+        has_exile_cast_permission(
+            &state,
+            &obj,
+            player,
+            state.turn_number,
+            Some(CastingVariant::FaceDown)
+        ),
+        "an Additional-rider normal-cost source stays a normal-cost route"
+    );
+    assert!(face_down_cast_is_permitted(&state, player, exiled));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    runner.cast(exiled).resolve();
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.face_down,
+        "disguise must remain reachable through the Additional-rider route"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        0,
+        "the {{3}} face-down cost is charged"
+    );
+}
+
 /// Serde both-forms pin for the grant provenance: the default `Alternative`
 /// stays off the wire (every pre-provenance grant deserializes to it), while
 /// `NormalCost` is carried explicitly.
