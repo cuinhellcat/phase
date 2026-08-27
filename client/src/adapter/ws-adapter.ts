@@ -18,7 +18,7 @@ import type {
   FormatConfig,
 } from "./types";
 import type { InteractionSubmission } from "./generated/interaction";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq, resolveAllRejectionError } from "./types";
+import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -203,6 +203,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 41 — Operational failure responses are correlated to their pending action.
+ * 40 — Action rejection responses carry engine-owned structured context.
+ * 39 — ManaRestriction.CannotCastSpellFromZone adds a serialized
+ *      GameState/ManaUnit restriction used by Karolina Dean. Older peers
+ *      cannot deserialize that externally tagged enum variant.
  * 38 — WaitingFor.ChooseObjectsSelection publishes the resolving effect's
  *      min and optional max bounds. Older clients silently ignore these
  *      additive fields and offer selections outside the engine-authoritative
@@ -296,7 +301,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 38;
+export const PROTOCOL_VERSION = 41;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1656,11 +1661,14 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ActionRejected": {
-        const data = msg.data as { reason: string };
+        const data = msg.data as { rejection?: unknown };
+        const error = isActionRejection(data.rejection)
+          ? actionRejectionError(data.rejection)
+          : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
           this.pendingReject(
-            actionRejectionError(data.reason),
+            error,
           );
           this.pendingResolve = null;
           this.pendingReject = null;
@@ -1676,7 +1684,20 @@ export class WebSocketAdapter implements EngineAdapter {
           // hazard here — rejecting an in-flight ACTION's promise with a
           // TAKEBACK's reason string, which would be a misattribution rather
           // than merely a stale spinner.
-          this.emit({ type: "requestRejected", reason: data.reason });
+          this.emit({ type: "requestRejected", reason: error.message });
+        }
+        break;
+      }
+
+      case "ActionFailed": {
+        const data = msg.data as { message: string };
+        if (this.pendingReject) {
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.pendingReject(new AdapterError("WS_ERROR", data.message, false));
+          this.pendingResolve = null;
+          this.pendingReject = null;
+        } else {
+          this.emit({ type: "error", message: data.message });
         }
         break;
       }
@@ -1709,9 +1730,22 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ResolveAllRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         if (this.pendingResolveAll?.requestId === data.request_id) {
-          this.pendingResolveAll.reject(resolveAllRejectionError(data.reason));
+          this.pendingResolveAll.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid Resolve All rejection.", false),
+          );
+          this.pendingResolveAll = null;
+        }
+        break;
+      }
+
+      case "ResolveAllFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        if (this.pendingResolveAll?.requestId === data.request_id) {
+          this.pendingResolveAll.reject(new AdapterError("WS_ERROR", data.message, false));
           this.pendingResolveAll = null;
         }
         break;
@@ -1738,12 +1772,35 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "ManaPaymentPreviewRejected": {
-        const data = msg.data as { request_id: number; reason: string };
+        const data = msg.data as { request_id: number; rejection?: unknown };
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(actionRejectionError(data.reason));
+          pending.reject(
+            isActionRejection(data.rejection)
+              ? actionRejectionError(data.rejection)
+              : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid mana-payment rejection.", false),
+          );
         }
+        break;
+      }
+
+      case "ManaPaymentPreviewFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+        }
+        break;
+      }
+
+      case "RequestRejected": {
+        const data = msg.data as { reason?: unknown };
+        this.emit({
+          type: "requestRejected",
+          reason: typeof data.reason === "string" ? data.reason : "Server rejected the request.",
+        });
         break;
       }
 

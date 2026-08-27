@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::interaction::ObjectActionPayload;
+use engine::types::action_rejection::ActionRejection;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -520,6 +521,17 @@ pub enum ServerMessage {
         rewind_targets: Vec<RewindOption>,
     },
     ActionRejected {
+        rejection: ActionRejection,
+    },
+    /// An operational failure while processing one submitted game action or
+    /// interaction. This deliberately carries no engine-rejection DTO.
+    ActionFailed {
+        message: String,
+    },
+    /// A request outside the engine game-action boundary was refused. This is
+    /// deliberately prose: takeback and match-lifecycle requests have no
+    /// engine action/rejection provenance to expose.
+    RequestRejected {
         reason: String,
     },
     /// Confirms an authenticated action that intentionally produced no state
@@ -530,7 +542,14 @@ pub enum ServerMessage {
     /// identifier prevents unrelated action failures from settling this promise.
     ResolveAllRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a native Resolve All batch.
+    /// The request identifier prevents unrelated failures from settling this
+    /// promise.
+    ResolveAllFailed {
+        request_id: u64,
+        message: String,
     },
     /// Requester-only acknowledgement for a native Resolve All batch. The
     /// matching StateUpdate is sent first and carries the authoritative state.
@@ -551,7 +570,12 @@ pub enum ServerMessage {
     },
     ManaPaymentPreviewRejected {
         request_id: u64,
-        reason: String,
+        rejection: ActionRejection,
+    },
+    /// Requester-only operational failure for a mana-payment preview.
+    ManaPaymentPreviewFailed {
+        request_id: u64,
+        message: String,
     },
     OpponentDisconnected {
         grace_seconds: u32,
@@ -2398,8 +2422,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_38() {
-        assert_eq!(PROTOCOL_VERSION, 38);
+    fn protocol_version_is_41() {
+        assert_eq!(PROTOCOL_VERSION, 41);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -2409,7 +2433,7 @@ mod tests {
     /// understand.
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
-    /// this guards — and this test reds while `protocol_version_is_38` stays
+    /// this guards — and this test reds while `protocol_version_is_41` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -2456,11 +2480,37 @@ mod tests {
 
         let rejected = ServerMessage::ResolveAllRejected {
             request_id: 7,
-            reason: "Resolve All requires your priority".to_string(),
+            rejection: ActionRejection::new(
+                engine::types::action_rejection::ActionRejectionCode::ResolveAllNotReady,
+            ),
         };
         assert_eq!(
             serde_json::to_string(&rejected).unwrap(),
-            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"reason":"Resolve All requires your priority"}}"#
+            r#"{"type":"ResolveAllRejected","data":{"request_id":7,"rejection":{"code":"resolve_all_not_ready","disposition":"unavailable","message":"Resolve All is not ready to run.","related_object_ids":[]}}}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ActionFailed {
+                message: "session storage failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ActionFailed","data":{"message":"session storage failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ResolveAllFailed {
+                request_id: 7,
+                message: "batch persistence failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ResolveAllFailed","data":{"request_id":7,"message":"batch persistence failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::ManaPaymentPreviewFailed {
+                request_id: 7,
+                message: "preview lookup failed".to_string(),
+            })
+            .unwrap(),
+            r#"{"type":"ManaPaymentPreviewFailed","data":{"request_id":7,"message":"preview lookup failed"}}"#
         );
     }
 

@@ -525,7 +525,7 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+          data: { rejection: { code: "stale_action", disposition: "stale", message: "That action is based on outdated game state.", related_object_ids: [] } },
         }),
       );
 
@@ -541,7 +541,7 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ActionRejected",
-          data: { reason: "Engine error: something genuinely wrong" },
+          data: { rejection: { code: "invalid_action", disposition: "invalid", message: "That action is not valid in the current game state.", related_object_ids: [] } },
         }),
       );
 
@@ -566,7 +566,7 @@ describe("ServerDraftAdapter", () => {
           type: "ManaPaymentPreviewRejected",
           data: {
             request_id: sent.data.request_id,
-            reason: "Engine error: ReorderHand: expected 6 ids, got 5",
+            rejection: { code: "stale_action", disposition: "stale", message: "That action is based on outdated game state.", related_object_ids: [] },
           },
         }),
       );
@@ -585,13 +585,47 @@ describe("ServerDraftAdapter", () => {
         "message",
         JSON.stringify({
           type: "ManaPaymentPreviewRejected",
-          data: { request_id: sent.data.request_id, reason: "Engine error: no mana sources" },
+          data: { request_id: sent.data.request_id, rejection: { code: "invalid_action", disposition: "invalid", message: "That action is not valid in the current game state.", related_object_ids: [] } },
         }),
       );
 
       await expect(pending).rejects.toMatchObject({
         code: "ACTION_REJECTED",
         recoverable: true,
+      });
+    });
+
+    it("settles operational action and matching preview failures", async () => {
+      const action = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ActionFailed", data: { message: "action persistence failed" } }),
+      );
+      await expect(action).rejects.toMatchObject({
+        code: "WS_ERROR",
+        message: "action persistence failed",
+        recoverable: false,
+      });
+
+      const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      const calls = ws.send.mock.calls;
+      const sent = JSON.parse(calls[calls.length - 1][0] as string);
+      const settled = vi.fn();
+      void preview.then(settled, settled);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id + 1, message: "other preview failed" } }),
+      );
+      await Promise.resolve();
+      expect(settled).not.toHaveBeenCalled();
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id, message: "preview lookup failed" } }),
+      );
+      await expect(preview).rejects.toMatchObject({
+        code: "WS_ERROR",
+        message: "preview lookup failed",
+        recoverable: false,
       });
     });
   });
