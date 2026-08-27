@@ -32,10 +32,10 @@ describe("P2PDraftHost Bo3", () => {
       };
     }
 
-    it("authorizes both Traditional sideboards only after both held commands arrive", () => {
+    it("authorizes both Traditional sideboards only after both held commands arrive", async () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const sent = new Map<number, DraftP2PMessage[]>([[1, []], [2, []]]);
@@ -64,7 +64,7 @@ describe("P2PDraftHost Bo3", () => {
       host.submitAuthorized(1, command(1, launch1));
       expect(sent.get(1)).toEqual([]);
       host.submitAuthorized(2, command(2, launch2));
-      expect(sent.get(1)?.[0]?.type).toBe("draft_bo3_intergame_authorized");
+      await vi.waitFor(() => expect(sent.get(1)?.[0]?.type).toBe("draft_bo3_intergame_authorized"));
       expect(sent.get(2)?.[0]?.type).toBe("draft_bo3_intergame_authorized");
       expect(privateHost.intergameCommands.snapshot().every((entry) => entry.status === "Executing")).toBe(true);
     });
@@ -72,7 +72,7 @@ describe("P2PDraftHost Bo3", () => {
     it("rejects forged and stale held commands before authorization", () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const privateHost = host as unknown as {
@@ -98,7 +98,7 @@ describe("P2PDraftHost Bo3", () => {
     it("rejects a sideboard submission that changes the registered deck pool", () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const sent: DraftP2PMessage[] = [];
@@ -137,12 +137,12 @@ describe("P2PDraftHost Bo3", () => {
   });
 
   describe("BO3-02: sideboard timer auto-submit", () => {
-    it("issues unchanged deck defaults through the authorized intergame ledger", () => {
+      it("issues unchanged deck defaults through the authorized intergame ledger", async () => {
       vi.useFakeTimers();
       try {
         const host = new P2PDraftHost(
           { id: "host" } as never, () => () => {},
-          { type: "Set", data: { set_pool_json: "{}" } } as never,
+          { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
           "Traditional", 8, "Host", "Swiss", "Competitive",
         );
         const sent = new Map<number, DraftP2PMessage[]>([[1, []], [2, []]]);
@@ -198,7 +198,7 @@ describe("P2PDraftHost Bo3", () => {
         vi.advanceTimersByTime(60_000);
 
         for (const seat of [1, 2]) {
-          expect(sent.get(seat)).toContainEqual(expect.objectContaining({
+          await vi.waitFor(() => expect(sent.get(seat)).toContainEqual(expect.objectContaining({
             type: "draft_bo3_intergame_authorized",
             command: expect.objectContaining({
               seat,
@@ -208,7 +208,7 @@ describe("P2PDraftHost Bo3", () => {
                 sideboard: [{ name: "Negate", count: 1 }],
               },
             }),
-          }));
+          })));
         }
         expect(privateHost.intergameCommands.snapshot().every((command) => command.status === "Executing")).toBe(true);
         host.dispose();
@@ -217,12 +217,12 @@ describe("P2PDraftHost Bo3", () => {
       }
     });
 
-    it("issues the play-first default through the same ledger when the choice timer expires", () => {
+      it("issues the play-first default through the same ledger when the choice timer expires", async () => {
       vi.useFakeTimers();
       try {
         const host = new P2PDraftHost(
           { id: "host" } as never, () => () => {},
-          { type: "Set", data: { set_pool_json: "{}" } } as never,
+          { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
           "Traditional", 8, "Host", "Swiss", "Competitive",
         );
         const launch = {
@@ -257,10 +257,10 @@ describe("P2PDraftHost Bo3", () => {
         privateHost.startPlayDrawTimer("bo3-1");
         vi.advanceTimersByTime(10_000);
 
-        expect(sent).toContainEqual(expect.objectContaining({
+        await vi.waitFor(() => expect(sent).toContainEqual(expect.objectContaining({
           type: "draft_bo3_intergame_authorized",
           command: expect.objectContaining({ payload: { type: "ChoosePlayDraw", playFirst: true } }),
-        }));
+        })));
         host.dispose();
       } finally {
         vi.useRealTimers();
@@ -269,10 +269,10 @@ describe("P2PDraftHost Bo3", () => {
   });
 
   describe("BO3-03: no timer in Casual", () => {
-    it("publishes an untimed sideboard prompt without arming the production timer", () => {
+    it("publishes an untimed sideboard prompt without arming the production timer", async () => {
       const host = new P2PDraftHost(
         { id: "host" } as never, () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Traditional", 8, "Host", "Swiss", "Casual",
       );
       const events: unknown[] = [];
@@ -283,10 +283,10 @@ describe("P2PDraftHost Bo3", () => {
       );
 
       expect(host.activeTimerContext).toBeNull();
-      expect(events).toContainEqual(expect.objectContaining({
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
         type: "bo3SideboardPrompt",
         timerMs: 0,
-      }));
+      })));
       host.dispose();
     });
   });
@@ -380,7 +380,7 @@ describe("P2PDraftHost Bo3", () => {
       host = new P2PDraftHost(
         { id: "host" } as never,
         () => () => {},
-        { type: "Set", data: { set_pool_json: "{}" } } as never,
+        { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } } as never,
         "Premier",
         8,
         "Host",

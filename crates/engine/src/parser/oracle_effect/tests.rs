@@ -18,6 +18,203 @@ use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
 
+fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAnaphorSource) {
+    let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
+        panic!("expected LoseLife, got {:?}", def.effect);
+    };
+    assert!(matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetAggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::ManaValue,
+                source,
+            }
+        } if *source == expected
+    ));
+}
+
+#[test]
+fn mill_and_discard_bind_bare_cards_aggregate_to_chain_set() {
+    for (text, continued) in [
+        ("mill three cards, then lose life equal to the total mana value of those cards", false),
+        ("discard a card, then lose life equal to the total mana value of those cards, then draw a card", true),
+    ] {
+        let def = parse_effect_chain(
+            text,
+            AbilityKind::Spell,
+        );
+        let life_loss = def.sub_ability.as_deref().expect("life-loss continuation");
+        assert_tracked_mana_value_source(life_loss, TrackedAnaphorSource::ChainSet);
+        assert_eq!(life_loss.sub_ability.is_some(), continued);
+    }
+}
+
+#[test]
+fn conditional_publishers_require_the_same_source_on_both_branches() {
+    let ability = |text| AbilityDefinition::new(AbilityKind::Spell, parse_effect(text));
+    for (def, expected) in [
+        (
+            ability("discard a card").with_else_ability(ability("discard two cards")),
+            Some(BareCardAggregatePublisher::ChainSetCompatible),
+        ),
+        (
+            ability("gain 1 life").with_else_ability(ability("draw a card")),
+            None,
+        ),
+        (
+            ability("discard a card").with_else_ability(ability("draw a card")),
+            Some(BareCardAggregatePublisher::TerminalUnsupported),
+        ),
+    ] {
+        assert_eq!(
+            classify_latest_bare_card_publisher_in_ability(&def),
+            expected
+        );
+    }
+}
+
+#[test]
+fn nearer_token_blocks_bare_cards_rebind_from_older_mill() {
+    let def = parse_effect_chain(
+        "mill three cards, then create a 1/1 green Insect creature token, then lose life equal to the total mana value of those cards",
+        AbilityKind::Spell,
+    );
+    let token = def.sub_ability.as_deref().expect("token continuation");
+    let aggregate = token
+        .sub_ability
+        .as_deref()
+        .expect("aggregate continuation");
+    assert!(matches!(
+        aggregate.effect.as_ref(),
+        Effect::Unimplemented { .. }
+    ));
+}
+
+#[test]
+fn nontrigger_bare_cards_without_publisher_stays_honest_gap() {
+    let def = parse_effect_chain(
+        "lose life equal to the total mana value of those cards",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+}
+
+#[test]
+fn scoped_reflexive_decline_preserves_controller_and_opponent_recipients() {
+    let decline_condition = || AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::effect_performed()),
+    };
+    let lose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::TriggeringPlayer),
+        },
+    )
+    .condition(decline_condition());
+    let mill = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        },
+    )
+    .condition(decline_condition())
+    .sub_ability(lose);
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        },
+    )
+    .player_scope(PlayerFilter::Opponent)
+    .sub_ability(mill);
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Draw {
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let mill = def.sub_ability.as_deref().expect("decline mill");
+    assert!(matches!(
+        mill.effect.as_ref(),
+        Effect::Mill {
+            target: TargetFilter::OriginalController,
+            ..
+        }
+    ));
+    assert!(matches!(
+        mill.sub_ability
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::LoseLife {
+            target: Some(TargetFilter::ScopedPlayer),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn all_player_decline_keeps_controller_for_the_all_scope_rewrite() {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .condition(AbilityCondition::Not {
+        condition: Box::new(AbilityCondition::effect_performed()),
+    })
+    .player_scope(PlayerFilter::All);
+
+    apply_player_scope_rewrites(&mut def);
+
+    assert!(matches!(
+        def.effect.as_ref(),
+        Effect::Draw {
+            target: TargetFilter::Controller,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn decline_damage_rebinds_only_inside_opponent_scope() {
+    let damage = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::TriggeringPlayer,
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .condition(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        })
+    };
+    let scoped = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+        .player_scope(PlayerFilter::Opponent)
+        .sub_ability(damage());
+    for (mut def, expected) in [
+        (scoped, TargetFilter::ScopedPlayer),
+        (damage(), TargetFilter::TriggeringPlayer),
+    ] {
+        apply_player_scope_rewrites(&mut def);
+        let effect = def.sub_ability.as_deref().unwrap_or(&def).effect.as_ref();
+        assert!(matches!(effect, Effect::DealDamage { target, .. } if *target == expected));
+    }
+}
+
 /// CR 615.5: `each_target_filter_mut` must NEVER visit `Effect::Shuffle`.
 /// Several callers rewrite `TriggeringPlayer` / `ParentTargetController` /
 /// `ParentTarget` (exactly the refs a `Shuffle` carries); visiting `Shuffle`
@@ -229,6 +426,111 @@ fn beseech_suffix_constraint_unchanged_after_refactor() {
             comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: 4 },
         }),
+    );
+}
+
+/// CR 120.2a + CR 608.2h (issue #5923): Kotis, the Fangkeeper's combat-damage
+/// trigger — "exile the top X cards of their library, where X is the amount
+/// of damage dealt. You may cast any number of spells with mana value X or
+/// less from among them without paying their mana costs." Before the
+/// `parse_event_context_refs` fix, the "the amount of damage dealt"
+/// paraphrase was not recognized by the "the damage dealt" bare-phrase arm
+/// (`oracle_nom/quantity.rs`), so the where-X binding was left unresolved and
+/// the totality guard in `lower.rs` collapsed BOTH the `ExileTop` step and its
+/// `CastFromZone` sub-ability to `Effect::unimplemented("where_x_binding",
+/// ..)`. Revert-fail: with the bug present this test's positive-shape
+/// assertions fail (both effects were `Unimplemented`, not `ExileTop` /
+/// `CastFromZone`) and the no-Unimplemented sweep below also fails.
+#[test]
+fn kotis_the_fangkeeper_full_trigger_binds_damage_dealt_where_x() {
+    let parsed = parse_oracle_text(
+        "Indestructible\nWhenever Kotis deals combat damage to a player, exile the top X cards of their library, where X is the amount of damage dealt. You may cast any number of spells with mana value X or less from among them without paying their mana costs.",
+        "Kotis, the Fangkeeper",
+        &["Indestructible".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Zombie".to_string(), "Warrior".to_string()],
+    );
+
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Kotis's combat-damage trigger must produce an executable ability");
+
+    // Outer effect: exile the top X cards of the damaged player's library,
+    // where X is bound to the triggering event's damage amount.
+    let Effect::ExileTop {
+        ref player,
+        ref count,
+        ..
+    } = *execute.effect
+    else {
+        panic!("expected ExileTop, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "Oracle-text grammar: \"their library\" in a DamageDone trigger binds to the \
+         damaged player (\"deals combat damage to a player\"), not to Kotis's controller \
+         — a pronoun-antecedent reading, not a specific CR citation (CR 608.2c governs \
+         the ORDER effects apply their instructions, not pronoun antecedents)"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        },
+        "CR 608.2h: \"where X is the amount of damage dealt\" must bind X to the \
+         triggering event's damage amount, not fall back to an unbound sentinel"
+    );
+
+    // Sub-ability: cast any number of the exiled spells with mana value X or
+    // less, without paying their mana costs.
+    let sub_ability = execute
+        .sub_ability
+        .as_deref()
+        .expect("the \"you may cast\" sentence must attach as a sub-ability");
+    let Effect::CastFromZone {
+        ref target,
+        without_paying_mana_cost,
+        ref constraint,
+        ..
+    } = *sub_ability.effect
+    else {
+        panic!("expected CastFromZone, got {:?}", sub_ability.effect);
+    };
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(without_paying_mana_cost);
+    assert_eq!(
+        *constraint,
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+        }),
+        "the free-cast offer must be capped at mana value X (the same dynamic \
+         damage-dealt amount), not left unconstrained or Fixed"
+    );
+
+    // No clause of the trigger may have fallen back to Unimplemented.
+    fn effect_has_unimplemented(effect: &Effect) -> bool {
+        matches!(effect, Effect::Unimplemented { .. })
+    }
+    fn ability_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        effect_has_unimplemented(&ability.effect)
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_has_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(ability_has_unimplemented)
+    }
+    assert!(
+        !ability_has_unimplemented(execute),
+        "Kotis's trigger must have zero Unimplemented nodes: {execute:#?}"
     );
 }
 
@@ -7948,6 +8250,33 @@ fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
     assert_eq!(tf.controller, Some(ControllerRef::You));
 }
 
+/// CR 101.4 + CR 118.12a: the prepositional player scope used by the
+/// aggregate token grammar must bind "they" to its iterated opponent just as
+/// the subject-form scope above does. The spell controller creates every token;
+/// the opponents only decide whether to pay the sacrifice cost.
+#[test]
+fn effect_for_each_opponent_token_unless_sacrifice_binds_scoped_player() {
+    let def = parse_effect_chain(
+        "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(
+        *def.effect,
+        Effect::Token {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    let unless_pay = def.unless_pay.expect("should attach unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+    assert!(matches!(
+        unless_pay.cost,
+        AbilityCost::Sacrifice(ref cost) if cost.requirement.fixed_count() == Some(1)
+    ));
+}
+
 #[test]
 fn effect_draw_for_each_player_counter_uses_dynamic_count() {
     let e = parse_effect("Draw a card for each experience counter you have");
@@ -13024,6 +13353,20 @@ fn dark_deal_draw_uses_each_players_discard_count_minus_one() {
     ));
 }
 
+#[test]
+fn brass_tunnel_grinder_draw_uses_discard_count_plus_one() {
+    let def = parse_effect_chain(
+        "Discard any number of cards, then draw that many cards plus one.",
+        AbilityKind::Spell,
+    );
+    let draw = def
+        .sub_ability
+        .as_ref()
+        .expect("expected draw continuation");
+    assert!(matches!(&*draw.effect, Effect::Draw {
+        count: QuantityExpr::Offset { inner, offset: 1 }, ..
+    } if matches!(inner.as_ref(), QuantityExpr::Ref { qty: QuantityRef::EventContextAmount })));
+}
 #[test]
 fn effect_chain_then_conjugated_sacrifices() {
     // "then sacrifices the rest" — conjugated verb after ", then"
@@ -52784,6 +53127,88 @@ fn expose_the_culprit_mode2_lowers_to_choose_shuffle_cloak_chain() {
     );
 }
 
+/// CR 608.2c/d + CR 701.8a: Duneblast's untargeted resolution choice publishes
+/// the creature(s) spared by the controller, then destroys every other creature.
+#[test]
+fn duneblast_lowers_choose_survivor_then_destroy_rest() {
+    let def = parse_effect_chain_with_context(
+        "Choose up to one creature. Destroy the rest.",
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tracked-set survivor choice, got {:?}", def.effect);
+    };
+    assert_eq!(*chooser, TargetFilter::Controller);
+    assert_eq!((*min, *max), (0, Some(1)));
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+
+    let destroy = def
+        .sub_ability
+        .as_deref()
+        .expect("survivor choice must be followed by destroy-rest");
+    let Effect::DestroyAll { target, .. } = destroy.effect.as_ref() else {
+        panic!("expected DestroyAll continuation, got {:?}", destroy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }),
+        }]))
+    );
+    assert!(!ability_chain_has_unimplemented(&def));
+}
+
+/// Same grammar class as Duneblast, with a comma/"then" connector and a
+/// different upper bound. This is the exact Mount Doom ability body.
+#[test]
+fn mount_doom_lowers_choose_two_then_destroy_rest() {
+    let def = parse_effect_chain_with_context(
+        "Choose up to two creatures, then destroy the rest.",
+        AbilityKind::Activated,
+        &mut ParseContext::default(),
+    );
+
+    let Effect::ChooseObjectsIntoTrackedSet {
+        chooser,
+        filter,
+        min,
+        max,
+    } = def.effect.as_ref()
+    else {
+        panic!("expected tracked-set survivor choice, got {:?}", def.effect);
+    };
+    assert_eq!(*chooser, TargetFilter::Controller);
+    assert_eq!((*min, *max), (0, Some(2)));
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+
+    let destroy = def
+        .sub_ability
+        .as_deref()
+        .expect("survivor choice must be followed by destroy-rest");
+    let Effect::DestroyAll { target, .. } = destroy.effect.as_ref() else {
+        panic!("expected DestroyAll continuation, got {:?}", destroy.effect);
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: TrackedSetId(0),
+            }),
+        }]))
+    );
+    assert!(!ability_chain_has_unimplemented(&def));
+}
+
 /// The legacy bypass exposed the pile/shuffle/cloak recognizer only to the
 /// WithContext entry point. U3c routes it through `AbilityIr`, but retains that
 /// entry-point gate rather than making die-result (`Standalone`) callers newly
@@ -54274,6 +54699,7 @@ fn assert_uneven_land_search_shape(
             qty: QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(lands),
                 aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::All,
             },
         } if lands == &TypedFilter::land()
     ));

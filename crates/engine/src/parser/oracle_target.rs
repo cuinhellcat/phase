@@ -7827,6 +7827,29 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 715.2a: "that has an Adventure" / "that have an Adventure" — an
+    // adventurer card has the alternative characteristics of an Adventure spell
+    // even while it is using its normal face. Reuse the shared relative-clause
+    // property path so spell filters and ordinary target filters agree on the
+    // same `FilterProp::HasAdventure` predicate.
+    if let Ok((after_verb, _)) = alt((
+        tag::<_, _, OracleError<'_>>("has "),
+        tag::<_, _, OracleError<'_>>("have "),
+    ))
+    .parse(after_that)
+    {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an adventure").parse(after_verb) {
+            let next_char_is_boundary = rest
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if next_char_is_boundary {
+                let consumed = that_len + after_that.len() - rest.len();
+                return Some((vec![FilterProp::HasAdventure], consumed));
+            }
+        }
+    }
+
     // CR 508.6: "that attacked you this turn" — defender-scoped attack-history
     // relative clause (Jabari's Influence). Mirrors the PERMISSIVE VERB_PHRASES
     // return below (not parse_attacking_defender_suffix, whose terminator/
@@ -13278,6 +13301,18 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
             }]
         );
+    }
+
+    #[test]
+    fn parse_that_clause_has_adventure() {
+        for phrase in [" that has an adventure", " that have an adventure"] {
+            let (props, consumed) =
+                parse_that_clause_suffix(phrase, None).expect("Adventure clause must parse");
+            assert_eq!(props, vec![FilterProp::HasAdventure]);
+            assert_eq!(consumed, phrase.len());
+        }
+
+        assert!(parse_that_clause_suffix(" that has an adventures", None).is_none());
     }
 
     #[test]

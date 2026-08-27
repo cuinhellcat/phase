@@ -46,8 +46,25 @@ export function clear_replay_playback(): void;
  * Background) via the engine's single-authority `can_pair_commanders`. The
  * frontend must not re-derive partner-pairing rules — it filters its candidate
  * list through this. Returns an empty array if the database isn't loaded.
+ *
+ * `draft_set_codes` is every set whose draft boosters this deck's draft
+ * CONTAINED, as an array — or `null`/`undefined`, which is read as the empty
+ * array, i.e. constructed play. CR 903.13f(3)
+ * conditions its partner grant on what the DRAFT contained, which is a session
+ * property no pair of card names can express — so the caller supplies the set
+ * codes and the ENGINE maps them to a grant. The client never learns which
+ * sets grant what.
+ *
+ * A LIST rather than one code, because CR 903.13f(3) asks about containment: a
+ * mixed draft that opened Commander Masters and other boosters contained
+ * Commander Masters, and the grant is in force. The engine takes the union.
+ *
+ * It is a REQUIRED third parameter, and `JsValue` rather than
+ * `Vec<String>`, on purpose: that matches this file's existing convention
+ * for engine-typed arguments and makes a stale caller a compile error rather
+ * than a silent `undefined`.
  */
-export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
+export function commanderPartnerCandidates(first_commander: string, candidates: any, draft_set_codes: any): any;
 
 /**
  * Returns legal Commander-family companion candidates from the main deck.
@@ -405,6 +422,21 @@ export function replay_length_js(): number;
  */
 export function replay_seek_js(target: number): any;
 
+/**
+ * Batch-resolve the stack by auto-passing priority for the requesting player
+ * and delegating to the AI for opponent decisions. Runs entirely inside WASM
+ * with no JS round-trips between resolutions — collapses the O(N) priority
+ * pass cycle into a single call.
+ *
+ * `requester` is the human player seat (whose "Resolve All" click initiated
+ * this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
+ * each AI opponent.
+ *
+ * Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
+ * count of items resolved. The Resolve All UI does not animate individual
+ * events, so the WASM boundary intentionally returns empty event/log arrays
+ * instead of serializing thousands of records for pathological stacks.
+ */
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
 /**
@@ -539,7 +571,7 @@ export interface InitOutput {
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
-    readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];

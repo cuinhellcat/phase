@@ -2,19 +2,25 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Voici comment ça fonctionne",
     "startDrafting": "Commencer le draft",
     "quick": {
       "step1": "Vous ouvrirez 3 boosters de 14 cartes chacun",
       "step2": "Choisissez une carte par booster, puis passez le reste aux drafteurs IA",
       "step3": "Les boosters changent de sens à chaque manche — gauche, droite, gauche",
-      "step4": "Après tous les choix, construisez un deck de 40 cartes et jouez un match"
+      "step4": "Après tous les choix, construisez un deck de 40 cartes et jouez un match",
+      "step1Mixed": "Vous ouvrirez {{packCount}} boosters de tailles différentes — {{packSizes}} cartes, dans cet ordre"
     },
     "pod": {
       "step1": "Vous draftez avec {{count}} joueurs dans un pod",
       "step2": "Ouvrez 3 boosters de 14 cartes — choisissez-en une, passez le reste",
       "step3": "Les boosters changent de sens à chaque manche — gauche, droite, gauche",
       "step4": "Après le draft, construisez un deck de 40 cartes et jouez des matchs de tournoi"
+    },
+    "commander": {
+      "step2": "Choisissez deux cartes dans chaque booster, puis passez le reste",
+      "step4": "Après le draft, construisez un deck Commander de 60 cartes et jouez une partie multijoueur"
     }
   },
   "steps": {
@@ -71,10 +77,29 @@
       "Hard": "Difficile",
       "VeryHard": "Très difficile"
     },
-    "chooseSet": "Choisir une extension",
     "noPools": "Aucun pool de draft disponible. Lancez d'abord le pipeline de données de draft.",
     "setIconAlt": "Icône d'extension {{name}}",
-    "loadFailed": "Échec du chargement des éditions"
+    "loadFailed": "Échec du chargement des éditions",
+    "packOrder": "Ordre des boosters",
+    "clearPacks": "Vider",
+    "emptyPacks_one": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} booster par défaut — répétez une extension ou mélangez-en plusieurs.",
+    "emptyPacks_other": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} boosters par défaut — répétez une extension ou mélangez-en plusieurs pour drafter un bloc.",
+    "emptyPacksFixed_one": "Le scellé ouvre exactement {{count}} booster. Choisissez une extension pour celui-ci.",
+    "emptyPacksFixed_other": "Le scellé ouvre exactement {{count}} boosters. Choisissez une extension pour chacun — répétez-en une ou mélangez-en plusieurs.",
+    "packCountFixed": "{{selected}} boosters sur {{required}} choisis",
+    "packCountFlexible": "{{selected}} boosters choisis — jusqu'à {{max}}",
+    "addPackFromSet": "Ajouter un booster",
+    "packsFull": "La liste de boosters est pleine",
+    "addPackOf": "Ajouter un booster de {{name}}",
+    "movePackEarlier": "Avancer le booster {{number}}",
+    "movePackLater": "Reculer le booster {{number}}",
+    "removePack": "Retirer le booster {{number}}",
+    "chooseSet": "Choisir une extension",
+    "draftSet": "Drafter {{name}}",
+    "fillRemaining_one": "Remplir le dernier booster avec {{name}}",
+    "fillRemaining_other": "Remplir les {{count}} boosters restants avec {{name}}",
+    "startDraft": "Lancer le draft",
+    "startSealed": "Lancer le scellé"
   },
   "pack": {
     "confirmPick": "Confirmer le choix",
@@ -82,7 +107,8 @@
     "waitingNext": "En attente du booster suivant...",
     "cardsInPack": "{{count}} cartes dans le booster",
     "picking": "Sélection…",
-    "autoPick": "Sélection auto"
+    "autoPick": "Sélection auto",
+    "selectionProgress": "{{selected}} sur {{required}} sélectionnées"
   },
   "sealedOpening": {
     "title": "Ouvrez votre pool scellé",
@@ -103,6 +129,7 @@
     "sortColor": "Couleur",
     "sortType": "Type",
     "sortCmc": "CMC",
+    "grantedFiller": "+ jusqu'à {{maximum}} × {{name}} (commandant uniquement)",
     "groups": {
       "white": "Blanc",
       "blue": "Bleu",
@@ -165,7 +192,10 @@
     "landCount_one": "{{count}} terrain",
     "landCount_other": "{{count}} terrains",
     "readyToSubmit": "prêt à soumettre",
-    "moreNeeded": "{{count}} de plus requise(s)"
+    "moreNeeded": "{{count}} de plus requise(s)",
+    "commanderRequired": "Désignez un commandant depuis votre réserve pour valider.",
+    "commanderUnavailable": "La désignation du commandant est indisponible pour le moment — la base de données des cartes n'a pas pu être chargée.",
+    "grantedFiller": "Votre réserve comprend également jusqu'à {{maximum}} × {{name}}, utilisable uniquement comme commandant."
   },
   "landing": {
     "title": "Draft",
@@ -188,12 +218,25 @@
       "title": "Pod Draft",
       "description": "Hébergez ou rejoignez un pod jusqu'à 8 joueurs, draftez ensemble en direct, puis jouez un tournoi suisse ou à élimination."
     },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draftez deux cartes à la fois dans un pod, construisez un deck Commander de 60 cartes, puis jouez une partie multijoueur."
+    },
     "podInProgress": "Pod Draft en cours",
+    "guestPodInProgress": "Pod rejoint prêt à se reconnecter",
     "podLabel": "Pod {{kind}}",
-    "seatCount": "{{count}} sièges",
+    "guestPodLabel": "Pod de draft",
+    "seatCount_one": "{{count}} siège",
+    "seatCount_few": "{{count}} sièges",
+    "seatCount_many": "{{count}} sièges",
+    "seatCount_other": "{{count}} sièges",
     "roomLabel": "Salle {{code}}",
-    "cardsPicked": "{{count}} cartes choisies",
+    "cardsPicked_one": "{{count}} carte choisie",
+    "cardsPicked_few": "{{count}} cartes choisies",
+    "cardsPicked_many": "{{count}} cartes choisies",
+    "cardsPicked_other": "{{count}} cartes choisies",
     "resume": "Reprendre",
+    "reconnect": "Se reconnecter",
     "draftInProgress": "Draft en cours",
     "draftComplete": "Draft terminé",
     "resumeMatch": "Reprendre le match",
@@ -319,6 +362,8 @@
     "kindTraditionalDesc": "Matchs de tournoi en meilleur des trois après la construction, avec réserve entre les parties.",
     "kindSealed": "Scellé",
     "kindSealedDesc": "Ouvrez six boosters directement dans la réserve de chaque joueur, puis construisez un deck de tournoi en meilleur des un.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Chaque joueur drafte deux cartes à la fois et construit un deck Commander de 60 cartes, puis le pod joue une partie multijoueur.",
     "tournamentFormat": "Format du tournoi",
     "tournamentSwiss": "Suisse",
     "tournamentSwissDesc": "Tout le monde continue de jouer sur trois manches, même après une défaite.",
@@ -332,7 +377,8 @@
     "podSize": "Taille du pod",
     "podSizeDesc": "{{count}} sièges au total. Les sièges vides peuvent être remplis par des bots depuis le salon avant le début du draft.",
     "playerCount": "{{count}} joueurs",
-    "setSelectorHint": "Choisissez l'extension de draft en dernier. Sélectionner une extension charge son pool de cartes et crée la salle du pod.",
+    "setSelectorHint": "Organisez les éditions draftées par votre pod — une par booster, dans l'ordre d'ouverture. Nommez une seule édition pour remplir tous les boosters. La création du pod charge les réserves.",
+    "createPod": "Créer un pod",
     "loadingPool": "Chargement des données du pool d'extension...",
     "roomCode": "Code de la salle",
     "roomCodePlaceholder": "Saisissez le code de la salle...",
@@ -381,12 +427,14 @@
   },
   "podComplete": {
     "title": "Draft terminé",
+    "launchCommanderGame": "Lancer la partie Commander",
     "returnToMenu": "Retour au menu"
   },
   "podError": {
     "kicked": "Vous avez été exclu du pod",
     "hostLeft": "L'hôte a quitté le draft",
-    "connection": "Erreur de connexion"
+    "connection": "Erreur de connexion",
+    "retry": "Réessayer la connexion"
   },
   "lobby": {
     "title": "Salon du Draft Pod",

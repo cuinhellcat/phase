@@ -5462,6 +5462,9 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::ExileWithAltCost {
                         cost,
+                        // CR 118.9a: the airbend cost substitutes the mana cost.
+                        cost_provenance:
+                            crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cast_transformed: false,
                         constraint: None,
                         // CR 611.2a: airbend grants cast permission to each
@@ -7635,7 +7638,13 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         UnlessSuffixStrip::Absent => (None, clause_text),
         UnlessSuffixStrip::Parsed(c) => (Some(c), clause_text),
         UnlessSuffixStrip::Unrecognized { rider } => {
-            let (stripped, unless_pay) = extract_resolution_unless_pay_modifier(&clause_text, None);
+            // The clause shell owns player-scope recognition. The unless-payment
+            // modifier is extracted before the main shell pass below, so consult
+            // the same shell here to bind an anaphoric "they" to a prepositional
+            // scope such as "for each opponent, you … unless they …".
+            let (player_scope, _) = super::clause_shell::peel_player_scope_subject(&clause_text);
+            let (stripped, unless_pay) =
+                extract_resolution_unless_pay_modifier(&clause_text, player_scope.as_ref());
             if unless_pay.is_some() {
                 unless_pay_deferred = unless_pay;
                 (None, stripped)
@@ -13281,6 +13290,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration,
             // Placeholder — `grant_permission::resolve` normalizes per-iteration.
             granted_to: crate::types::player::PlayerId(0),
@@ -13415,6 +13425,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             // Duration is a placeholder; `with_clause_duration` patches this
             // when a leading "Until end of turn, " or trailing "... this turn"
             // is stripped. CR 611.2a + CR 514.2: the duration governs prune
@@ -13519,6 +13530,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
 
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -13737,6 +13749,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration,
             // Placeholder — `grant_permission::resolve` rewrites this to the
             // ability's controller at grant time (CR 611.2a/b).
@@ -13813,6 +13826,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
 
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -13987,6 +14001,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         kind,
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::Permanent,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -14550,6 +14565,7 @@ fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
                 qty: QuantityRef::ControlledByEachPlayer {
                     filter: filter.clone(),
                     aggregate: AggregateFunction::Min,
+                    relation: PlayerRelation::All,
                 },
             };
             Effect::Sacrifice {
@@ -14700,6 +14716,121 @@ fn parse_balance_arm_c(input: &str) -> OracleResult<'_, Vec<(EqualizeVerb, Targe
     .parse(input)?;
     let (input, _) = tag(" the same way").parse(input)?;
     Ok((input, pairs))
+}
+
+/// CR 608.2c/d + CR 701.8a: Whole-body recognizer for the battlefield
+/// "Choose up to N <permanents>, [then] destroy the rest" class (Duneblast,
+/// Mount Doom). The choice is made during resolution, so it publishes the
+/// spared objects into the chain's tracked set; the following mass destruction
+/// applies to the same typed battlefield filter minus that set.
+fn parse_choose_survivors_destroy_rest_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (max, after_count) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("choose up to ").parse(input)?;
+        let (input, max) = nom_primitives::parse_number.parse(input)?;
+        let (input, _) = space1.parse(input)?;
+        Ok((input, max))
+    })?;
+    let after_count_lower = &lower[lower.len() - after_count.len()..];
+
+    #[derive(Clone, Copy)]
+    enum DestroyRestConnector {
+        Then,
+        Sentence,
+    }
+
+    let ((filter_len, connector), _) = nom_on_lower(after_count, after_count_lower, |input| {
+        let (input, (filter, connector)) = alt((
+            map(
+                terminated(
+                    take_until(", then destroy the rest"),
+                    tag(", then destroy the rest"),
+                ),
+                |filter: &str| (filter, DestroyRestConnector::Then),
+            ),
+            map(
+                terminated(take_until(". destroy the rest"), tag(". destroy the rest")),
+                |filter: &str| (filter, DestroyRestConnector::Sentence),
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (filter.len(), connector)))
+    })?;
+
+    let filter_text = after_count.get(..filter_len)?.trim();
+    let mut filter_ctx = ctx.clone();
+    let filter = parse_choose_object_selection_filter(filter_text, &mut filter_ctx)?;
+    let TargetFilter::Typed(mut destroy_filter) = filter.clone() else {
+        return None;
+    };
+    destroy_filter.properties.push(FilterProp::Not {
+        prop: Box::new(FilterProp::InTrackedSet {
+            id: TrackedSetId(0),
+        }),
+    });
+
+    let prefix_len = text.len().checked_sub(after_count.len())?;
+    let choose_end = prefix_len.checked_add(filter_len)?;
+    let connector_prefix = match connector {
+        DestroyRestConnector::Then => ", then ",
+        DestroyRestConnector::Sentence => ". ",
+    };
+    let destroy_start = choose_end.checked_add(connector_prefix.len())?;
+    let destroy_end = destroy_start.checked_add("destroy the rest".len())?;
+    let choose_source = text.get(..choose_end)?;
+    let destroy_source = text.get(destroy_start..destroy_end)?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            choose_source,
+            parsed_clause(Effect::ChooseObjectsIntoTrackedSet {
+                chooser: TargetFilter::Controller,
+                filter,
+                min: 0,
+                max: Some(max),
+            }),
+            Some(match connector {
+                DestroyRestConnector::Then => ClauseBoundary::Then,
+                DestroyRestConnector::Sentence => ClauseBoundary::Sentence,
+            }),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    builder
+        .clause(
+            destroy_source,
+            parsed_clause(Effect::DestroyAll {
+                target: TargetFilter::Typed(destroy_filter),
+                cant_regenerate: false,
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
 }
 
 /// CR 107.1 + CR 608.2e: Whole-chain recognizer for the Balance equalization
@@ -15071,6 +15202,7 @@ fn parse_uneven_land_search_ir(
         qty: QuantityRef::ControlledByEachPlayer {
             filter: lands.clone(),
             aggregate: extremum,
+            relation: PlayerRelation::All,
         },
     };
     let difference = QuantityExpr::Difference {
@@ -27512,6 +27644,72 @@ fn publishes_aggregate_set_from_resolution(effect: &Effect) -> bool {
     publishes_tracked_set_from_resolution(effect) || matches!(effect, Effect::Sacrifice { .. })
 }
 
+/// CR 608.2c: Classification used only for the bare card-set surface "those
+/// cards". Mill and discard establish the cards that surface names. Any nearer
+/// producer from the existing aggregate-set authority blocks an older mill or
+/// discard without changing the broad binding rules for other anaphora.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BareCardAggregatePublisher {
+    ChainSetCompatible,
+    EventFallbackBarrier,
+    TerminalUnsupported,
+}
+
+pub(super) fn classify_bare_card_aggregate_publisher(
+    effect: &Effect,
+) -> Option<BareCardAggregatePublisher> {
+    if matches!(
+        effect,
+        Effect::Mill { .. } | Effect::Discard { .. } | Effect::DiscardCard { .. }
+    ) {
+        Some(BareCardAggregatePublisher::ChainSetCompatible)
+    } else if is_token_creating_effect(effect) {
+        Some(BareCardAggregatePublisher::EventFallbackBarrier)
+    } else if publishes_aggregate_set_from_resolution(effect)
+        || matches!(
+            effect,
+            Effect::TargetOnly { .. } | Effect::ChooseObjectsIntoTrackedSet { .. }
+        )
+    {
+        Some(BareCardAggregatePublisher::TerminalUnsupported)
+    } else {
+        None
+    }
+}
+
+fn classify_latest_bare_card_publisher_in_ability(
+    def: &AbilityDefinition,
+) -> Option<BareCardAggregatePublisher> {
+    let primary = def
+        .sub_ability
+        .as_deref()
+        .and_then(classify_latest_bare_card_publisher_in_ability)
+        .or_else(|| classify_bare_card_aggregate_publisher(&def.effect));
+    let Some(alternate) = def.else_ability.as_deref() else {
+        return primary;
+    };
+    match (
+        primary,
+        classify_latest_bare_card_publisher_in_ability(alternate),
+    ) {
+        (None, None) => None,
+        (Some(a), Some(b)) if a == b => Some(a),
+        (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => {
+            Some(BareCardAggregatePublisher::TerminalUnsupported)
+        }
+    }
+}
+
+fn classify_latest_bare_card_publisher_in_clause(
+    clause: &ParsedEffectClause,
+) -> Option<BareCardAggregatePublisher> {
+    clause
+        .sub_ability
+        .as_deref()
+        .and_then(classify_latest_bare_card_publisher_in_ability)
+        .or_else(|| classify_bare_card_aggregate_publisher(&clause.effect))
+}
+
 /// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
 /// set.
 ///
@@ -28657,6 +28855,16 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    // CR 109.5: Explicit All scopes retain Controller for their ScopedPlayer rewrite;
+    // inherited opponent-decline nodes have no local scope and still rebind here.
+    if !matches!(def.player_scope, Some(PlayerFilter::All))
+        && def
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+    {
+        rebind_decline_body_recipient(&mut def.effect);
+    }
     // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
     // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
     // keep `You` so optional opponent-choice sacrifices ("permanent of their
@@ -31192,6 +31400,9 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_choose_survivors_destroy_rest_ir(text, kind, ctx) {
+        return ir;
+    }
     if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
         return ir;
     }
@@ -32850,6 +33061,17 @@ pub(crate) fn parse_effect_chain_ir(
             (None, Some(unless_cond)) => Some(unless_cond),
             (existing, None) => existing,
         };
+        // Player-scoped prepositional imperatives must be peeled before the
+        // generic "for each" repeat parser. Otherwise "for each opponent, you
+        // create …" is lowered as a quantity repeat and loses the opponent
+        // scope that binds an anaphoric "they" in its unless-payment clause.
+        let text_lower = text.to_lowercase();
+        let (early_player_scope, text) =
+            if nom_primitives::scan_contains(&text_lower, "unless they ") {
+                lower::strip_prepositional_player_scope_subject(&text)
+            } else {
+                (None, text)
+            };
         let prior_typed_referent = chain_has_prior_typed_referent(builder.clauses(), false);
         if prior_typed_referent
             && has_bare_recipient_counter_gate
@@ -32913,7 +33135,10 @@ pub(crate) fn parse_effect_chain_ir(
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
-        let (player_scope, text) = super::clause_shell::peel_player_scope_subject(&text);
+        let (player_scope, text) = match early_player_scope {
+            Some(scope) => (Some(scope), text),
+            None => super::clause_shell::peel_player_scope_subject(&text),
+        };
         let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -33254,6 +33479,19 @@ pub(crate) fn parse_effect_chain_ir(
                 sequence::parse_token_source_power_toughness_followup(next_text)
             })
             .map(|(power, toughness)| TokenPtFollowup::PowerToughness { power, toughness });
+        let nearest_bare_card_publisher = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find_map(|clause| classify_latest_bare_card_publisher_in_clause(&clause.parsed));
+        let bare_card_aggregate_source = match nearest_bare_card_publisher {
+            Some(BareCardAggregatePublisher::ChainSetCompatible) => {
+                Some(TrackedAnaphorSource::ChainSet)
+            }
+            Some(BareCardAggregatePublisher::EventFallbackBarrier)
+            | Some(BareCardAggregatePublisher::TerminalUnsupported)
+            | None => None,
+        };
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -33392,6 +33630,7 @@ pub(crate) fn parse_effect_chain_ir(
             // player" on Ghyrson) bind to the triggering event instead of being
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
+            bare_card_aggregate_source,
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single
@@ -35933,13 +36172,16 @@ fn extract_resolution_unless_pay_modifier(
                 // preceding word. The mask preserves byte length, so `.len()` indexes
                 // the original text exactly.
                 let cleaned = text[..before_unless.len()].trim().to_string();
-                return (
-                    cleaned,
-                    Some(UnlessPayModifier {
-                        cost,
-                        payer: TargetFilter::Controller,
-                    }),
-                );
+                let payer = if player_scope.is_some()
+                    && tag::<_, _, OracleError<'_>>("they ")
+                        .parse(after_unless_lower)
+                        .is_ok()
+                {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Controller
+                };
+                return (cleaned, Some(UnlessPayModifier { cost, payer }));
             }
         }
         if let Some((cost, payer)) = parse_unless_have_deal_damage_cost(after_unless_lower) {

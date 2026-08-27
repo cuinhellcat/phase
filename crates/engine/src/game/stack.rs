@@ -724,12 +724,30 @@ pub(crate) fn effective_stack_ability<'a>(
     }
 }
 
-pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
+pub(crate) fn restore_alternative_spell_normal_face(
+    state: &mut GameState,
+    object_id: ObjectId,
+    casting_variant: crate::types::game_state::CastingVariant,
+) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        if let Some(normal_face) = obj.back_face.take() {
-            let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
-            super::printed_cards::apply_back_face_to_object(obj, normal_face);
-            obj.back_face = Some(alternative_snapshot);
+        // #7565: the shared swap preserves the stored slot's layout_kind.
+        super::printed_cards::swap_object_faces(obj);
+        // CR 715.2a + CR 715.4 (#7714): restoring the creature face after an
+        // Adventure/Omen spell leaves the stack must retain the card's
+        // alternative-characteristics identity for later casts from exile —
+        // the cast's variant is authoritative over whatever the stored slot
+        // carried. Other variants keep the swap-preserved marker: forcing
+        // `None` here would erase a split/MDFC marker again (#7565).
+        if let Some(back) = obj.back_face.as_mut() {
+            match casting_variant {
+                crate::types::game_state::CastingVariant::Adventure => {
+                    back.layout_kind = Some(crate::types::card::LayoutKind::Adventure);
+                }
+                crate::types::game_state::CastingVariant::Omen => {
+                    back.layout_kind = Some(crate::types::card::LayoutKind::Omen);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -1482,7 +1500,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         Zone::Graveyard
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        restore_alternative_spell_normal_face(state, entry.id);
+                        restore_alternative_spell_normal_face(state, entry.id, casting_variant);
                     }
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects
@@ -2237,7 +2255,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         if casting_variant.restores_front_face_after_stack_exit()
             && !spell_in_zone(state, entry.id, Zone::Battlefield)
         {
-            restore_alternative_spell_normal_face(state, entry.id);
+            restore_alternative_spell_normal_face(state, entry.id, casting_variant);
         }
 
         // CR 715.3d: When an Adventure spell resolves to exile, grant
@@ -5085,6 +5103,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(core_type);
         BackFaceData {
+            is_swap_snapshot: false,
             name: name.to_string(),
             power: None,
             toughness: None,
@@ -6467,6 +6486,7 @@ mod tests {
             let obj = state.objects.get_mut(&obj_id).unwrap();
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(2),
                     cast_transformed: false,
                     constraint: None,

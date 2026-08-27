@@ -1961,10 +1961,12 @@ pub fn fallback_action(
         }
         WaitingFor::AssistPayment { .. } => Some(GameAction::CommitAssistPayment { generic: 0 }),
 
-        // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
-        WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
-            targets: Vec::new(),
-        }),
+        // ChooseObjectsIntoTrackedSet: take an engine-issued selection. This
+        // preserves the empty conservative choice when min is zero and remains
+        // live for required choices where an empty selection is illegal.
+        WaitingFor::ChooseObjectsSelection { .. } => {
+            issued(|action| matches!(action, GameAction::SelectTargets { .. }))
+        }
 
         // CR 101.4 + CR 707.2: EachPlayerCopyChosen selection — an empty pick is
         // illegal (min >= 1), so pick the first `min` eligible objects.
@@ -12856,6 +12858,45 @@ mod tests {
             Some(GameAction::SelectCards { cards: Vec::new() }),
             "an `up_to` prompt legally admits nothing, and the conservative pick \
              is still nothing"
+        );
+    }
+
+    #[test]
+    fn choose_objects_fallback_uses_an_issued_required_selection() {
+        let mut state = make_state();
+        let ai = P0;
+        let first = create_object(
+            &mut state,
+            CardId(90_001),
+            ai,
+            "First required choice".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(90_002),
+            ai,
+            "Second required choice".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::ChooseObjectsSelection {
+            player: ai,
+            eligible: vec![TargetRef::Object(first), TargetRef::Object(second)],
+            min: 1,
+            max: Some(2),
+            trigger_event: None,
+        };
+
+        let contract = AiDecisionContract::issue(&state, ai);
+        let action = fallback_action_default(&state)
+            .expect("a required object choice must have a live fallback");
+        assert!(matches!(
+            &action,
+            GameAction::SelectTargets { targets } if !targets.is_empty()
+        ));
+        assert!(
+            contract.contains_action(&state, &action),
+            "fallback must return an engine-issued legal action"
         );
     }
 

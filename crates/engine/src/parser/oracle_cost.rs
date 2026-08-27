@@ -3940,4 +3940,74 @@ mod tests {
             }
         ));
     }
+
+    /// CR 608.2h: the bare "the amount of damage dealt" dynamic-X
+    /// phrase (no qualifier) binds to `QuantityRef::EventContextAmount`
+    /// through the static dynamic-X path (`parse_dynamic_x_clause`), the same
+    /// as it does through the where-X effect-quantity path used by Kotis, the
+    /// Fangkeeper. Positive control for the rejection tests below: proves the
+    /// unqualified phrase still parses once the entry point requires full
+    /// consumption.
+    #[test]
+    fn cost_reduction_dynamic_x_damage_dealt_bare_binds_event_context_amount() {
+        let reduction = try_parse_cost_reduction(
+            "this ability costs {x} less to activate, where x is the amount of damage dealt",
+        )
+        .expect("bare damage-dealt dynamic-X cost reduction should parse");
+        assert_eq!(reduction.amount_per, 1);
+        assert!(matches!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        ));
+    }
+
+    /// Regression for the false-green the maintainer flagged on PR #7969:
+    /// `parse_dynamic_x_clause` used to call the non-complete
+    /// `parse_quantity_ref` and unconditionally discard its remainder, so a
+    /// qualified phrase like "the amount of damage dealt this way" would
+    /// match only the bare "damage dealt" prefix and silently lose the
+    /// "this way" qualifier, misreading it as `EventContextAmount` instead of
+    /// the distinct `PreviousEffectAmount` meaning "this way" carries (or
+    /// staying an honest unsupported gap, since no arm spans the full
+    /// qualified phrase here). The entry point now requires full consumption
+    /// via `parse_quantity_ref_complete`, so this must be an honest `None`
+    /// gap, never a misparse.
+    #[test]
+    fn cost_reduction_dynamic_x_damage_dealt_this_way_stays_unsupported() {
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {x} less to activate, where x is the amount of damage dealt this way",
+            )
+            .is_none(),
+            "qualified \"this way\" continuation must not truncate to EventContextAmount"
+        );
+    }
+
+    /// Sibling of the "this way" regression above: a "to <object>" qualifier
+    /// after "damage dealt" must not be dropped either.
+    #[test]
+    fn cost_reduction_dynamic_x_damage_dealt_to_continuation_stays_unsupported() {
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {x} less to activate, where x is the amount of damage dealt to that player",
+            )
+            .is_none(),
+            "qualified \"to\" continuation must not truncate to EventContextAmount"
+        );
+    }
+
+    /// Sibling of the "this way" regression above: a "by <object>" qualifier
+    /// after "damage dealt" must not be dropped either.
+    #[test]
+    fn cost_reduction_dynamic_x_damage_dealt_by_continuation_stays_unsupported() {
+        assert!(
+            try_parse_cost_reduction(
+                "this ability costs {x} less to activate, where x is the amount of damage dealt by that creature",
+            )
+            .is_none(),
+            "qualified \"by\" continuation must not truncate to EventContextAmount"
+        );
+    }
 }

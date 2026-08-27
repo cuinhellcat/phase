@@ -2906,39 +2906,45 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
-        // eligible battlefield permanents (or decline with an empty selection).
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — emit only distinct subsets
+        // within the resolution choice's printed cardinality.
         WaitingFor::ChooseObjectsSelection {
-            player, eligible, ..
+            player,
+            eligible,
+            min,
+            max,
+            ..
         } => {
-            let mut actions = vec![
-                // Pay for all affordable: select every eligible permanent.
-                candidate(
-                    GameAction::SelectTargets {
-                        targets: eligible.clone(),
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                // Decline: empty selection.
-                candidate(
-                    GameAction::SelectTargets {
-                        targets: Vec::new(),
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-            ];
+            let mut unique = Vec::with_capacity(eligible.len());
             for target in eligible {
-                actions.push(candidate(
-                    GameAction::SelectTargets {
-                        targets: vec![target.clone()],
-                    },
+                if !unique.contains(target) {
+                    unique.push(target.clone());
+                }
+            }
+            let floor = *min as usize;
+            let ceiling = max
+                .map(|maximum| maximum as usize)
+                .unwrap_or(unique.len())
+                .min(unique.len());
+            if floor > ceiling {
+                return Vec::new();
+            }
+
+            bounded_combinations_generic(
+                &unique,
+                floor..=ceiling,
+                SELECTION_POOL_CAP,
+                SELECTION_CANDIDATE_CAP,
+            )
+            .into_iter()
+            .map(|targets| {
+                candidate(
+                    GameAction::SelectTargets { targets },
                     TacticalClass::Selection,
                     Some(*player),
-                ));
-            }
-            actions
+                )
+            })
+            .collect()
         }
         // CR 701.36a: Populate — choose a creature token to copy.
         WaitingFor::PopulateChoice {
@@ -5785,6 +5791,65 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
+    #[test]
+    fn choose_objects_candidates_respect_bounds_and_distinctness() {
+        let mut state = GameState::new_two_player(42);
+        let eligible = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+            TargetRef::Object(ObjectId(3)),
+        ];
+        state.waiting_for = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible,
+            min: 0,
+            max: Some(2),
+            trigger_event: None,
+        };
+
+        let actions = candidate_actions(&state);
+        let selections: Vec<&Vec<TargetRef>> = actions
+            .iter()
+            .filter_map(|candidate| match &candidate.action {
+                GameAction::SelectTargets { targets } => Some(targets),
+                _ => None,
+            })
+            .collect();
+        assert!(selections.iter().any(|targets| targets.is_empty()));
+        assert!(selections.iter().any(|targets| targets.len() == 2));
+        assert!(selections.iter().any(|targets| {
+            targets.as_slice()
+                == [
+                    TargetRef::Object(ObjectId(2)),
+                    TargetRef::Object(ObjectId(3)),
+                ]
+        }));
+        assert!(selections.iter().all(|targets| {
+            targets.len() <= 2
+                && targets
+                    .iter()
+                    .enumerate()
+                    .all(|(index, target)| !targets[..index].contains(target))
+        }));
+
+        state.waiting_for = WaitingFor::ChooseObjectsSelection {
+            player: PlayerId(0),
+            eligible: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+                TargetRef::Object(ObjectId(3)),
+            ],
+            min: 2,
+            max: Some(2),
+            trigger_event: None,
+        };
+        let required_actions = candidate_actions(&state);
+        assert!(required_actions.iter().all(|candidate| matches!(
+            &candidate.action,
+            GameAction::SelectTargets { targets } if targets.len() == 2
+        )));
+    }
+
     /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
     /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
     /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
@@ -5830,6 +5895,7 @@ mod tests {
         let mut card_types = crate::types::card_type::CardType::default();
         card_types.core_types.push(CoreType::Sorcery);
         crate::game::game_object::BackFaceData {
+            is_swap_snapshot: false,
             name: "Prepared Spell Face".to_string(),
             power: None,
             toughness: None,

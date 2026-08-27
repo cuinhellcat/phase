@@ -2,8 +2,10 @@ import { create } from "zustand";
 
 import {
   DraftAdapter,
+  distinctJoined,
   type CubeDraftSettings,
   type DraftPlayerView,
+  type SetPackSequence,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
 import { useGameStore } from "./gameStore";
@@ -28,6 +30,30 @@ import type {
 // ── Types ───────────────────────────────────────────────────────────────
 
 export type DraftPhase = "setup" | "drafting" | "opening" | "deckbuilding" | "launching" | "playing" | "complete";
+
+/** One booster of a local set draft: which set fills it, and that set's name. */
+export interface DraftPackChoice {
+  code: string;
+  name: string;
+}
+
+/**
+ * A set-backed local draft's boosters, in the order the player arranged them,
+ * plus the `draft-pools.json` entry for each distinct set they named. A set may
+ * appear in `packs` more than once; `pools` still carries it once.
+ */
+export interface DraftSetSelection {
+  packs: DraftPackChoice[];
+  pools: unknown[];
+}
+
+/** The WASM-boundary payload for a set selection. */
+function packSequence(selection: DraftSetSelection): SetPackSequence {
+  return {
+    pools: selection.pools,
+    sequence: selection.packs.map((pack) => pack.code),
+  };
+}
 export type LocalDraftKind = "Quick" | "Sealed";
 export type PoolSortMode = "color" | "type" | "cmc";
 
@@ -50,8 +76,8 @@ interface DraftStoreState {
 }
 
 interface DraftStoreActions {
-  startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
-  startSealedDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
+  startDraft: (selection: DraftSetSelection, difficulty: number) => Promise<void>;
+  startSealedDraft: (selection: DraftSetSelection, difficulty: number) => Promise<void>;
   startCubeDraft: (cubeListText: string, cubeName: string, settings: CubeDraftSettings, difficulty: number) => Promise<void>;
   completeSealedOpening: () => void;
   resumeDraft: () => Promise<void>;
@@ -60,13 +86,13 @@ interface DraftStoreActions {
   pickCardWithDraftEffect: (effectCardInstanceId: string, cardInstanceIds: string[]) => Promise<void>;
   autoPickCard: () => Promise<void>;
   selectCard: (cardInstanceId: string | null) => void;
-  confirmPick: () => Promise<void>;
+  confirmPick: (cardInstanceIds: string[]) => Promise<void>;
   addToDeck: (cardName: string) => void;
   removeFromDeck: (cardName: string) => void;
   setLandCount: (landName: string, count: number) => void;
   autoSuggestDeck: () => Promise<void>;
   autoSuggestLands: () => Promise<void>;
-  submitDeck: () => Promise<void>;
+  submitDeck: (commanders: string[]) => Promise<void>;
   setPoolSortMode: (mode: PoolSortMode) => void;
   togglePoolPanel: () => void;
   setDifficulty: (d: number) => void;
@@ -104,7 +130,16 @@ const initialState: DraftStoreState = {
 /** Index→AI-profile names; the difficulty index maps 1:1 to these and to the
  *  `setSelector.difficultyLevels` i18n keys rendered by `BotDifficultySelector`. */
 export const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
-const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
+/**
+ * The sessionStorage key prefix for a pre-staged `{ player, opponent, ai_decks }`
+ * blob, read back by `GameProvider` at game init.
+ *
+ * Exported so the Commander pod's launch writes THIS key rather than minting a
+ * second copy of the literal. `storeDraftDeckData` deliberately stays private:
+ * the pod's payload is N-ary and giving this 2-player writer an N-ary mode would
+ * make the local path pay for a case it never has.
+ */
+export const DRAFT_DECK_SESSION_KEY = "phase:draft-deck";
 
 // ── Match helpers ──────────────────────────────────────────────────────
 
@@ -207,7 +242,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
   (set, get) => ({
     ...initialState,
 
-    startDraft: async (setPoolJson, setCode, setName, difficulty) => {
+    startDraft: async (selection, difficulty) => {
       const oldMeta = loadActiveQuickDraft();
       if (oldMeta) {
         void clearDraftRun(oldMeta.id);
@@ -222,7 +257,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       }
 
       const seed = Math.floor(Math.random() * 0xffffffff);
-      const view = await adapter.initialize(setPoolJson, difficulty, seed);
+      const view = await adapter.initialize(packSequence(selection), difficulty, seed);
       const draftId = crypto.randomUUID();
 
       set({
@@ -231,8 +266,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         view,
         phase: "drafting",
         difficulty,
-        selectedSet: setCode,
-        selectedSetName: setName,
+        selectedSet: distinctJoined(selection.packs.map((p) => p.code), "+"),
+        selectedSetName: distinctJoined(selection.packs.map((p) => p.name), " · "),
         kind: "Quick",
         selectedCard: null,
         mainDeck: [],
@@ -243,7 +278,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       persistDraft();
     },
 
-    startSealedDraft: async (setPoolJson, setCode, setName, difficulty) => {
+    startSealedDraft: async (selection, difficulty) => {
       const oldMeta = loadActiveQuickDraft();
       if (oldMeta) void clearDraftRun(oldMeta.id);
 
@@ -251,7 +286,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       const resp = await fetch(__CARD_DATA_URL__);
       await adapter.loadCardDatabase(await resp.text());
       const view = await adapter.initializeSealed(
-        setPoolJson,
+        packSequence(selection),
         difficulty,
         Math.floor(Math.random() * 0xffffffff),
       );
@@ -262,8 +297,8 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         view,
         phase: "opening",
         difficulty,
-        selectedSet: setCode,
-        selectedSetName: setName,
+        selectedSet: distinctJoined(selection.packs.map((p) => p.code), "+"),
+        selectedSetName: distinctJoined(selection.packs.map((p) => p.name), " · "),
         kind: "Sealed",
         selectedCard: null,
         mainDeck: [],
@@ -440,10 +475,22 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       set({ selectedCard: cardInstanceId });
     },
 
-    confirmPick: async () => {
-      const { selectedCard, pickCard } = get();
-      if (!selectedCard) return;
-      await pickCard(selectedCard);
+    confirmPick: async (cardInstanceIds) => {
+      // The local wasm draft path is singular by construction: `LocalDraftKind`
+      // is "Quick" | "Sealed" and both have `cards_per_pick == 1`, so the engine
+      // publishes `required_pick_count <= 1` and PackDisplay never hands this
+      // more than one id. Narrowing here rather than silently ignoring the
+      // argument keeps that assumption visible; if a multi-card kind ever
+      // reaches this path, `apply_pick_inner` refuses the short submission with
+      // `WrongPickCardCount`, and since nothing on this path catches — not
+      // `pickCard`, not `DraftAdapter.submitPick`, and this store has no `error`
+      // state — the throw leaves the pack on screen unchanged and surfaces only
+      // as the `unhandledrejection` telemetry listener's `js_error`. Widening
+      // `adapter.submitPick` is a separate change; so is a pick error surface.
+      const [cardInstanceId] = cardInstanceIds;
+      if (cardInstanceId === undefined) return;
+      const { pickCard } = get();
+      await pickCard(cardInstanceId);
     },
 
     addToDeck: (cardName) => {
@@ -487,7 +534,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       persistDraftDebounced();
     },
 
-    submitDeck: async () => {
+    submitDeck: async (_commanders) => {
       const { adapter, mainDeck, landCounts } = get();
       if (!adapter) return;
 
@@ -499,7 +546,13 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       }
 
       const fullDeck = [...mainDeck, ...landCards];
-      const view = await adapter.submitDeck(fullDeck);
+      // `LocalDraftKind` is "Quick" | "Sealed"; CR 903.1 puts the commander
+      // designation inside the Commander variant, so neither local kind
+      // produces one and the explicit `[]` is the correct value rather than an
+      // oversight. Widening the signature is what keeps `LimitedDeckBuilder`'s
+      // `?? quickSubmitDeck` fallback from silently swallowing an argument.
+      // Recorded as D6.
+      const view = await adapter.submitDeck(fullDeck, []);
       set({ view, phase: view.status === "Deckbuilding" ? "deckbuilding" : "launching" });
       persistDraft();
     },

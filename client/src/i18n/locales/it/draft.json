@@ -2,19 +2,25 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Ecco come funziona",
     "startDrafting": "Inizia il draft",
     "quick": {
       "step1": "Aprirai 3 buste da 14 carte ciascuna",
       "step2": "Scegli una carta per busta, poi passa il resto agli altri draftatori IA",
       "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
-      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita"
+      "step4": "Dopo tutte le scelte, costruisci un mazzo da 40 carte e gioca una partita",
+      "step1Mixed": "Aprirai {{packCount}} buste di dimensioni diverse — {{packSizes}} carte, in quest'ordine"
     },
     "pod": {
       "step1": "Stai draftando con {{count}} giocatori in un pod",
       "step2": "Apri 3 buste da 14 carte — scegline una, passa il resto",
       "step3": "Le buste alternano direzione a ogni round — sinistra, destra, sinistra",
       "step4": "Dopo il draft, costruisci un mazzo da 40 carte e gioca le partite del torneo"
+    },
+    "commander": {
+      "step2": "Scegli due carte da ogni busta, poi passa il resto",
+      "step4": "Dopo il draft, costruisci un mazzo Commander da 60 carte e gioca una partita multigiocatore"
     }
   },
   "steps": {
@@ -71,10 +77,29 @@
       "Hard": "Difficile",
       "VeryHard": "Molto difficile"
     },
-    "chooseSet": "Scegli un set",
     "noPools": "Nessun pool di draft disponibile. Esegui prima la pipeline dei dati di draft.",
     "setIconAlt": "Icona set {{name}}",
-    "loadFailed": "Impossibile caricare i set"
+    "loadFailed": "Impossibile caricare i set",
+    "packOrder": "Ordine delle buste",
+    "clearPacks": "Svuota",
+    "emptyPacks_one": "Scegli un set per ogni busta. Un draft apre {{count}} busta per impostazione predefinita: ripeti un set o mescolane più di uno.",
+    "emptyPacks_other": "Scegli un set per ogni busta. Un draft apre {{count}} buste per impostazione predefinita: ripeti un set o mescolane più di uno per draftare un blocco.",
+    "emptyPacksFixed_one": "Il sealed apre esattamente {{count}} busta. Scegli un set per essa.",
+    "emptyPacksFixed_other": "Il sealed apre esattamente {{count}} buste. Scegli un set per ognuna: ripetine uno o mescolane più di uno.",
+    "packCountFixed": "{{selected}} di {{required}} buste scelte",
+    "packCountFlexible": "{{selected}} buste scelte — fino a {{max}}",
+    "addPackFromSet": "Aggiungi una busta",
+    "packsFull": "L'elenco delle buste è pieno",
+    "addPackOf": "Aggiungi una busta di {{name}}",
+    "movePackEarlier": "Anticipa la busta {{number}}",
+    "movePackLater": "Posticipa la busta {{number}}",
+    "removePack": "Rimuovi la busta {{number}}",
+    "chooseSet": "Scegli un set",
+    "draftSet": "Drafta {{name}}",
+    "fillRemaining_one": "Riempi l'ultima busta con {{name}}",
+    "fillRemaining_other": "Riempi le {{count}} buste rimanenti con {{name}}",
+    "startDraft": "Inizia draft",
+    "startSealed": "Inizia sealed"
   },
   "pack": {
     "confirmPick": "Conferma scelta",
@@ -82,7 +107,8 @@
     "waitingNext": "In attesa della prossima busta...",
     "cardsInPack": "{{count}} carte nella busta",
     "picking": "Scelta…",
-    "autoPick": "Scelta automatica"
+    "autoPick": "Scelta automatica",
+    "selectionProgress": "{{selected}} di {{required}} selezionate"
   },
   "sealedOpening": {
     "title": "Apri il tuo pool Sealed",
@@ -103,6 +129,7 @@
     "sortColor": "Colore",
     "sortType": "Tipo",
     "sortCmc": "CMC",
+    "grantedFiller": "+ fino a {{maximum}} × {{name}} (solo comandante)",
     "groups": {
       "white": "Bianco",
       "blue": "Blu",
@@ -165,7 +192,10 @@
     "landCount_one": "{{count}} terra",
     "landCount_other": "{{count}} terre",
     "readyToSubmit": "pronto per l'invio",
-    "moreNeeded": "{{count}} altre necessarie"
+    "moreNeeded": "{{count}} altre necessarie",
+    "commanderRequired": "Designa un comandante dalla tua riserva per inviare.",
+    "commanderUnavailable": "La designazione del comandante non è disponibile al momento: non è stato possibile caricare il database delle carte.",
+    "grantedFiller": "La tua riserva include anche fino a {{maximum}} × {{name}}, utilizzabile solo come comandante."
   },
   "landing": {
     "title": "Draft",
@@ -188,12 +218,25 @@
       "title": "Pod Draft",
       "description": "Ospita o unisciti a un pod con fino a 8 giocatori, draftate insieme dal vivo, poi giocate un torneo svizzero o a eliminazione."
     },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Drafta due carte alla volta in un pod, costruisci un mazzo Commander da 60 carte, poi gioca una partita multigiocatore."
+    },
     "podInProgress": "Pod Draft in corso",
+    "guestPodInProgress": "Pod partecipato pronto a riconnettersi",
     "podLabel": "Pod {{kind}}",
-    "seatCount": "{{count}} posti",
+    "guestPodLabel": "Pod draft",
+    "seatCount_one": "{{count}} posto",
+    "seatCount_few": "{{count}} posti",
+    "seatCount_many": "{{count}} posti",
+    "seatCount_other": "{{count}} posti",
     "roomLabel": "Stanza {{code}}",
-    "cardsPicked": "{{count}} carte scelte",
+    "cardsPicked_one": "{{count}} carta scelta",
+    "cardsPicked_few": "{{count}} carte scelte",
+    "cardsPicked_many": "{{count}} carte scelte",
+    "cardsPicked_other": "{{count}} carte scelte",
     "resume": "Riprendi",
+    "reconnect": "Riconnetti",
     "draftInProgress": "Draft in corso",
     "draftComplete": "Draft completato",
     "resumeMatch": "Riprendi partita",
@@ -319,6 +362,8 @@
     "kindTraditionalDesc": "Partite di torneo al meglio di tre dopo la costruzione del mazzo, con sideboard tra le partite.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Apri sei buste direttamente nel pool di ogni giocatore, poi costruisci un mazzo da torneo al meglio di una.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Ogni giocatore drafta due carte alla volta e costruisce un mazzo Commander da 60 carte, poi il pod gioca una partita multigiocatore.",
     "tournamentFormat": "Formato torneo",
     "tournamentSwiss": "Svizzero",
     "tournamentSwissDesc": "Tutti continuano a giocare per tre round, anche dopo una sconfitta.",
@@ -332,7 +377,8 @@
     "podSize": "Dimensione del pod",
     "podSizeDesc": "{{count}} posti totali. I posti vuoti possono essere riempiti con i bot dalla lobby prima che inizi il draft.",
     "playerCount": "{{count}} giocatori",
-    "setSelectorHint": "Scegli il set di draft per ultimo. Selezionando un set si carica il suo pool di carte e si crea la stanza del pod.",
+    "setSelectorHint": "Disponi i set che il tuo pod drafta — uno per busta, nell'ordine in cui si aprono. Indica un solo set per riempire ogni busta con quello. Creando il pod si caricano le riserve.",
+    "createPod": "Crea pod",
     "loadingPool": "Caricamento dati del pool del set...",
     "roomCode": "Codice stanza",
     "roomCodePlaceholder": "Inserisci codice stanza...",
@@ -381,12 +427,14 @@
   },
   "podComplete": {
     "title": "Draft completato",
+    "launchCommanderGame": "Avvia partita Commander",
     "returnToMenu": "Torna al menu"
   },
   "podError": {
     "kicked": "Sei stato espulso dal pod",
     "hostLeft": "L'host ha abbandonato il draft",
-    "connection": "Errore di connessione"
+    "connection": "Errore di connessione",
+    "retry": "Prova a riconnetterti"
   },
   "lobby": {
     "title": "Lobby del pod di draft",

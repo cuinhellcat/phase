@@ -28,9 +28,9 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtStat, QuantityExpr, QuantityRef, RoundingMode,
-    SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TurnJournalKind, TypeFilter,
-    TypedFilter, ZoneRef,
+    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtStat, QuantityExpr, QuantityRef,
+    RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter, ThisWayCause, TurnJournalKind,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
@@ -960,6 +960,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // scry-context "number of cards looked at …" reading wins over a
         // plain object-count reading.
         parse_scry_look_count_ref,
+        parse_controlled_object_count_extremum,
         parse_the_number_of,
         parse_object_property_aggregate_ref,
         // Group mana-value aggregate parsers to reduce alt arity
@@ -1592,6 +1593,68 @@ fn parse_tracked_set_anaphor(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 608.2c: Parse the surface-only card-set anaphor "those cards".
+///
+/// Shared by contextual quantity consumers and effect-chain assembly so the
+/// surface grammar and antecedent decision cannot drift. The context-free
+/// quantity leaf deliberately does not assign this ambiguous anaphor a source.
+pub(crate) fn parse_bare_card_set_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = tag("those cards").parse(input)?;
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '\'' => Err(nom::Err::Error(
+            nom::error::Error::new(input, nom::error::ErrorKind::Fail),
+        )),
+        _ => Ok((rest, ())),
+    }
+}
+
+fn parse_object_property_aggregate_head(
+    input: &str,
+) -> OracleResult<'_, (AggregateFunction, ObjectProperty)> {
+    // The aggregate axis and the object-property axis are independent, so they
+    // are composed rather than enumerated: three properties x N extremum
+    // adjectives would otherwise be a permutation table.
+    alt((
+        // "the {greatest|highest|largest} <property> among "
+        map(
+            (
+                tag("the "),
+                parse_max_extremum_adjective,
+                tag(" "),
+                parse_aggregate_property,
+                tag(" among "),
+            ),
+            |(_, (), _, property, _)| (AggregateFunction::Max, property),
+        ),
+        // "the total <property> of "
+        map(
+            (tag("the total "), parse_aggregate_property, tag(" of ")),
+            |(_, property, _)| (AggregateFunction::Sum, property),
+        ),
+    ))
+    .parse(input)
+}
+
+/// Parse an object-property aggregate whose exact surface referent is bare
+/// "those cards", using a source proven by the caller's typed chain/trigger
+/// context. This is intentionally unavailable to the context-free quantity
+/// entry points.
+pub(crate) fn parse_contextual_bare_card_aggregate_ref(
+    input: &str,
+    source: crate::types::ability::TrackedAnaphorSource,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let (rest, _) = parse_bare_card_set_anaphor(rest)?;
+    Ok((
+        rest,
+        QuantityRef::TrackedSetAggregate {
+            function,
+            property,
+            source,
+        },
+    ))
+}
+
 /// CR 208.1 + CR 202.3: Parse object-property aggregate quantities such as
 /// "the greatest power among <filter>" and "the total mana value of <filter>".
 /// The aggregate axis and object-property axis are independent typed choices,
@@ -1632,28 +1695,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
         }
     }
 
-    // The aggregate axis and the object-property axis are independent, so they
-    // are composed rather than enumerated: three properties x N extremum
-    // adjectives would otherwise be a permutation table.
-    let (rest, (function, property)) = alt((
-        // "the {greatest|highest|largest} <property> among "
-        map(
-            (
-                tag("the "),
-                parse_max_extremum_adjective,
-                tag(" "),
-                parse_aggregate_property,
-                tag(" among "),
-            ),
-            |(_, (), _, property, _)| (AggregateFunction::Max, property),
-        ),
-        // "the total <property> of "
-        map(
-            (tag("the total "), parse_aggregate_property, tag(" of ")),
-            |(_, property, _)| (AggregateFunction::Sum, property),
-        ),
-    ))
-    .parse(input)?;
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
     // CR 702.167c: "the total power of the exiled cards used to craft it" — the
     // craft-material aggregate (Mastercraft Raptor). Tried before the bare
     // "the exiled cards" tracked-set anaphor because the craft form shares that
@@ -1951,7 +1993,7 @@ fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// CR 107.1 + CR 700.1: Parse "[type-phrase] controlled by the player who
 /// controls the fewest" (and "… the most") after "the number of" →
-/// `QuantityRef::ControlledByEachPlayer { filter, aggregate }`.
+/// `QuantityRef::ControlledByEachPlayer { filter, aggregate, relation: All }`.
 ///
 /// Used by Balance / Restore Balance / Balancing Act for the equalization
 /// minimum ("a number of lands they control equal to the number of lands
@@ -1976,7 +2018,52 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
     .parse(rest)?;
     Ok((
         rest,
-        QuantityRef::ControlledByEachPlayer { filter, aggregate },
+        QuantityRef::ControlledByEachPlayer {
+            filter,
+            aggregate,
+            relation: PlayerRelation::All,
+        },
+    ))
+}
+
+/// CR 107.1 + CR 102.1/102.2/102.3 + CR 109.5: Parse the greatest per-player
+/// controlled-object count: "the greatest number of artifacts an opponent
+/// controls" and "the greatest number of creatures a player controls".
+///
+/// This is the subject-after-extremum sibling of
+/// [`parse_controlled_by_extremum_player`]. Both lower to the same typed
+/// `ControlledByEachPlayer` authority; `relation` selects the player population
+/// before the per-player counts are reduced. The type phrase is kept bare
+/// because the resolver itself supplies each candidate player's controller gate.
+fn parse_controlled_object_count_extremum(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag("the ").parse(input)?;
+    let (input, _) = parse_max_extremum_adjective(input)?;
+    let (input, _) = tag(" number of ").parse(input)?;
+    let (rest, (type_text, relation)) = alt((
+        map(
+            terminated(
+                take_until(" an opponent controls"),
+                tag(" an opponent controls"),
+            ),
+            |type_text| (type_text, PlayerRelation::Opponent),
+        ),
+        map(
+            terminated(take_until(" a player controls"), tag(" a player controls")),
+            |type_text| (type_text, PlayerRelation::All),
+        ),
+    ))
+    .parse(input)?;
+    let (filter, filter_remainder) = parse_type_phrase(type_text);
+    if !filter_remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        rest,
+        QuantityRef::ControlledByEachPlayer {
+            filter,
+            aggregate: AggregateFunction::Max,
+            relation,
+        },
     ))
 }
 
@@ -3962,8 +4049,8 @@ pub fn parse_that_much_or_many(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse event-context quantity references.
 ///
-/// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
-/// value from the triggering event. The source-object variants resolve via
+/// "That {noun}" in a triggered ability refers to the object or value from
+/// the triggering event. The source-object variants resolve via
 /// `extract_source_from_event` → live object or LKI cache.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
@@ -3972,11 +4059,36 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         // counter-removal, and mana-production count-prefix slots).
         parse_that_much_or_many,
         value(QuantityRef::EventContextAmount, tag("that damage")),
-        // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
-        // ability body — refers to the total from the triggering combat-damage
-        // event. Distinct from "that damage" (different article+verb) and
-        // "damage dealt this way" (PreviousEffectAmount).
-        value(QuantityRef::EventContextAmount, tag("the damage dealt")),
+        // CR 608.2h: "the damage dealt" bare form in a triggered ability
+        // body — refers to the total from the triggering damage event, an
+        // amount determined once when the effect is
+        // applied. Accepts an optional "the amount of " / "amount of " / bare
+        // "the " determiner prefix ahead of the "damage dealt" phrase, so
+        // both the original bare form ("the damage dealt" — Primo, the
+        // Unbounded) and the paraphrase "the amount of damage dealt" (Kotis,
+        // the Fangkeeper: "exile the top X cards of their library, where X
+        // is the amount of damage dealt") parse uniformly — the prefix is
+        // factored once ahead of the phrase via `preceded` + `opt(alt(...))`,
+        // mirroring `parse_life_lost_ref` / `parse_life_gained_ref`'s
+        // "(the) amount of " prefix handling for the analogous life-change
+        // quantities (the bare "the " arm has no counterpart there because
+        // those functions spell "the " into each downstream full-phrase tag
+        // instead of a single bare-phrase tag). Distinct from "that damage"
+        // (different article+verb) and "damage dealt this way"
+        // (PreviousEffectAmount). The longer qualified forms ("the amount of
+        // damage dealt to/by <object> this turn [by <source>]" — Blazing
+        // Effigy, Grothama, All-Devouring, Impact Resonance, Tangled Colony)
+        // are not swallowed here: `parse_quantity_ref_complete`
+        // (`oracle_effect/lower.rs`) requires the where-X expression to be
+        // fully consumed, and this arm only matches when nothing follows
+        // "damage dealt".
+        value(
+            QuantityRef::EventContextAmount,
+            preceded(
+                opt(alt((tag("the amount of "), tag("amount of "), tag("the ")))),
+                tag("damage dealt"),
+            ),
+        ),
         // CR 701.47c: amass-specific definite phrases name the Army chosen by
         // the current amass instruction, not the generic demonstrative referent.
         parse_amassed_army_property_ref,
@@ -9035,6 +9147,7 @@ mod tests {
             QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
                 aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
             }
         );
         assert_eq!(rest, "");
@@ -9052,6 +9165,7 @@ mod tests {
             QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
                 aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::All,
             }
         );
         assert_eq!(rest, "");
@@ -9069,9 +9183,51 @@ mod tests {
             QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
                 aggregate: AggregateFunction::Min,
+                relation: PlayerRelation::All,
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_controlled_count_extremum_preserves_player_population() {
+        for (text, expected_type, expected_relation) in [
+            (
+                "the greatest number of artifacts an opponent controls",
+                TypeFilter::Artifact,
+                PlayerRelation::Opponent,
+            ),
+            (
+                "the greatest number of creatures a player controls",
+                TypeFilter::Creature,
+                PlayerRelation::All,
+            ),
+        ] {
+            let (rest, qty) = parse_quantity_ref_complete(text).expect("extremum must parse");
+            assert_eq!(rest, "");
+            let QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(filter),
+                aggregate: AggregateFunction::Max,
+                relation,
+            } = qty
+            else {
+                panic!("expected per-player controlled count for {text:?}, got {qty:?}");
+            };
+            assert_eq!(filter.type_filters, vec![expected_type]);
+            assert_eq!(filter.controller, None, "resolver owns controller binding");
+            assert_eq!(relation, expected_relation);
+        }
+    }
+
+    #[test]
+    fn parse_controlled_count_extremum_is_full_consuming() {
+        assert!(parse_quantity_ref_complete(
+            "the greatest number of artifacts an opponent controls and draws"
+        )
+        .is_err());
+        assert!(
+            parse_quantity_ref_complete("the greatest number of artifacts you control").is_err()
+        );
     }
 
     #[test]

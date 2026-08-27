@@ -2,19 +2,25 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "Here's how it works",
     "startDrafting": "Start Drafting",
     "quick": {
       "step1": "You'll open {{packCount}} packs of {{cardsPerPack}} cards each",
       "step2": "Pick one card per pack, then pass the rest to AI drafters",
       "step3": "Packs alternate direction each round — left, right, left",
-      "step4": "After all picks, build a 40-card deck and play a match"
+      "step4": "After all picks, build a 40-card deck and play a match",
+      "step1Mixed": "You'll open {{packCount}} packs of mixed sizes — {{packSizes}} cards, in that order"
     },
     "pod": {
       "step1": "You're drafting with {{count}} players in a pod",
       "step2": "Open 3 packs of 14 cards — pick one, pass the rest",
       "step3": "Packs alternate direction each round — left, right, left",
       "step4": "After drafting, build a 40-card deck and play tournament matches"
+    },
+    "commander": {
+      "step2": "Pick two cards from each pack, then pass the rest",
+      "step4": "After drafting, build a 60-card Commander deck and play one multiplayer game"
     }
   },
   "steps": {
@@ -71,10 +77,29 @@
       "Hard": "Hard",
       "VeryHard": "Very Hard"
     },
-    "chooseSet": "Choose a Set",
     "noPools": "No draft pools available. Run the draft data pipeline first.",
     "setIconAlt": "{{name}} set icon",
-    "loadFailed": "Failed to load sets"
+    "loadFailed": "Failed to load sets",
+    "packOrder": "Pack Order",
+    "clearPacks": "Clear",
+    "emptyPacks_one": "Pick a set for each pack. A draft opens {{count}} pack by default — repeat a set or mix several.",
+    "emptyPacks_other": "Pick a set for each pack. A draft opens {{count}} packs by default — repeat a set or mix several to draft a block.",
+    "emptyPacksFixed_one": "Sealed opens exactly {{count}} pack. Pick a set for it.",
+    "emptyPacksFixed_other": "Sealed opens exactly {{count}} packs. Pick a set for each — repeat one or mix several.",
+    "packCountFixed": "{{selected}} of {{required}} packs chosen",
+    "packCountFlexible": "{{selected}} packs chosen — up to {{max}}",
+    "addPackFromSet": "Add a Pack",
+    "packsFull": "Pack list is full",
+    "addPackOf": "Add a pack of {{name}}",
+    "movePackEarlier": "Move pack {{number}} earlier",
+    "movePackLater": "Move pack {{number}} later",
+    "removePack": "Remove pack {{number}}",
+    "chooseSet": "Choose a Set",
+    "draftSet": "Draft {{name}}",
+    "fillRemaining_one": "Fill the last pack with {{name}}",
+    "fillRemaining_other": "Fill the remaining {{count}} packs with {{name}}",
+    "startDraft": "Start Draft",
+    "startSealed": "Start Sealed"
   },
   "pack": {
     "confirmPick": "Confirm Pick",
@@ -82,7 +107,8 @@
     "waitingNext": "Waiting for next pack...",
     "cardsInPack": "{{count}} cards in pack",
     "picking": "Picking…",
-    "autoPick": "Auto-pick"
+    "autoPick": "Auto-pick",
+    "selectionProgress": "{{selected}} of {{required}} selected"
   },
   "sealedOpening": {
     "title": "Open your sealed pool",
@@ -103,6 +129,7 @@
     "sortColor": "Color",
     "sortType": "Type",
     "sortCmc": "CMC",
+    "grantedFiller": "+ up to {{maximum}} × {{name}} (commander only)",
     "groups": {
       "white": "White",
       "blue": "Blue",
@@ -165,7 +192,10 @@
     "landCount_one": "{{count}} land",
     "landCount_other": "{{count}} lands",
     "readyToSubmit": "ready to submit",
-    "moreNeeded": "{{count}} more needed"
+    "moreNeeded": "{{count}} more needed",
+    "commanderRequired": "Designate a commander from your pool to submit.",
+    "commanderUnavailable": "Commander designation is unavailable right now — the card database could not be loaded.",
+    "grantedFiller": "Your pool also includes up to {{maximum}} × {{name}}, usable only as your commander."
   },
   "landing": {
     "title": "Draft",
@@ -188,12 +218,25 @@
       "title": "Pod Draft",
       "description": "Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
     },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draft two cards at a time in a pod, build a 60-card Commander deck, then play one multiplayer game."
+    },
     "podInProgress": "Pod Draft in Progress",
+    "guestPodInProgress": "Joined Pod Ready to Reconnect",
     "podLabel": "{{kind}} Pod",
-    "seatCount": "{{count}} seats",
+    "guestPodLabel": "Draft Pod",
+    "seatCount_one": "{{count}} seat",
+    "seatCount_few": "{{count}} seats",
+    "seatCount_many": "{{count}} seats",
+    "seatCount_other": "{{count}} seats",
     "roomLabel": "Room {{code}}",
-    "cardsPicked": "{{count}} cards picked",
+    "cardsPicked_one": "{{count}} card picked",
+    "cardsPicked_few": "{{count}} cards picked",
+    "cardsPicked_many": "{{count}} cards picked",
+    "cardsPicked_other": "{{count}} cards picked",
     "resume": "Resume",
+    "reconnect": "Reconnect",
     "draftInProgress": "Draft in Progress",
     "draftComplete": "Draft Complete",
     "resumeMatch": "Resume Match",
@@ -319,6 +362,8 @@
     "kindTraditionalDesc": "Best-of-three tournament matches after deckbuilding, with sideboarding between games.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Open six packs directly into each player's pool, then build a best-of-one tournament deck.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Each player drafts two cards at a time and builds a 60-card Commander deck, then the pod plays one multiplayer game.",
     "tournamentFormat": "Tournament Format",
     "tournamentSwiss": "Swiss",
     "tournamentSwissDesc": "Everyone keeps playing through three rounds, even after a loss.",
@@ -332,7 +377,8 @@
     "podSize": "Pod Size",
     "podSizeDesc": "{{count}} total seats. Empty seats can be filled with bots from the lobby before the draft starts.",
     "playerCount": "{{count}} players",
-    "setSelectorHint": "Choose the draft set last. Selecting a set loads its card pool and creates the pod room.",
+    "setSelectorHint": "Arrange the sets your pod drafts — one per pack, in the order they open. Name one set to fill every pack with it. Creating the pod loads the pools.",
+    "createPod": "Create Pod",
     "loadingPool": "Loading set pool data...",
     "roomCode": "Room Code",
     "roomCodePlaceholder": "Enter room code...",
@@ -381,12 +427,14 @@
   },
   "podComplete": {
     "title": "Draft Complete",
+    "launchCommanderGame": "Start Commander Game",
     "returnToMenu": "Return to Menu"
   },
   "podError": {
     "kicked": "You were kicked from the pod",
     "hostLeft": "Host left the draft",
-    "connection": "Connection Error"
+    "connection": "Connection Error",
+    "retry": "Try Reconnecting"
   },
   "spectator": {
     "eyebrow": "Draft spectator",

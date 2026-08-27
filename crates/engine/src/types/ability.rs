@@ -3078,6 +3078,10 @@ pub enum ManaSpendRestriction {
     /// accepts the legacy bare-`Zone` serialized form for backward compatibility,
     /// mapping it to the inclusion reading.
     SpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 601.2a: "This mana can't be spent to cast spells from
+    /// [zone]." Unlike `SpellFromZone(NotFrom)`, this prohibits one class of
+    /// spell cast without restricting ability, effect, or special-action costs.
+    CannotCastSpellFromZone(Zone),
     /// CR 106.6 + CR 116.2m + CR 709.5e: "Spend this mana only to unlock
     /// [a ]door[s]" — the special-action half of a spend restriction. A leaf of
     /// the [`ManaSpendRestriction::Any`] disjunction (Smoky Lounge: "cast Room
@@ -3174,6 +3178,7 @@ impl ManaSpendRestriction {
             | ManaSpendRestriction::SpellWithColorCount { .. }
             | ManaSpendRestriction::SpellOfSourceChosenColor
             | ManaSpendRestriction::SpellFromZone(_)
+            | ManaSpendRestriction::CannotCastSpellFromZone(_)
             | ManaSpendRestriction::UnlockDoor => true,
             // CR 106.6: coverage for a disjunction requires every named branch to
             // be production-live (`.all()`). Partial absorption would drop
@@ -3540,6 +3545,64 @@ pub enum RestrictionPlayerScope {
 // 500+ byte variant; the permissions are short-lived per-object grants, not
 // hot-path bulk collections, so the size is intentional. Mirrors the documented
 // allow on `Effect`.
+/// CR 118.9a: Provenance of a [`CastingPermission::PlayFromExile`] grant.
+///
+/// An `Impulse` grant is a self-standing "you may play it" permission with
+/// full cast authority (impulse draw, Warp returns, mill-to-graveyard play
+/// grants). A `LandLookCompanion` is the land-play/look half that
+/// `cast_from_zone` installs ALONGSIDE an alternative-cost grant (a "you may
+/// play it … without paying its mana cost" sentence installs
+/// `ExileWithAltCost` for the cast half and the companion for CR 305.1 land
+/// plays and the CR 406.3b face-down-exile look): provenance, not cast
+/// authority — the sibling alt-cost grant is the elected cast route, so cast
+/// elections skip companions and they lend the {3} face-down cast no zone
+/// authority (CR 601.2b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayFromExileProvenance {
+    /// Self-standing play permission with full cast authority (the default,
+    /// and what every pre-marker serialized grant deserializes to).
+    #[default]
+    Impulse,
+    /// Land/look companion of an alternative-cost grant — never elected as a
+    /// cast authority.
+    LandLookCompanion,
+}
+
+impl PlayFromExileProvenance {
+    /// Serde gate: the default `Impulse` stays off the wire.
+    pub fn is_impulse(&self) -> bool {
+        matches!(self, PlayFromExileProvenance::Impulse)
+    }
+}
+
+/// CR 118.9a: what the `cost` of an [`CastingPermission::ExileWithAltCost`]
+/// grant IS — a true alternative cost (cast "without paying its mana cost",
+/// suspend/keyword substitutes, any cost that replaces the printed one), or
+/// the card's own printed cost restated because the grant simply permits a
+/// NORMAL cast from the zone (the Nashi-class "you may play/cast that card"
+/// with ordinary payment). A `NormalCost` grant is a normal-cost route: it
+/// may authorize the {3} face-down cast, which is then the sole alternative
+/// applied (CR 702.168b + CR 601.2b); an `Alternative` grant may not.
+///
+/// `Alternative` is the serde default — every pre-provenance serialized
+/// grant deserializes to the CR-safe conservative reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExileGrantCostProvenance {
+    /// The grant's cost replaces the printed mana cost (an alternative cost).
+    #[default]
+    Alternative,
+    /// The grant restates the card's own printed cost — a normal cast
+    /// permitted from the zone, no alternative cost applied.
+    NormalCost,
+}
+
+impl ExileGrantCostProvenance {
+    /// Serde gate: the default `Alternative` stays off the wire.
+    pub fn is_alternative(&self) -> bool {
+        matches!(self, ExileGrantCostProvenance::Alternative)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3552,6 +3615,15 @@ pub enum CastingPermission {
     /// by Siege victory triggers (CR 310.12b: "cast it transformed without paying its mana cost").
     ExileWithAltCost {
         cost: ManaCost,
+        /// CR 118.9a: whether `cost` is a true alternative cost or the card's
+        /// own printed cost restated for a normal cast — see
+        /// [`ExileGrantCostProvenance`]. Decides whether this grant can lend
+        /// the face-down cast zone authority (CR 702.168b).
+        #[serde(
+            default,
+            skip_serializing_if = "ExileGrantCostProvenance::is_alternative"
+        )]
+        cost_provenance: ExileGrantCostProvenance,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
         /// CR 702.85a: optional cast-time predicate gating whether the cast may
@@ -3733,6 +3805,15 @@ pub enum CastingPermission {
         /// printed invalidation event occurs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invalidation: Option<PlayPermissionInvalidation>,
+        /// CR 305.1 + CR 406.3b + CR 118.9a: what kind of grant this is — a
+        /// self-standing impulse-class permission or the land-play/look
+        /// companion of an alternative-cost grant. See
+        /// [`PlayFromExileProvenance`]. The default (`Impulse`, and the value
+        /// every pre-existing serialized grant deserializes to) is full cast
+        /// authority; the companion is skipped by cast elections and lends
+        /// the face-down cast no zone authority (CR 601.2b).
+        #[serde(default, skip_serializing_if = "PlayFromExileProvenance::is_impulse")]
+        provenance: PlayFromExileProvenance,
     },
     /// CR 122.3: Cast from exile by paying {E} equal to the card's mana value.
     /// Building block for Amped Raptor and similar energy-based casting mechanics.
@@ -7040,7 +7121,8 @@ pub enum QuantityRef {
         property: ObjectProperty,
         filter: TargetFilter,
     },
-    /// CR 107.1: The [min/max], across every player in the game, of the number
+    /// CR 107.1 + CR 102.1/102.2/102.3: The [min/max], across players in
+    /// `relation`, of the number
     /// of **battlefield** objects matching `filter` that the player controls
     /// (the game counts only in integers). Each player's per-player count is
     /// computed as if `filter`'s
@@ -7055,6 +7137,15 @@ pub enum QuantityRef {
     ControlledByEachPlayer {
         filter: TargetFilter,
         aggregate: AggregateFunction,
+        /// Which players contribute one controlled-object count. `All` preserves
+        /// the original Balance-family reading; `Opponent` covers "the greatest
+        /// number of artifacts an opponent controls" without collapsing all
+        /// opponents into one object count.
+        #[serde(
+            default = "player_relation_all",
+            skip_serializing_if = "is_player_relation_all"
+        )]
+        relation: PlayerRelation,
     },
     /// Card count in a specific zone of the first targeted player.
     /// Generalized for library, graveyard, exile, etc.
@@ -8004,6 +8095,14 @@ pub enum PlayerRelation {
     Opponent,
     /// All players in the game.
     All,
+}
+
+fn player_relation_all() -> PlayerRelation {
+    PlayerRelation::All
+}
+
+fn is_player_relation_all(relation: &PlayerRelation) -> bool {
+    matches!(relation, PlayerRelation::All)
 }
 
 /// CR 108.3 + CR 109.4: Which possession relation binds a player to an object.
@@ -11653,6 +11752,16 @@ pub enum EachDamageRecipient {
     /// ("each creature deals 1 damage to its controller"). A per-source recipient
     /// computed at resolution — surfaces no player-selectable target slot.
     EachController,
+    /// CR 120.1 + CR 608.2c: in an exactly two-object targeted batch, each
+    /// source deals to the other source ("each of those creatures ... to the
+    /// other"). Zero or one surviving/chosen object has no "other" and deals
+    /// no damage; any non-pair cardinality fails closed.
+    OtherBatchSource {
+        /// The two declared target-slot filters, in announcement order. These
+        /// remain the CR 608.2b legality authority at resolution; the compact
+        /// selected object list alone cannot prove type/controller legality.
+        source_filters: [Box<TargetFilter>; 2],
+    },
     // DEFERRED (§9, set-audit backlog): AttachedPermanent — each Aura source deals
     // to the permanent it's attached to (CR 303.4). Needs a new attachment
     // `FilterProp` (`AttachedToObjectOfType`) for the source filter; until then
@@ -12329,7 +12438,7 @@ pub enum Effect {
     },
     /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated
     /// at resolution time, CR 608.2) deals `amount` damage as its OWN source
-    /// (CR 120.1) to `recipient`. The filter-evaluated-source counterpart of
+    /// (CR 120.1) to `recipient`. Primarily the filter-evaluated-source counterpart of
     /// [`Effect::EachDealsDamageEqualToPower`] (whose sources are announced
     /// targets with a `multi_target` count and whose amount is each source's own
     /// power). Split as a sibling — not unified — because the source-selection
@@ -12338,17 +12447,21 @@ pub enum Effect {
     /// `QuantityExpr` so a future variable-amount filter-source card extends
     /// `amount` rather than adding a third sibling.
     ///
-    /// Covers "each <object class> [you control] deals N damage to <recipient>":
+    /// Covers "each <object class> [you control] deals N damage to <recipient>"
+    /// and the targeted pairwise "each of those ... to the other" shape:
     /// tribal pingers (Sarkhan the Masterless, Princess Snowfall), villainous-
     /// choice / modal pingers (Missy, Rakdos Charm), and Pestilence-adjacent "each
     /// creature deals" (Aura Barbs clause 1). `recipient` is an
-    /// [`EachDamageRecipient`] so "its controller" (per-source) and a shared
-    /// announced/context target are both expressed without a boolean.
+    /// [`EachDamageRecipient`] so "its controller" (per-source), a shared
+    /// announced/context target, and an exact reciprocal pair are expressed
+    /// without booleans.
     EachSourceDealsDamage {
         /// CR 608.2: The source class, evaluated against the battlefield at
         /// resolution. Each matching object is an independent damage source
-        /// (CR 120.1). Always a non-player object-class filter — player-shaped
-        /// subjects route to `DamageEachPlayer`.
+        /// (CR 120.1). Ordinarily a non-player object-class filter — player-shaped
+        /// subjects route to `DamageEachPlayer`. `ParentTarget` is reserved for
+        /// the typed `OtherBatchSource` pairwise relation, whose exact announced
+        /// objects are retained on the damage node.
         sources: TargetFilter,
         /// CR 120.1: Damage dealt by every source. Uniform across the batch
         /// (resolved once, CR 608.2) UNLESS the amount reads the per-source
@@ -12356,8 +12469,8 @@ pub enum Effect {
         /// in which case it is resolved per batch member (each source is the
         /// source of its own damage, CR 120.1).
         amount: QuantityExpr,
-        /// CR 120.3: The recipient resolution strategy (shared target vs
-        /// per-source controller).
+        /// CR 120.3: The recipient resolution strategy (shared target,
+        /// per-source controller, or the other member of an exact target pair).
         recipient: EachDamageRecipient,
     },
     /// CR 121.1: Draw a card.
@@ -17188,8 +17301,8 @@ impl Effect {
             // CR 115.1 / CR 608.2c: a `Shared` recipient is resolved exactly like
             // `DealDamage::target` — surface it so the same target-slot collection
             // and event-context hydration build / bind the recipient. The
-            // `EachController` and deferred per-source recipients carry no slot and
-            // fall through to the `None` group below.
+            // `EachController` carries no slot; `OtherBatchSource` reuses the
+            // two preceding `TargetOnly` slots. Both fall through to `None`.
             Effect::EachSourceDealsDamage {
                 recipient: EachDamageRecipient::Shared(filter),
                 ..
@@ -17491,11 +17604,13 @@ impl Effect {
             // spec, the recipient is one mandatory slot), not by `target_filter()`.
             | Effect::EachDealsDamageEqualToPower { .. }
             // CR 109.4 + CR 120.3a: `EachController` resolves per-source at the
-            // resolver — no player-selectable target slot. Exhaustive match
-            // ensures any future `EachDamageRecipient` variant must be
-            // explicitly decided here rather than silently falling through.
+            // resolver; `OtherBatchSource` reuses the preceding declared object
+            // slots. Neither surfaces another selectable slot. Exhaustive match
+            // ensures future recipient variants are explicitly decided here.
             | Effect::EachSourceDealsDamage {
-                recipient: EachDamageRecipient::EachController,
+                recipient:
+                    EachDamageRecipient::EachController
+                        | EachDamageRecipient::OtherBatchSource { .. },
                 ..
             }
             // CR 701.12a: player targets (player_a/player_b) are surfaced as
@@ -29019,6 +29134,7 @@ mod tests {
             polarity: ZoneSpendPolarity::From,
         })
         .is_coverage_supported());
+        assert!(ManaSpendRestriction::CannotCastSpellFromZone(Zone::Hand).is_coverage_supported());
         assert!(ManaSpendRestriction::UnlockDoor.is_coverage_supported());
         // CR 116.2b + CR 702.37e: the paid `GameAction::TurnFaceUp` handler makes
         // the turn-face-up special-action gate satisfiable.
@@ -30911,6 +31027,7 @@ mod tests {
     #[test]
     fn exile_with_alt_cost_reads_legacy_exile_on_resolve_bool() {
         let modern = CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,

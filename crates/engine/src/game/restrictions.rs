@@ -264,6 +264,11 @@ pub(crate) fn spell_cast_record_for(
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        // CR 715.2a: Capture whether the cast-time object has Adventure
+        // characteristics; this is distinct from casting the Adventure face.
+        has_adventure: obj.back_face.as_ref().is_some_and(|face| {
+            face.layout_kind == Some(crate::types::card::LayoutKind::Adventure)
+        }),
         from_zone,
         // CR 702.185c: Capture the alternative-cast variant so per-turn
         // spell-history conditions ("a spell was warped this turn") can
@@ -3807,6 +3812,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 1,
                 has_x_in_cost: false,
+                has_adventure: false,
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
@@ -3843,6 +3849,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 1,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -3857,6 +3864,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 2,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
@@ -3871,6 +3879,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 3,
                     has_x_in_cost: false,
+                    has_adventure: false,
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,

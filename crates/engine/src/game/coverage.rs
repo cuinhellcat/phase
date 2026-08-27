@@ -22,12 +22,12 @@ use crate::types::ability::{
     CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
     Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
-    TypedFilter, VoteSubject, ZoneRef,
+    ObjectScope, ParsedCondition, PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
+    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement,
+    StackAbilityKind, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -1873,14 +1873,23 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
-        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+        QuantityRef::ControlledByEachPlayer {
+            filter,
+            aggregate,
+            relation,
+        } => {
             let func = match aggregate {
                 AggregateFunction::Max => "most",
                 AggregateFunction::Min => "fewest",
                 AggregateFunction::Sum => "total",
             };
+            let population = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "opponent",
+                PlayerRelation::All => "player",
+            };
             format!(
-                "# of {} controlled by player with {func}",
+                "# of {} controlled by {population} with {func}",
                 fmt_target(filter)
             )
         }
@@ -2492,6 +2501,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 match recipient {
                     EachDamageRecipient::Shared(filter) => fmt_target(filter),
                     EachDamageRecipient::EachController => "its controller".into(),
+                    EachDamageRecipient::OtherBatchSource { source_filters } => format!(
+                        "the other batch source of ({}, {})",
+                        fmt_target(&source_filters[0]),
+                        fmt_target(&source_filters[1]),
+                    ),
                 },
             ));
         }

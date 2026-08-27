@@ -1031,7 +1031,10 @@ const PARTITION_FIXTURES: Record<
   },
   // Shares ProliferateModal; `SelectTargets` subset.
   ChooseObjectsSelection: {
-    waitingFor: { type: "ChooseObjectsSelection", data: { player: 0, eligible: MIXED_LEGAL } },
+    waitingFor: {
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible: MIXED_LEGAL, min: 0 },
+    },
     legal: MIXED_LEGAL,
   },
   // Answered by an ORDERED `SelectTargets` (first pick is copied, second

@@ -2,19 +2,25 @@
   "intro": {
     "quickTitle": "Quick Draft",
     "podTitle": "Pod Draft",
+    "commanderTitle": "Commander Draft",
     "subtitle": "So funktioniert es",
     "startDrafting": "Mit dem Draften beginnen",
     "quick": {
       "step1": "Du öffnest 3 Booster mit je 14 Karten",
       "step2": "Wähle pro Booster eine Karte und gib den Rest an KI-Drafter weiter",
       "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
-      "step4": "Baue nach allen Picks ein 40-Karten-Deck und spiele eine Partie"
+      "step4": "Baue nach allen Picks ein 40-Karten-Deck und spiele eine Partie",
+      "step1Mixed": "Du öffnest {{packCount}} Booster unterschiedlicher Größe — {{packSizes}} Karten, in dieser Reihenfolge"
     },
     "pod": {
       "step1": "Du draftest mit {{count}} Spielern in einem Pod",
       "step2": "Öffne 3 Booster mit 14 Karten — wähle eine, gib den Rest weiter",
       "step3": "Booster wechseln jede Runde die Richtung — links, rechts, links",
       "step4": "Baue nach dem Draften ein 40-Karten-Deck und spiele Turnierpartien"
+    },
+    "commander": {
+      "step2": "Wähle zwei Karten aus jedem Booster und gib den Rest weiter",
+      "step4": "Baue nach dem Draften ein Commander-Deck mit 60 Karten und spiele eine Mehrspielerpartie"
     }
   },
   "steps": {
@@ -71,10 +77,29 @@
       "Hard": "Schwer",
       "VeryHard": "Sehr schwer"
     },
-    "chooseSet": "Wähle ein Set",
     "noPools": "Keine Draft-Pools verfügbar. Führe zuerst die Draft-Datenpipeline aus.",
     "setIconAlt": "{{name}} Set-Symbol",
-    "loadFailed": "Sets konnten nicht geladen werden"
+    "loadFailed": "Sets konnten nicht geladen werden",
+    "packOrder": "Booster-Reihenfolge",
+    "clearPacks": "Leeren",
+    "emptyPacks_one": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere.",
+    "emptyPacks_other": "Wähle ein Set für jeden Booster. Ein Draft öffnet standardmäßig {{count}} Booster — wiederhole ein Set oder mische mehrere für einen Block-Draft.",
+    "emptyPacksFixed_one": "Sealed öffnet genau {{count}} Booster. Wähle ein Set dafür.",
+    "emptyPacksFixed_other": "Sealed öffnet genau {{count}} Booster. Wähle für jeden ein Set — wiederhole eins oder mische mehrere.",
+    "packCountFixed": "{{selected}} von {{required}} Boostern gewählt",
+    "packCountFlexible": "{{selected}} Booster gewählt — bis zu {{max}}",
+    "addPackFromSet": "Booster hinzufügen",
+    "packsFull": "Booster-Liste ist voll",
+    "addPackOf": "Booster aus {{name}} hinzufügen",
+    "movePackEarlier": "Booster {{number}} nach vorne",
+    "movePackLater": "Booster {{number}} nach hinten",
+    "removePack": "Booster {{number}} entfernen",
+    "chooseSet": "Wähle ein Set",
+    "draftSet": "{{name}} draften",
+    "fillRemaining_one": "Letzten Booster mit {{name}} füllen",
+    "fillRemaining_other": "Restliche {{count}} Booster mit {{name}} füllen",
+    "startDraft": "Draft starten",
+    "startSealed": "Sealed starten"
   },
   "pack": {
     "confirmPick": "Pick bestätigen",
@@ -82,7 +107,8 @@
     "waitingNext": "Warten auf nächsten Booster...",
     "cardsInPack": "{{count}} Karten im Booster",
     "picking": "Wird ausgewählt…",
-    "autoPick": "Auto-Pick"
+    "autoPick": "Auto-Pick",
+    "selectionProgress": "{{selected}} von {{required}} ausgewählt"
   },
   "sealedOpening": {
     "title": "Öffne deinen Sealed-Pool",
@@ -103,6 +129,7 @@
     "sortColor": "Farbe",
     "sortType": "Typ",
     "sortCmc": "CMC",
+    "grantedFiller": "+ bis zu {{maximum}} × {{name}} (nur als Kommandeur)",
     "groups": {
       "white": "Weiß",
       "blue": "Blau",
@@ -165,7 +192,10 @@
     "landCount_one": "{{count}} Land",
     "landCount_other": "{{count}} Länder",
     "readyToSubmit": "bereit zum Einreichen",
-    "moreNeeded": "{{count}} weitere benötigt"
+    "moreNeeded": "{{count}} weitere benötigt",
+    "commanderRequired": "Bestimme einen Kommandeur aus deinem Pool, um abzugeben.",
+    "commanderUnavailable": "Die Kommandeur-Bestimmung ist derzeit nicht verfügbar — die Kartendatenbank konnte nicht geladen werden.",
+    "grantedFiller": "Dein Pool enthält außerdem bis zu {{maximum}} × {{name}}, nur als Kommandeur verwendbar."
   },
   "landing": {
     "title": "Draft",
@@ -188,12 +218,25 @@
       "title": "Pod Draft",
       "description": "Hoste einen Pod mit bis zu 8 Spielern oder tritt einem bei, draftet live gemeinsam und spielt dann ein Schweizer System- oder K.-o.-Turnier."
     },
+    "commanderDraft": {
+      "title": "Commander Draft",
+      "description": "Draftet zwei Karten gleichzeitig in einem Pod, baut ein Commander-Deck mit 60 Karten und spielt dann eine Mehrspielerpartie."
+    },
     "podInProgress": "Pod Draft läuft",
+    "guestPodInProgress": "Beigetretener Pod bereit zum Wiederverbinden",
     "podLabel": "{{kind}}-Pod",
-    "seatCount": "{{count}} Plätze",
+    "guestPodLabel": "Draft-Pod",
+    "seatCount_one": "{{count}} Platz",
+    "seatCount_few": "{{count}} Plätze",
+    "seatCount_many": "{{count}} Plätze",
+    "seatCount_other": "{{count}} Plätze",
     "roomLabel": "Raum {{code}}",
-    "cardsPicked": "{{count}} Karten ausgewählt",
+    "cardsPicked_one": "{{count}} Karte ausgewählt",
+    "cardsPicked_few": "{{count}} Karten ausgewählt",
+    "cardsPicked_many": "{{count}} Karten ausgewählt",
+    "cardsPicked_other": "{{count}} Karten ausgewählt",
     "resume": "Fortsetzen",
+    "reconnect": "Wiederverbinden",
     "draftInProgress": "Draft läuft",
     "draftComplete": "Draft abgeschlossen",
     "resumeMatch": "Partie fortsetzen",
@@ -319,6 +362,8 @@
     "kindTraditionalDesc": "Best-of-Three-Turnierpartien nach dem Deckbau, mit Sideboarding zwischen den Spielen.",
     "kindSealed": "Sealed",
     "kindSealedDesc": "Öffne sechs Booster direkt für den Pool jedes Spielers und baue dann ein Best-of-One-Turnierdeck.",
+    "kindCommanderDraft": "Commander",
+    "kindCommanderDraftDesc": "Jeder Spieler draftet zwei Karten gleichzeitig und baut ein Commander-Deck mit 60 Karten; danach spielt der Pod eine Mehrspielerpartie.",
     "tournamentFormat": "Turnierformat",
     "tournamentSwiss": "Schweizer System",
     "tournamentSwissDesc": "Alle spielen drei Runden lang weiter, auch nach einer Niederlage.",
@@ -332,7 +377,8 @@
     "podSize": "Pod-Größe",
     "podSizeDesc": "{{count}} Plätze insgesamt. Leere Plätze können vor dem Draft-Start aus der Lobby mit Bots gefüllt werden.",
     "playerCount": "{{count}} Spieler",
-    "setSelectorHint": "Wähle das Draft-Set zuletzt. Die Auswahl eines Sets lädt dessen Kartenpool und erstellt den Pod-Raum.",
+    "setSelectorHint": "Ordne die Sets deines Pods an — eines pro Booster, in der Reihenfolge, in der sie geöffnet werden. Nenne ein Set, um damit jeden Booster zu füllen. Beim Erstellen des Pods werden die Pools geladen.",
+    "createPod": "Pod erstellen",
     "loadingPool": "Set-Pool-Daten werden geladen...",
     "roomCode": "Raumcode",
     "roomCodePlaceholder": "Raumcode eingeben...",
@@ -381,12 +427,14 @@
   },
   "podComplete": {
     "title": "Draft abgeschlossen",
+    "launchCommanderGame": "Commander-Spiel starten",
     "returnToMenu": "Zurück zum Menü"
   },
   "podError": {
     "kicked": "Du wurdest aus dem Pod geworfen",
     "hostLeft": "Der Host hat den Draft verlassen",
-    "connection": "Verbindungsfehler"
+    "connection": "Verbindungsfehler",
+    "retry": "Erneut verbinden"
   },
   "lobby": {
     "title": "Draft-Pod-Lobby",

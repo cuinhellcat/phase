@@ -45,6 +45,7 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, color: ManaType, count: u
 /// Build the Adventure back_face data for Stomp.
 fn stomp_back_face() -> BackFaceData {
     BackFaceData {
+        is_swap_snapshot: false,
         name: "Stomp".to_string(),
         power: None,
         toughness: None,
@@ -94,7 +95,7 @@ fn stomp_back_face() -> BackFaceData {
         strive_cost: None,
         casting_restrictions: Vec::new(),
         casting_options: Vec::new(),
-        layout_kind: None,
+        layout_kind: Some(LayoutKind::Adventure),
         parse_warnings: vec![],
     }
 }
@@ -702,4 +703,71 @@ fn bonecrusher_full_flow() {
             .contains(&CastingPermission::AdventureCreature),
         "AdventureCreature permission should be cleared after leaving exile"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Adventure qualifier uses the cast-time spell record
+// ---------------------------------------------------------------------------
+
+/// CR 715.2a + CR 715.4: A creature spell cast from an Adventure card has the
+/// Adventure card's alternative characteristics for the qualifier, even when
+/// the creature face is the face cast. The ordinary-creature cast is the
+/// negative control; the Adventure spell's exile-and-recast path is the
+/// positive reach guard.
+#[test]
+fn garenbrig_squire_triggers_only_for_adventure_creature_casts() {
+    const GARENBRIG_SQUIRE: &str =
+        "Whenever you cast a creature spell that has an Adventure, Garenbrig Squire gets +1/+1 until end of turn.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let squire = scenario
+        .add_creature_from_oracle(P0, "Garenbrig Squire", 2, 2, GARENBRIG_SQUIRE)
+        .id();
+    let ordinary_creature = scenario.add_creature_to_hand(P0, "Grizzly Bear", 2, 2).id();
+    let adventure_creature = add_bonecrusher_to_hand(&mut scenario);
+
+    let mut runner = scenario.build();
+    setup_bonecrusher_adventure(&mut runner, adventure_creature);
+    add_mana(&mut runner, P0, ManaType::Red, 5);
+
+    runner.cast(ordinary_creature).resolve();
+    let ordinary_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("ordinary creature cast must be recorded");
+    assert!(!ordinary_record.has_adventure);
+    let squire_after_ordinary = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_ordinary.power, Some(2));
+    assert_eq!(squire_after_ordinary.toughness, Some(2));
+
+    runner
+        .cast(adventure_creature)
+        .adventure_face(false)
+        .target_player(P1)
+        .resolve();
+    let adventure_spell_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("Adventure spell cast must be recorded");
+    assert!(!adventure_spell_record.has_adventure);
+    let squire_after_adventure_spell = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_adventure_spell.power, Some(2));
+    assert_eq!(squire_after_adventure_spell.toughness, Some(2));
+
+    runner.cast(adventure_creature).resolve();
+    let adventure_record = runner
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .and_then(|records| records.back())
+        .expect("Adventure creature cast must be recorded");
+    assert!(adventure_record.has_adventure);
+    let squire_after_adventure = runner.state().objects.get(&squire).unwrap();
+    assert_eq!(squire_after_adventure.power, Some(3));
+    assert_eq!(squire_after_adventure.toughness, Some(3));
 }

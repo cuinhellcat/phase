@@ -7056,6 +7056,29 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        Effect::PayCost {
+            cost: cost @ AbilityCost::TapCreatures { .. },
+            payer,
+            ..
+        } => {
+            let Some(payer) =
+                crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+            else {
+                return true;
+            };
+            let mut payment_ability = ability.clone();
+            payment_ability.controller = payer;
+            !crate::game::costs::can_pay(
+                state,
+                payer,
+                ability.source_id,
+                cost,
+                &crate::game::costs::PaymentScope::Resolution {
+                    ability: &payment_ability,
+                    cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+                },
+            )
+        }
         Effect::CastFromZone {
             mode,
             target,
@@ -10690,6 +10713,18 @@ fn resolve_chain_body(
                 })
                 .collect(),
         };
+        // CR 101.4 + CR 118.12a: A scoped token instruction whose
+        // each player may avert the result by sacrificing has one aggregate
+        // outcome, not one token creation per iteration. Let its dedicated
+        // APNAP payment coordinator own the existing UnlessPayment and
+        // WardSacrificeChoice round trips before the generic fan-out clones it.
+        if crate::game::engine_payment_choices::begin_player_scope_token_unless_sacrifice(
+            state,
+            ability,
+            matching_players.clone(),
+        ) {
+            return Ok(());
+        }
         // Inspect the original child chain before splitting it. The splitter
         // intentionally detaches a final searched-this-way shuffle, but it can
         // also detach arbitrary delivery riders; only the former is explicitly
@@ -22218,6 +22253,8 @@ mod tests {
             .sub_ability(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        cost_provenance:
+                            crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cost: ManaCost::generic(2),
                         cast_transformed: false,
                         constraint: None,
@@ -22318,6 +22355,8 @@ mod tests {
             .sub_ability(ResolvedAbility::new(
                 Effect::GrantCastingPermission {
                     permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                        cost_provenance:
+                            crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cost: ManaCost::generic(2),
                         cast_transformed: false,
                         constraint: None,
@@ -22392,6 +22431,7 @@ mod tests {
         .sub_ability(ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: crate::types::ability::CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::generic(2),
                     cast_transformed: false,
                     constraint: None,
@@ -24291,6 +24331,7 @@ mod tests {
         let grant = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                     duration: Duration::Permanent,
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
@@ -28132,6 +28173,7 @@ mod tests {
         let grant = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
+                    provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                     duration: Duration::UntilNextTurnOf {
                         player: PlayerScope::Controller,
                     },
