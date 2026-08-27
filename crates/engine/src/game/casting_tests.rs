@@ -44800,6 +44800,65 @@ fn an_additional_rider_static_still_authorizes_disguise() {
     );
 }
 
+/// CR 118.9a + CR 601.2a (#7948 round 5): with an EARLIER alternative-rider
+/// source and a LATER eligible normal-cost source, admission and cost
+/// resolution must agree on the later source — the face-down cast charges
+/// exactly the {3} and never the earlier source's pay-life rider.
+#[test]
+fn an_earlier_alternative_rider_source_never_pays_for_the_face_down_cast() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // Created FIRST — scans see it before the eligible source.
+    let valgavoth = add_valgavoth_exile_cast_source(&mut state, player);
+    let eligible = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Matrix",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::AnyTime,
+    );
+    let exiled = exiled_disguiser_with_three_floating(&mut state, player);
+    link_exiled_to_source(&mut state, exiled, valgavoth);
+    link_exiled_to_source(&mut state, exiled, eligible);
+    let obj = state.objects[&exiled].clone();
+
+    assert!(has_exile_cast_permission(
+        &state,
+        &obj,
+        player,
+        state.turn_number,
+        Some(CastingVariant::FaceDown)
+    ));
+    assert!(face_down_cast_is_permitted(&state, player, exiled));
+
+    let life_before = state.players[0].life;
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    runner
+        .cast(exiled)
+        .casting_variant(CastingVariant::FaceDown)
+        .resolve();
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.face_down,
+        "the eligible later source authorizes face down"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        0,
+        "exactly the {{3}} is charged — never zeroed by the earlier rider source"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before,
+        "the earlier source's pay-life rider must never be applied"
+    );
+}
+
 /// Serde both-forms pin for the grant provenance: the default `Alternative`
 /// stays off the wire (every pre-provenance grant deserializes to it), while
 /// `NormalCost` is carried explicitly.

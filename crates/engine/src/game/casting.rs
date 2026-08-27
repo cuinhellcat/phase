@@ -3221,21 +3221,12 @@ fn has_exile_cast_permission(
         // for an eligible normal-cost source — an earlier free source must
         // not hide a later normal-cost authority (first-match hazard).
         || if face_down {
-            exile_cast_permission_source_matching(state, player, obj.id, |source| {
-                // CR 118.9a: a normal-cost static is a normal-cost route only
-                // when its extra-cost rider does not REPLACE the mana payment
-                // — a `CastCostMode::Alternative` rider (Valgavoth pay-life)
-                // makes the source an alternative-cost authority; an
-                // `Additional` rider (Dawnhand) preserves ordinary payment.
-                matches!(source.cost, ExileCastCost::PayNormalCost)
-                    && !matches!(
-                        source.extra_cost,
-                        Some(crate::types::statics::CastExtraCost {
-                            mode: crate::types::statics::CastCostMode::Alternative,
-                            ..
-                        })
-                    )
-            })
+            exile_cast_permission_source_matching(
+                state,
+                player,
+                obj.id,
+                static_source_eligible_for_face_down,
+            )
             .is_some()
         } else {
             exile_cast_permission_source(state, player, obj.id).is_some()
@@ -4511,6 +4502,24 @@ pub(crate) fn exile_cast_permission_source(
     exile_cast_permission_source_matching(state, player, exiled_id, |_| true)
 }
 
+/// CR 118.9a: THE face-down eligibility predicate for a static exile source
+/// — `PayNormalCost` base mode AND no `CastCostMode::Alternative` extra-cost
+/// rider (a Valgavoth-class rider replaces the mana payment and makes the
+/// source an alternative-cost authority; an `Additional` rider preserves
+/// ordinary payment). Shared by the admission (`has_exile_cast_permission`)
+/// and every rider/cost read (`elected_exile_permission_source`), so the
+/// admitted authority and the paying authority can never diverge.
+fn static_source_eligible_for_face_down(source: &ExilePermissionSource<'_>) -> bool {
+    matches!(source.cost, ExileCastCost::PayNormalCost)
+        && !matches!(
+            source.extra_cost,
+            Some(crate::types::statics::CastExtraCost {
+                mode: crate::types::statics::CastCostMode::Alternative,
+                ..
+            })
+        )
+}
+
 /// Predicate-aware sibling of [`exile_cast_permission_source`]: returns the
 /// first authorizing static whose SOURCE satisfies `source_ok`, applying the
 /// same source gates (frequency slot, your-turn timing, pool membership,
@@ -4693,7 +4702,23 @@ pub(crate) fn elected_exile_permission_source(
     variant
         .and_then(CastingVariant::exile_permission_source)
         .or_else(|| {
-            exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
+            // CR 118.9a + CR 601.2a: the face-down cast reselects with the
+            // SAME eligibility predicate its admission used — the ordinary
+            // first-match scan could elect an earlier ineligible source
+            // (Valgavoth alternative rider) and charge ITS cost treatment,
+            // while admission was granted by a later eligible normal-cost
+            // source.
+            if variant == Some(CastingVariant::FaceDown) {
+                exile_cast_permission_source_matching(
+                    state,
+                    player,
+                    exiled_id,
+                    static_source_eligible_for_face_down,
+                )
+                .map(|(source, _, _)| source)
+            } else {
+                exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
+            }
         })
 }
 
@@ -6030,6 +6055,18 @@ fn casting_variant_candidates(
             .casting_permissions
             .iter()
             .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
+        // CR 702.37c / CR 702.168b + CR 708.4: the face-down cast is a
+        // candidate from exile exactly when it is a candidate from hand —
+        // effective keyword present and the FaceDown prepare admitted
+        // (normal-cost route per the round-5 authority predicate). Without
+        // this, a payable exile-permission variant short-circuits the cast
+        // as a single candidate and the legal face-down election is never
+        // surfaced (#7948).
+        if object_has_effective_face_down_keyword(state, object_id)
+            && face_down_cast_is_permitted(state, player, object_id)
+        {
+            candidates.push(CastingVariant::FaceDown);
+        }
         // CR 702.62a: Suspend candidate selection. Runtime-granted Suspend
         // (CR 604.1, e.g. Jhoira of the Ghitu / The Tenth Doctor) lives in
         // the effective off-zone keyword set, not `obj.keywords`, so query
