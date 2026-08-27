@@ -3570,6 +3570,34 @@ impl PlayFromExileProvenance {
     }
 }
 
+/// CR 118.9a: what the `cost` of an [`CastingPermission::ExileWithAltCost`]
+/// grant IS — a true alternative cost (cast "without paying its mana cost",
+/// suspend/keyword substitutes, any cost that replaces the printed one), or
+/// the card's own printed cost restated because the grant simply permits a
+/// NORMAL cast from the zone (the Nashi-class "you may play/cast that card"
+/// with ordinary payment). A `NormalCost` grant is a normal-cost route: it
+/// may authorize the {3} face-down cast, which is then the sole alternative
+/// applied (CR 702.168b + CR 601.2b); an `Alternative` grant may not.
+///
+/// `Alternative` is the serde default — every pre-provenance serialized
+/// grant deserializes to the CR-safe conservative reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExileGrantCostProvenance {
+    /// The grant's cost replaces the printed mana cost (an alternative cost).
+    #[default]
+    Alternative,
+    /// The grant restates the card's own printed cost — a normal cast
+    /// permitted from the zone, no alternative cost applied.
+    NormalCost,
+}
+
+impl ExileGrantCostProvenance {
+    /// Serde gate: the default `Alternative` stays off the wire.
+    pub fn is_alternative(&self) -> bool {
+        matches!(self, ExileGrantCostProvenance::Alternative)
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3582,6 +3610,15 @@ pub enum CastingPermission {
     /// by Siege victory triggers (CR 310.12b: "cast it transformed without paying its mana cost").
     ExileWithAltCost {
         cost: ManaCost,
+        /// CR 118.9a: whether `cost` is a true alternative cost or the card's
+        /// own printed cost restated for a normal cast — see
+        /// [`ExileGrantCostProvenance`]. Decides whether this grant can lend
+        /// the face-down cast zone authority (CR 702.168b).
+        #[serde(
+            default,
+            skip_serializing_if = "ExileGrantCostProvenance::is_alternative"
+        )]
+        cost_provenance: ExileGrantCostProvenance,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cast_transformed: bool,
         /// CR 702.85a: optional cast-time predicate gating whether the cast may
@@ -30950,6 +30987,7 @@ mod tests {
     #[test]
     fn exile_with_alt_cost_reads_legacy_exile_on_resolve_bool() {
         let modern = CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,

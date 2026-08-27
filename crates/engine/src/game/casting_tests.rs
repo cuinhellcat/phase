@@ -2782,6 +2782,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
         *cost = foretell_cost.clone();
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint: None,
@@ -3448,6 +3449,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,
@@ -19328,6 +19330,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
         // never expires).
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint: None,
@@ -19840,6 +19843,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
             // P1: the permission the caster (PlayerId(0)) actually consumes.
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -19856,6 +19860,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
             // finality rider that must NOT leak onto this cast.
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -19935,6 +19940,7 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
         {
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -20019,6 +20025,7 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
         {
             obj.casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                     cost: ManaCost::zero(),
                     cast_transformed: false,
                     constraint: None,
@@ -20090,6 +20097,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
         obj.mana_cost = ManaCost::generic(5);
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint: None,
@@ -20136,6 +20144,7 @@ fn add_borrowed_exile_sorcery_with_mana_value(
 
 fn beseech_style_permission() -> CastingPermission {
     CastingPermission::ExileWithAltCost {
+        cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,
         constraint: Some(CastPermissionConstraint::ManaValue {
@@ -20179,6 +20188,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
         obj.casting_permissions.push(beseech_style_permission());
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint: None,
@@ -27238,6 +27248,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
     obj.base_keywords = obj.keywords.clone();
     obj.casting_permissions = vec![
         CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,
@@ -28867,6 +28878,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
         .unwrap()
         .casting_permissions
         .push(crate::types::ability::CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::generic(2),
             cast_transformed: false,
             constraint: None,
@@ -32049,6 +32061,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
         };
         obj.casting_permissions
             .push(crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: obj.mana_cost.clone(),
                 cast_transformed: false,
                 constraint: None,
@@ -44611,9 +44624,146 @@ fn a_free_static_ordered_first_does_not_hide_a_normal_cost_static() {
     );
 }
 
+/// Nashi-class grant: "you may play/cast that card" at its own printed cost
+/// (`NormalCost` provenance — a normal cast route).
+fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability::CastingPermission {
+    crate::types::ability::CastingPermission::ExileWithAltCost {
+        cost,
+        cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+        cast_transformed: false,
+        constraint: None,
+        granted_to: Some(player),
+        resolution_cleanup: None,
+        duration: None,
+        graveyard_replacement: None,
+        enters_with_counter: None,
+        enters_with_modifications: vec![],
+        mana_spend_permission: None,
+    }
+}
+
+/// Exiled disguise creature (printed {5}, disguise {5}) with only {3}
+/// floating — the shape where the face-down {3} is the only payable route.
+fn exiled_disguiser_with_three_floating(state: &mut GameState, player: PlayerId) -> ObjectId {
+    let exiled = add_exiled_card(state, player, "Exiled Disguiser");
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.mana_cost = ManaCost::generic(5);
+        // Off-zone keyword reads flow through `base_keywords` (the printed
+        // base, `off_zone_characteristics`); stamp both views.
+        obj.keywords.push(crate::types::keywords::Keyword::Disguise(
+            ManaCost::generic(5).into(),
+        ));
+        obj.base_keywords
+            .push(crate::types::keywords::Keyword::Disguise(
+                ManaCost::generic(5).into(),
+            ));
+    }
+    state.players[0].mana_pool.mana = vec![
+        crate::types::mana::ManaUnit::new(
+            crate::types::mana::ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![]
+        );
+        3
+    ];
+    exiled
+}
+
+/// Serde both-forms pin for the grant provenance: the default `Alternative`
+/// stays off the wire (every pre-provenance grant deserializes to it), while
+/// `NormalCost` is carried explicitly.
+#[test]
+fn exile_grant_cost_provenance_serde_forms() {
+    let free = free_cast_grant(PlayerId(0));
+    let json = serde_json::to_string(&free).expect("serialize");
+    assert!(
+        !json.contains("cost_provenance"),
+        "the Alternative default must stay off the wire (legacy form): {json}"
+    );
+    let back: crate::types::ability::CastingPermission =
+        serde_json::from_str(&json).expect("deserialize legacy form");
+    assert_eq!(back, free);
+
+    let normal = normal_cost_grant(PlayerId(0), ManaCost::generic(5));
+    let json = serde_json::to_string(&normal).expect("serialize");
+    assert!(
+        json.contains("cost_provenance"),
+        "NormalCost provenance must be carried explicitly: {json}"
+    );
+    let back: crate::types::ability::CastingPermission =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, normal);
+}
+
+/// CR 702.168b + CR 118.9a (#7948 round 3, `CardPlayMode::Cast`): a
+/// NORMAL-cost CastFromZone grant is a normal cast route — disguise may ride
+/// it. With the printed {5} unaffordable and {3} floating, the GameAction
+/// cast auto-routes face down, charges the {3}, and enters face down.
+#[test]
+fn a_normal_cost_cast_grant_lets_disguise_cast_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_disguiser_with_three_floating(&mut state, player);
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(normal_cost_grant(player, ManaCost::generic(5)));
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    runner.cast(exiled).resolve();
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(obj.zone, Zone::Battlefield, "the granted cast must succeed");
+    assert!(
+        obj.face_down,
+        "the disguise face-down cast must be reachable via the normal-cost grant"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        0,
+        "the {{3}} face-down cost is charged"
+    );
+}
+
+/// CR 702.168b + CR 305.1 (#7948 round 3, `CardPlayMode::Play`): the
+/// Play-mode shape installs the same normal-cost grant PLUS the land/look
+/// companion — the companion must not block the disguise route the grant
+/// legally provides.
+#[test]
+fn a_normal_cost_play_grant_with_companion_lets_disguise_cast_face_down() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let exiled = exiled_disguiser_with_three_floating(&mut state, player);
+    {
+        let obj = state.objects.get_mut(&exiled).unwrap();
+        obj.casting_permissions
+            .push(normal_cost_grant(player, ManaCost::generic(5)));
+        obj.casting_permissions
+            .push(play_from_exile_grant(player, true));
+    }
+
+    let mut runner = crate::game::scenario::GameRunner::from_state(state);
+    runner.cast(exiled).resolve();
+    let obj = &runner.state().objects[&exiled];
+    assert_eq!(obj.zone, Zone::Battlefield, "the granted cast must succeed");
+    assert!(
+        obj.face_down,
+        "the companion must not block the normal-cost grant's disguise route"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.mana.len(),
+        0,
+        "the {{3}} face-down cost is charged"
+    );
+}
+
 /// Free-cast grant permission as `cast_from_zone` installs it (Dauthi-class).
 fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission {
     crate::types::ability::CastingPermission::ExileWithAltCost {
+        cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
         cost: ManaCost::zero(),
         cast_transformed: false,
         constraint: None,
@@ -51518,6 +51668,7 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
             constraint: None,
@@ -51910,6 +52061,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::zero(),
                 cast_transformed: true,
                 constraint: None,
@@ -52043,6 +52195,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
         ));
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::SelfManaCost,
                 cast_transformed: false,
                 constraint: None,
@@ -52062,6 +52215,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
             });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
                 cost: ManaCost::SelfManaCost,
                 cast_transformed: false,
                 constraint: None,

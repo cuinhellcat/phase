@@ -3102,6 +3102,27 @@ pub(crate) fn effective_spell_keyword_kinds_for(
     kinds
 }
 
+/// CR 702.168b + CR 118.9a: does `obj` carry an `ExileWithAltCost` grant
+/// whose cost is the card's own printed cost restated (`NormalCost`
+/// provenance) and that supports `player`'s cast? Such a grant is a
+/// normal-cost route — the face-down {3} is then the sole alternative
+/// applied to the spell.
+fn normal_cost_grant_supports_cast(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    obj.casting_permissions.iter().any(|p| {
+        matches!(
+            p,
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+                ..
+            }
+        ) && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+    })
+}
+
 /// Check if an object has any permission allowing it to be cast from exile.
 /// Uses explicit match arms (not `matches!`) so the compiler catches new variants.
 ///
@@ -3159,8 +3180,20 @@ fn has_exile_cast_permission(
             crate::types::ability::CastingPermission::ExileWithEnergyCost => {
                 !face_down && obj.owner == player
             }
-            crate::types::ability::CastingPermission::ExileWithAltCost { .. }
-            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost_provenance, ..
+            } => {
+                // CR 702.168b + CR 118.9a: a `NormalCost` grant restates the
+                // card's own printed cost — a normal cast route that admits
+                // the face-down cast; an `Alternative` grant does not.
+                (!face_down
+                    || matches!(
+                        cost_provenance,
+                        crate::types::ability::ExileGrantCostProvenance::NormalCost
+                    ))
+                    && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+            }
+            crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
                 !face_down && exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
             }
             crate::types::ability::CastingPermission::PlayFromExile { .. } => false,
@@ -3804,20 +3837,25 @@ fn selected_object_cast_permission_index(
             });
     }
 
-    let selected_alt_cost = matches!(
-        selected_variant,
-        None | Some(CastingVariant::Normal | CastingVariant::Suspend)
-    )
-    .then(|| {
-        obj.casting_permissions
+    let selected_alt_cost = match selected_variant {
+        None | Some(CastingVariant::Normal | CastingVariant::Suspend) => obj
+            .casting_permissions
             .iter()
             .enumerate()
             .find_map(|(index, permission)| {
                 exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                     .then_some(CastingPermissionIndex(index))
-            })
-    })
-    .flatten();
+            }),
+        // CR 702.168b + CR 118.9a: the face-down cast never elects an
+        // `ExileWithAltCost` slot — even a `NormalCost` grant only lends zone
+        // authority (`has_exile_cast_permission`), while the cast's cost is
+        // the face-down {3}; electing the slot would let cost preparation
+        // substitute the grant's restated cost for the {3}. Named limit: a
+        // `single_use` normal-cost grant is therefore not consumed by a
+        // face-down cast through it.
+        Some(CastingVariant::FaceDown) => None,
+        _ => None,
+    };
 
     // CR 601.2a + CR 118.9a: A PlayFromExile grant supplies zone authority,
     // independently of the card-native casting method chosen for the spell
@@ -6432,8 +6470,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     // Lurrus-class graveyard permissions, top-of-library play) admit every
     // variant: there the face-down {3} is the single alternative applied.
     let face_down_variant = variant_override == Some(CastingVariant::FaceDown);
-    let castable_zone = (!face_down_variant
-        && (has_unowned_exile_permission || has_during_resolution_alt_cost))
+    let castable_zone = ((has_unowned_exile_permission || has_during_resolution_alt_cost)
+        && (!face_down_variant || normal_cost_grant_supports_cast(state, obj, player)))
         || has_object_tagged_play_permission
         || (obj.owner == player
             && (obj.zone == Zone::Hand
@@ -6445,8 +6483,9 @@ fn prepare_spell_cast_with_variant_override_inner(
                     && obj.is_signature_spell()
                     && oathbreaker_on_battlefield(state, player))
                 || has_madness
-                || (!face_down_variant
-                    && (has_graveyard_cast_keyword || has_mayhem || has_graveyard_alt_cost))
+                || ((has_graveyard_cast_keyword || has_mayhem || has_graveyard_alt_cost)
+                    && (!face_down_variant
+                        || normal_cost_grant_supports_cast(state, obj, player)))
                 || has_graveyard_permission
                 || has_top_of_library_permission));
     if !castable_zone {
@@ -11530,6 +11569,16 @@ pub(super) fn initiate_cast_during_resolution(
     // Pickpocket). `AlternativeMana` charges a specific explicit mana cost
     // borrowed from a keyword (The Face of Boe's suspend cost) and pauses for
     // manual payment at that cost rather than the card's printed cost.
+    // CR 118.9a: `FullCost` restates the card's own printed cost — a normal
+    // cast; `Free` / `AlternativeMana` substitute it (alternative costs).
+    let cost_provenance = if matches!(
+        &cost,
+        crate::types::ability::ResolutionCastCost::FullCost { .. }
+    ) {
+        crate::types::ability::ExileGrantCostProvenance::NormalCost
+    } else {
+        crate::types::ability::ExileGrantCostProvenance::Alternative
+    };
     let (perm_cost, mana_spend_permission, payment_mode) = match cost {
         crate::types::ability::ResolutionCastCost::Free => {
             (ManaCost::zero(), None, CastPaymentMode::Auto)
@@ -11566,6 +11615,7 @@ pub(super) fn initiate_cast_during_resolution(
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: perm_cost,
+                cost_provenance,
                 cast_transformed,
                 constraint,
                 granted_to: Some(player),

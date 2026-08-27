@@ -5462,6 +5462,9 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::ExileWithAltCost {
                         cost,
+                        // CR 118.9a: the airbend cost substitutes the mana cost.
+                        cost_provenance:
+                            crate::types::ability::ExileGrantCostProvenance::Alternative,
                         cast_transformed: false,
                         constraint: None,
                         // CR 611.2a: airbend grants cast permission to each
