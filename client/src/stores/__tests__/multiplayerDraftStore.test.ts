@@ -23,6 +23,7 @@ import {
   type DraftIntergameCommand,
 } from "../../services/intergameCommandLedger";
 import { useAppNotificationStore } from "../../stores/appToastStore";
+import { useGameStore } from "../../stores/gameStore";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -72,6 +73,49 @@ const mockGuestAdapter = {
   currentView: null,
 };
 
+const wasmMatchAdapterMock = vi.hoisted(() => {
+  let boundConcede: (() => void) | undefined;
+  const adapter = {
+    supportsMatchConcede: undefined as true | undefined,
+    sendMatchConcede: undefined as (() => void) | undefined,
+    bindMatchConcede: vi.fn((run: () => void) => {
+      boundConcede = run;
+      adapter.supportsMatchConcede = true;
+      adapter.sendMatchConcede = () => boundConcede?.();
+    }),
+    initialize: vi.fn(async () => {}),
+    initializeGame: vi.fn(async () => ({ log_entries: [] })),
+    getSnapshot: vi.fn(async () => ({
+      seq: 1,
+      state: { waiting_for: { type: "Priority", data: {} } },
+      legalResult: {
+        actions: [],
+        autoPassRecommended: false,
+        endContinuousEffectOffers: [],
+        manaPaymentShortcutActions: [],
+        spellCosts: {},
+        legalActionsByObject: {},
+      },
+    })),
+    dispose: vi.fn(),
+  };
+  return { adapter, WasmAdapter: vi.fn(() => adapter), reset: () => {
+    boundConcede = undefined;
+    adapter.supportsMatchConcede = undefined;
+    adapter.sendMatchConcede = undefined;
+    adapter.bindMatchConcede.mockClear();
+    adapter.initialize.mockClear();
+    adapter.initializeGame.mockClear();
+    adapter.getSnapshot.mockClear();
+    adapter.dispose.mockClear();
+  } };
+});
+
+const matchLoopMock = vi.hoisted(() => ({
+  controller: { start: vi.fn(), stop: vi.fn(), dispose: vi.fn() },
+  create: vi.fn(),
+}));
+
 vi.mock("../../adapter/draftPodHostAdapter", () => ({
   DraftPodHostAdapter: vi.fn().mockImplementation(function () {
     return { ...mockHostAdapter };
@@ -82,6 +126,17 @@ vi.mock("../../adapter/draftPodGuestAdapter", () => ({
   DraftPodGuestAdapter: vi.fn().mockImplementation(function () {
     return { ...mockGuestAdapter };
   }),
+}));
+
+vi.mock("../../adapter/wasm-adapter", () => ({
+  WasmAdapter: wasmMatchAdapterMock.WasmAdapter,
+}));
+
+vi.mock("../../game/controllers/gameLoopController", () => ({
+  createGameLoopController: (...args: unknown[]) => {
+    matchLoopMock.create(...args);
+    return matchLoopMock.controller;
+  },
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -139,6 +194,11 @@ describe("multiplayerDraftStore", () => {
     capturedGuestEventHandler = null;
     useMultiplayerDraftStore.getState().reset();
     useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+    wasmMatchAdapterMock.reset();
+    matchLoopMock.create.mockClear();
+    matchLoopMock.controller.start.mockClear();
+    matchLoopMock.controller.stop.mockClear();
+    matchLoopMock.controller.dispose.mockClear();
   });
 
   afterEach(async () => {
@@ -978,6 +1038,40 @@ describe("multiplayerDraftStore", () => {
         data: { play_first: true },
       }, 0);
       expect(useAppNotificationStore.getState().notification).toBeNull();
+    });
+  });
+
+  describe("bot-match concede", () => {
+    it("binds the pod match concession through startMatch and concedes the local game seat", async () => {
+      const dispatch = vi.fn(async () => {});
+      useGameStore.setState({ dispatch });
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "bot-match-1",
+          round: 1,
+          localSeat: 0,
+          botSeat: 4,
+          botName: "Chandra",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1", matchId: "bot-match-1", round: 1,
+            sessionKey: "session-1", lease: "lease-1", nonce: "nonce-1",
+            revision: 0, matchAuthoritySeat: 0,
+          },
+        },
+      });
+
+      await expect(useMultiplayerDraftStore.getState().startMatch()).resolves.toBe("draft-match-bot-match-1");
+
+      expect(wasmMatchAdapterMock.adapter.supportsMatchConcede).toBe(true);
+      wasmMatchAdapterMock.adapter.sendMatchConcede?.();
+      expect(dispatch).toHaveBeenCalledWith({ type: "Concede", data: { player_id: 0 } });
     });
   });
 
