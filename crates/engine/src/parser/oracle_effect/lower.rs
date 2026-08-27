@@ -4488,6 +4488,28 @@ pub(crate) fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, S
     strip_each_player_subject(text)
 }
 
+/// CR 101.4 + CR 608.2c + CR 109.5: Strip a prepositional player-scoped
+/// imperative, map its player set to `PlayerFilter`, and preserve the ordinary
+/// imperative body for the per-player resolution that follows. This is the narrow
+/// form that must precede generic `for each` quantity parsing; subject-form player
+/// scopes retain their existing route.
+pub(super) fn strip_prepositional_player_scope_subject(
+    text: &str,
+) -> (Option<PlayerFilter>, String) {
+    let lower = text.to_lowercase();
+    let scope_rest = nom_on_lower(text, &lower, |i| {
+        alt((
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
+        ))
+        .parse(i)
+    });
+    scope_rest.map_or_else(
+        || (None, text.to_string()),
+        |(scope, rest)| (Some(scope), rest.to_string()),
+    )
+}
+
 /// Parse the player anchor in an "each player other than ⟨anchor⟩" subject into
 /// the `PlayerFilter` whose population is excluded. Composable `alt()` so future
 /// anchors ("you", "that player") slot in without new `PlayerFilter` variants.
@@ -4549,6 +4571,8 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
                 },
             ),
             value(PlayerFilter::All, tag("each player ")),
+            value(PlayerFilter::Opponent, tag("for each opponent, you ")),
+            value(PlayerFilter::All, tag("for each player, you ")),
             // CR 101.4 + CR 608.2c: comma-prefixed per-player imperative scope —
             // "For each player, <imperative> ... that player controls" (Curse of
             // Fenric I). The more-specific "for each player, you choose"/"choose
@@ -13601,7 +13625,9 @@ mod strip_optional_effect_prefix_tests {
 /// lift helper, and the wrapper-vs-`_ref` non-domination guard.
 #[cfg(test)]
 mod dq_d_player_set_lift_tests {
-    use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
+    use super::{
+        for_each_repeatable_repeat_for, strip_for_each_repeat_suffix, strip_player_scope_subject,
+    };
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
     use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
 
@@ -14005,6 +14031,18 @@ mod dq_d_player_set_lift_tests {
             parse_each_of_target_distribution("up to two other targets"),
             None,
             "bare-plural `other targets` is intentionally NOT accepted"
+        );
+    }
+
+    #[test]
+    fn prepositional_player_scope_preserves_opponent_iteration() {
+        let (scope, body) = strip_player_scope_subject(
+            "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.",
+        );
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
+        assert_eq!(
+            body,
+            "create a 2/2 black Zombie creature token unless they sacrifice a creature."
         );
     }
 }
