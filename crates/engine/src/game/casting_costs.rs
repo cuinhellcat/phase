@@ -12065,9 +12065,9 @@ pub(super) fn max_x_value_excluding(
     else {
         return formula_max;
     };
-    if pending.base_cost.is_none() {
+    let Some(base_cost) = pending.base_cost.as_ref() else {
         return formula_max;
-    }
+    };
 
     // CR 601.2b / CR 601.2f: The concrete total is monotonic non-decreasing in X.
     // `concretize_x` adds `x * x_count` generic; non-floor and target-dependent
@@ -12083,23 +12083,21 @@ pub(super) fn max_x_value_excluding(
     // order is safe. The explicit `!probe(0)` early return below reproduces the
     // old linear loop's `saturating_sub(1)` floor exactly: when even X=0
     // overshoots, the cap is 0 (not an underflow).
-    // CR 601.2b: the announced X can also live in an ADDITIONAL cost that was
-    // merged into `pending.cost` when it was declared (kicker {X}: Thieving
-    // Skydiver, Toxic Deluge, Hatred, …). The recompute above reads
-    // `pending.base_cost`, which carries the spell's own printed mana cost and
-    // not that additional {X}, so for a spell whose printed cost has no X the
-    // recomputed total does not move with X at all — the gate is constant true
-    // and bounds nothing. `formula_max` already subtracted the whole fixed
-    // portion of `pending.cost` (the spell's own pips included) from the
-    // available mana, so it is the honest cap in exactly that case.
-    //
-    // Not covered: cost reductions and floors are applied to the recomputed
-    // spell total only, so they do not widen or clamp an additional cost's X.
-    largest_x_satisfying(formula_max, |x| {
+    // CR 601.2b: the announced X can also live only in an ADDITIONAL cost
+    // (kicker {X}: Thieving Skydiver, Toxic Deluge, Hatred, …). The recompute
+    // above reads `pending.base_cost`, so its predicate does not depend on X
+    // when the printed cost has none. In that shape `formula_max`, calculated
+    // from the complete pending cost, is the finite authority; use the existing
+    // bounded search instead of an unbounded exponential probe.
+    let predicate = |x| {
         super::casting::recompute_pending_mana_total(state, player, pending, Some(x)).mana_value()
             <= available
-    })
-    .unwrap_or(formula_max)
+    };
+    if cost_has_x(base_cost) {
+        largest_x_satisfying(formula_max, predicate)
+    } else {
+        largest_x_satisfying_at_most(formula_max, predicate)
+    }
 }
 
 /// Largest `x` for which `predicate(x)` holds, given `predicate` is a monotone
@@ -12110,19 +12108,13 @@ pub(super) fn max_x_value_excluding(
 ///
 /// `formula_max` is only a starting estimate for the exponential probe;
 /// correctness does NOT depend on it (the true cap can be lower — Trinisphere
-/// floor — or higher — reductions exceeding the fixed generic). Returns
-/// `Some(0)` when even `predicate(0)` is false, reproducing the linear ascent's
+/// floor — or higher — reductions exceeding the fixed generic). Returns `0`
+/// when even `predicate(0)` is false, reproducing the linear ascent's
 /// `saturating_sub(1)` floor at the `X=0` boundary. O(log cap) evaluations of
 /// `predicate` versus the linear scan's O(cap); identical result by monotonicity.
-///
-/// Returns `None` when the predicate holds for every `u32`, i.e. it bounds
-/// nothing and this search has no answer to give. A monotone gate is allowed to
-/// be *constant* true, and the caller — not this function — owns what to do
-/// then: `saturating_mul` pins `hi` at `u32::MAX`, so a `while predicate(hi)`
-/// ascent would spin there forever rather than terminate.
-fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> Option<u32> {
+fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> u32 {
     if !predicate(0) {
-        return Some(0);
+        return 0;
     }
 
     // Exponential probe: grow `hi` off `formula_max` until `predicate(hi)` is
@@ -12131,13 +12123,14 @@ fn largest_x_satisfying(formula_max: u32, predicate: impl Fn(u32) -> bool) -> Op
     // overflow; `max(saturating_add(1))` guards `hi == 0`.
     let mut hi = formula_max.max(1);
     while predicate(hi) {
+        debug_assert_ne!(hi, u32::MAX, "callers must bound constant-true gates");
         if hi == u32::MAX {
-            return None;
+            return u32::MAX;
         }
         hi = hi.saturating_mul(2).max(hi.saturating_add(1));
     }
 
-    Some(largest_x_satisfying_at_most(hi - 1, predicate))
+    largest_x_satisfying_at_most(hi - 1, predicate)
 }
 
 /// Largest `x` not exceeding `max` for which a monotone true-prefix predicate
@@ -14253,30 +14246,10 @@ mod tests {
         }
     }
 
-    /// A gate that never closes bounds nothing, and the search must say so
-    /// instead of ascending forever. This is the shape an additional cost's
-    /// `{X}` produces (kicker `{X}` on a spell whose printed cost has no X):
-    /// the recomputed spell total does not move with X, so the gate is constant
-    /// true. `linear_x_reference` is deliberately not consulted here — it would
-    /// not terminate either, which is precisely why the reference cannot answer
-    /// this case.
-    #[test]
-    fn largest_x_satisfying_reports_an_unbounded_gate() {
-        assert_eq!(largest_x_satisfying(0, |_| true), None);
-        assert_eq!(largest_x_satisfying(u32::MAX, |_| true), None);
-        // A gate that closes at the very top is still bounded, and the answer
-        // is the last X that fits — not `None`.
-        assert_eq!(
-            largest_x_satisfying(0, |x| x < u32::MAX),
-            Some(u32::MAX - 1),
-        );
-    }
-
     /// `largest_x_satisfying` (exponential probe + bisection) must return the
     /// byte-identical X cap of the old linear ascent for every monotone cost
-    /// shape that is actually bounded. Each shape models
-    /// `concrete_cost_for_x(x).mana_value()` as a monotone-non-decreasing
-    /// function of X, then asserts the two searches agree.
+    /// shape. Each shape models `concrete_cost_for_x(x).mana_value()` as a
+    /// monotone-non-decreasing function of X, then asserts the two searches agree.
     #[test]
     fn largest_x_satisfying_matches_linear_reference() {
         // cost(x) = max(fixed + x * x_count - reduction, floor); predicate is
@@ -14298,7 +14271,7 @@ mod tests {
                             let formula_max = available.saturating_sub(fixed) / x_count;
                             assert_eq!(
                                 largest_x_satisfying(formula_max, predicate),
-                                Some(linear_x_reference(predicate)),
+                                linear_x_reference(predicate),
                                 "mismatch at available={available} fixed={fixed} \
                                  x_count={x_count} reduction={reduction} floor={floor}",
                             );

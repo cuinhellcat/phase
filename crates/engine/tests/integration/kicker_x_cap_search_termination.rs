@@ -19,8 +19,9 @@
 //! test with a message instead of hanging CI or aborting the process on a
 //! stack overflow.
 //!
-//! REVERT DISCRIMINATOR: `paying_a_kicker_x_reaches_a_finite_x_cap`. Restore the
-//! unguarded probe and this test times out on the deadline below.
+//! REVERT DISCRIMINATOR: `paying_a_kicker_x_reaches_a_finite_x_cap`. Route
+//! additional-cost-only X through the unbounded probe and this test times out
+//! on the deadline below.
 
 use std::sync::mpsc;
 use std::time::Duration;
