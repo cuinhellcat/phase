@@ -99,7 +99,7 @@ const wasmMatchAdapterMock = vi.hoisted(() => {
     })),
     dispose: vi.fn(),
   };
-  return { adapter, WasmAdapter: vi.fn(() => adapter), reset: () => {
+  return { adapter, WasmAdapter: vi.fn(function () { return adapter; }), reset: () => {
     boundConcede = undefined;
     adapter.supportsMatchConcede = undefined;
     adapter.sendMatchConcede = undefined;
