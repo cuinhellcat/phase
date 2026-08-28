@@ -16802,8 +16802,22 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // (`parse_each_of_target_distribution`), so it is the primary authority for
     // the DealDamage fixup below.
     let pending_damage_multi_target = ctx.pending_damage_multi_target.take();
+    // CR 611.2a: route the stripped trailing duration through the shared
+    // `with_clause_duration` building block instead of assigning `clause.duration`
+    // alone. The effects `with_clause_duration` patches (`CastFromZone`,
+    // `GenericEffect`, `GrantCastingPermission`, `BecomeCopy`) carry the
+    // permission's lifetime INSIDE the effect — `record_lingering_permissions`
+    // and the
+    // `is_lingering_cast_from_zone` optionality gate both read
+    // `Effect::CastFromZone.duration`, never the outer `AbilityDefinition`. A bare
+    // outer assignment left the effect's own slot empty, so a lasting play
+    // permission ("you may play that card for as long as you control ~") was
+    // classified as a one-shot resolution offer and its "may" became an
+    // `OptionalEffectChoice` whose decline destroyed the grant.
     if clause.duration.is_none() {
-        clause.duration = duration;
+        if let Some(duration) = duration {
+            clause = with_clause_duration(clause, duration);
+        }
     }
     // CR 611.2a: A during-resolution cast happens AS the ability resolves and
     // cannot carry a lingering play-window duration. When the anaphor branch set

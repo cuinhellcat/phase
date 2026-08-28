@@ -536,15 +536,25 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
             {
                 super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
-            } else if cursor.optional
-                && super::lower::is_exile_until_cast_bottom_cleanup(
-                    &head_effect,
-                    &cursor.effect,
-                    &next.effect,
-                )
-            {
+            } else if super::lower::is_exile_until_cast_bottom_cleanup(
+                &head_effect,
+                &cursor.effect,
+                &next.effect,
+            ) {
+                // CR 608.2c + CR 701.13a: "the rest of those exiled cards" excludes
+                // the hit whether the cast is a resolution-time offer or a standing
+                // permission — the rewrite is a property of the WORDING, not of the
+                // cast's optionality, so it runs either way.
                 super::lower::normalize_exile_until_cast_bottom_cleanup(&mut next.effect);
-                cursor.else_ability = Some(Box::new(next.clone()));
+                // CR 608.2d: the decline branch exists only where there is a
+                // decline — a resolution-time optional cast. A lingering permission
+                // (The Day of the Doctor: "for as long as this Saga remains on the
+                // battlefield") is never accepted or declined as the ability
+                // resolves, so stashing an else branch would publish a second,
+                // unreachable copy of the cleanup to the chain scanners.
+                if cursor.optional {
+                    cursor.else_ability = Some(Box::new(next.clone()));
+                }
             }
             cursor.sub_ability = Some(Box::new(next));
             break;

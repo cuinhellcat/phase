@@ -3423,18 +3423,23 @@ fn normalize_linked_exile_cast_pair(
     }
     // CR 608.2c + CR 701.13a: Jodah, the Unifier — the head-aware companion
     // gate. `prev` is `ExileFromTopUntil { NextMatches }`; `chain` is its
-    // optional `CastFromZone { ParentTarget }` with the bottom cleanup already
-    // nested beneath it. Rewrite that cleanup to the linked exile set and make
-    // it the decline branch, preserving the hit in exile when the cast is
-    // declined.
-    if chain.optional {
-        if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
-            if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
-                if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
-                    normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
+    // `CastFromZone { ParentTarget }` with the bottom cleanup already nested
+    // beneath it. Rewrite that cleanup to the linked exile set, preserving the
+    // hit in exile.
+    if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
+        if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
+            if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
+                // The "the rest of those exiled cards" rewrite is a property of
+                // the WORDING, so it runs for a standing permission too.
+                normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
+                // CR 608.2d: only a resolution-time offer has a decline branch. A
+                // lingering permission (The Day of the Doctor) is never declined as
+                // the ability resolves, so an else branch there would publish a
+                // second, unreachable copy of the cleanup to the chain scanners.
+                if chain.optional {
                     chain.else_ability = Some(Box::new(cleanup_mut.clone()));
-                    return true;
                 }
+                return true;
             }
         }
     }
