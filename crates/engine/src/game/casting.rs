@@ -4697,42 +4697,55 @@ pub(crate) fn exile_static_permission_extra_cost(
 }
 
 /// CR 601.2a: The `ExileCastPermission` source `exiled_id`'s cast commits to.
-/// Prefers the source already recorded on a `CastingVariant::ExilePermission`
-/// (`variant`); otherwise re-derives it from the same first-match scan that
-/// stamps the offered candidate (`build_cast_offers` / candidate generation), so
-/// legality checks running before variant election (`can_cast_prepared_now`,
-/// `effective_spell_cost`) bind to the permission the cast will commit to.
 ///
-/// Returns `None` when no `ExileCastPermission` static authorizes the cast — an
-/// impulse `PlayFromExile` or other on-object exile permission carries no static
-/// extra-cost rider, so the per-source binding is skipped and no rider applies.
+/// Reads the elected authority in the order the cast actually elected it, and
+/// only re-derives when nothing was elected:
+///
+/// 1. the source recorded on a `CastingVariant::ExilePermission` (`variant`) —
+///    this cast IS that static's cast;
+/// 2. `elected_object_permission` — the cast committed to an object-attached
+///    grant instead (impulse `PlayFromExile`, `ExileWithAltCost`, …), so no
+///    static is its authority and none of their riders apply. A battlefield
+///    static that happens to authorize the same card is not the route taken;
+/// 3. otherwise the same first-match scan that stamps the offered candidate
+///    (`build_cast_offers` / candidate generation), so legality checks running
+///    before variant election (`can_cast_prepared_now`, `effective_spell_cost`)
+///    bind to the permission the cast will commit to.
+///
+/// Step 2 is the reason this takes the index rather than deriving it: with
+/// an overlapping object grant and battlefield static, the scan below returns
+/// the static and `exile_static_permission_extra_cost` then imposes an
+/// `Additional` rider the cast never accepted. Casts serialized before
+/// `CastingPermissionIndex` existed pass `None` here and keep the old scan.
 pub(crate) fn elected_exile_permission_source(
     state: &GameState,
     player: PlayerId,
     exiled_id: ObjectId,
     variant: Option<CastingVariant>,
+    elected_object_permission: Option<CastingPermissionIndex>,
 ) -> Option<ObjectId> {
-    variant
-        .and_then(CastingVariant::exile_permission_source)
-        .or_else(|| {
-            // CR 118.9a + CR 601.2a: an alternative-cost-rider cast (face
-            // down, Evoke, Bestow, …) reselects with the SAME eligibility
-            // predicate its admission used — the ordinary first-match scan
-            // could elect an earlier ineligible source (Valgavoth alternative
-            // rider) and charge ITS cost treatment, while admission was
-            // granted by a later eligible normal-cost source.
-            if variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider) {
-                exile_cast_permission_source_matching(
-                    state,
-                    player,
-                    exiled_id,
-                    static_source_is_normal_cost_authority,
-                )
-                .map(|(source, _, _)| source)
-            } else {
-                exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
-            }
-        })
+    if let Some(source) = variant.and_then(CastingVariant::exile_permission_source) {
+        return Some(source);
+    }
+    if elected_object_permission.is_some() {
+        return None;
+    }
+    // CR 118.9a + CR 601.2a: an alternative-cost-rider cast (face down, Evoke,
+    // Bestow, …) reselects with the SAME eligibility predicate its admission
+    // used — the ordinary first-match scan could elect an earlier ineligible
+    // source (Valgavoth alternative rider) and charge ITS cost treatment, while
+    // admission was granted by a later eligible normal-cost source.
+    if variant.is_some_and(CastingVariant::is_independent_alternative_cost_rider) {
+        exile_cast_permission_source_matching(
+            state,
+            player,
+            exiled_id,
+            static_source_is_normal_cost_authority,
+        )
+        .map(|(source, _, _)| source)
+    } else {
+        exile_cast_permission_source(state, player, exiled_id).map(|(source, _, _)| source)
+    }
 }
 
 fn graveyard_permission_sources(
@@ -6705,8 +6718,13 @@ fn prepare_spell_cast_with_variant_override_inner(
                 // variant. This keeps the zeroing decision keyed to the elected
                 // permission so a second active permission for the same exiled
                 // spell can never substitute its cost treatment.
-                let elected_source =
-                    elected_exile_permission_source(state, player, object_id, variant_override)?;
+                let elected_source = elected_exile_permission_source(
+                    state,
+                    player,
+                    object_id,
+                    variant_override,
+                    casting_permission_index,
+                )?;
                 exile_static_permission_extra_cost(state, player, object_id, elected_source)
                     .and_then(|extra| {
                         matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
@@ -14980,6 +14998,7 @@ fn can_cast_prepared_now_with_probe(
                 player,
                 prepared.object_id,
                 Some(prepared.casting_variant),
+                prepared.casting_permission_index,
             )
             .and_then(|source| {
                 exile_static_permission_extra_cost(state, player, prepared.object_id, source)

@@ -45383,6 +45383,161 @@ fn an_unelected_energy_permission_does_not_zero_an_evoke_election() {
     );
 }
 
+/// CR 601.2a (#7981 review round 2): an exiled card can be authorized by an
+/// object-attached `PlayFromExile` grant while a battlefield static ALSO
+/// authorizes it. The cast commits to the grant it elected; the static is not
+/// its route, so the static's `Additional` extra cost must not be imposed.
+///
+/// The legality flip is the discriminator: the player is at 0 life, so the
+/// static's pay-life rider is unpayable. With the elected grant carried through
+/// the cost path the cast is legal; re-deriving the authority by scanning finds
+/// the static and makes it illegal.
+#[test]
+fn an_elected_object_grant_does_not_inherit_an_overlapping_static_extra_cost() {
+    use crate::types::statics::{CastCostMode, CastExtraCost};
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    // 1 life, a 2-life rider: unpayable, and unlike `life = 0` it is a state a
+    // player can actually hold priority in (CR 704.5a).
+    state.players[0].life = 1;
+
+    // A battlefield static that would also authorize the cast, carrying an
+    // ADDITIONAL pay-life rider the player cannot afford.
+    let static_source = {
+        use crate::types::ability::StaticDefinition;
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(
+            &mut state,
+            card_id,
+            player,
+            "Overlapping Static".to_string(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: Some(CastExtraCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+                mode: CastCostMode::Additional,
+            }),
+            enters_with_counter: None,
+        })
+        .affected(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        source
+    };
+
+    // The card's OWN impulse grant — the authority this cast elects.
+    let exiled = add_exiled_card(&mut state, player, "Impulsed Bear");
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_raise(player, None));
+    // The static's `ThisTurn` pool must actually contain the card, or it would
+    // not authorize it and the test would measure nothing.
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(static_source, vec![exiled]);
+    // Enough mana for the printed {1}: only the unelected rider can block it.
+    add_mana(&mut state, player, ManaType::Colorless, 1);
+
+    // Reach guard: the overlapping static really does authorize this card, so
+    // the assertion below is about which authority was elected, not about a
+    // static that never applied.
+    assert!(
+        exile_static_permission_extra_cost(&state, player, exiled, static_source).is_some(),
+        "fixture must have an overlapping static that carries an extra-cost rider",
+    );
+
+    assert!(
+        can_cast_object_now(&state, player, exiled),
+        "a cast elected through the card's own PlayFromExile grant must not owe the \
+         unelected static's additional pay-life cost (CR 601.2f)",
+    );
+
+    // Negative control: strip the elected object grant and the SAME fixture must
+    // become illegal, because then the static IS the authority and its rider is
+    // owed. Without this the assertion above could pass on a fixture where the
+    // rider was never consulted at all.
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .casting_permissions
+        .clear();
+    assert!(
+        !can_cast_object_now(&state, player, exiled),
+        "with no object grant the static is the elected authority and its unpayable \
+         rider must block the cast — otherwise the fixture proves nothing",
+    );
+}
+
+/// CR 601.2f + CR 118.9 (#7981 review round 2): the same provenance rule on the
+/// COST path, with the only printed member of the class.
+///
+/// Measured over `client/public/card-data.json`: 13 cards carry an
+/// `ExileCastPermission` static and exactly one of them carries an `extra_cost`
+/// — Valgavoth, Terror Eater, in `Alternative` mode. `Alternative` is the shape
+/// the legality projection above cannot see (`alt_cost_from_exile` reads only
+/// that mode), so this test is what covers the seam the review named.
+///
+/// With the card's own `PlayFromExile` grant elected, Valgavoth's alternative
+/// pay-life cost is not this cast's route: the printed {2} stays due and an
+/// empty pool cannot pay it. Reverting the provenance makes the scan find
+/// Valgavoth, zero the mana cost, and the cast becomes free.
+#[test]
+fn an_elected_object_grant_does_not_inherit_valgavoths_alternative_cost() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    state.players[0].life = 20;
+    let source = add_valgavoth_exile_cast_source(&mut state, player);
+    let spell = add_linked_two_generic_sorcery(&mut state, player, source, "Exiled Big Spell");
+
+    // Reach guard: without an object grant this fixture is the established
+    // Valgavoth case — the static authorizes and zeroes the {2}.
+    assert!(
+        effective_spell_cost(&state, player, spell)
+            .expect("the linked spell must have an effective cost")
+            .is_without_paying_mana(),
+        "fixture must be the working Valgavoth case before the object grant is added",
+    );
+
+    // Now the card also carries its own impulse grant, which is what the cast
+    // elects by default.
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .casting_permissions
+        .push(play_from_exile_raise(player, None));
+
+    let effective = effective_spell_cost(&state, player, spell)
+        .expect("the elected object grant must still authorize the cast");
+    assert!(
+        !effective.is_without_paying_mana(),
+        "an elected object grant owes the printed cost, not Valgavoth's alternative \
+         pay-life cost from a static this cast never took (CR 601.2f), got {effective:?}",
+    );
+    assert!(
+        !can_pay_cost_after_auto_tap(&state, player, spell, &effective),
+        "the printed {{2}} must remain unpayable from an empty pool",
+    );
+}
+
 /// CR 601.2a: The per-source `OncePerTurn` slot must prune the static
 /// from `spell_objects_available_to_cast` after a single cast through it
 /// this turn, then come back at turn cleanup.
