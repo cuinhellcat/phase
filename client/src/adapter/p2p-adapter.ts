@@ -1432,14 +1432,9 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       staleRetries = 0;
       const result = outcome.result;
+      await this.publishHostSnapshot(result);
       await this.broadcastStateUpdate(result.events, result.log_entries);
       this.persistAuthoritativeState();
-      this.emit({
-        type: "stateChanged",
-        snapshot: await this.wasm.getSnapshot(),
-        events: result.events,
-        logEntries: result.log_entries,
-      });
     }
   }
 
@@ -2275,6 +2270,42 @@ export class P2PHostAdapter implements EngineAdapter {
     await this.commitTerminalIfComplete(await this.wasm.getSnapshot(), revision, terminalReason);
   }
 
+  /**
+   * Emit the host's own `stateChanged` for an applied submission.
+   *
+   * Call this BEFORE `broadcastStateUpdate`, never after (#7924). Every caller
+   * runs the fan-out inside a `try`, and the fan-out can reject: per guest it
+   * awaits `wasm.getViewerSnapshot(pid)`, and it closes on
+   * `commitTerminalIfComplete` (`broadcastStateUpdateInner` above). Emitting
+   * afterwards therefore makes the host's own screen depend on work done on
+   * every guest's behalf — the host freezes on a board its own engine has
+   * already advanced.
+   *
+   * Precise about the failure that is NOT in that set: a dead guest channel
+   * is not one. `trySend` resolves `false` for a closed channel, an encode
+   * error, or a throwing `conn.send` (`network/peer.ts:69-106`), so a broken
+   * link degrades the fan-out silently rather than rejecting it. The ordering
+   * matters for the per-viewer snapshot and the terminal commit.
+   *
+   * The trade is deliberate and not symmetric: this reads one local snapshot,
+   * while the fan-out reads one per guest and then commits a terminal result.
+   * Not covered: if `getSnapshot` itself throws, the guests go unserved and
+   * stay on their last delivered state until the next successful delivery —
+   * the stale-state watchdog does not close that gap, because a guest whose
+   * adapter cache and screen are the same stale state shows no divergence.
+   *
+   * No-op under `nativeBridge`, which publishes its own revisions.
+   */
+  private async publishHostSnapshot(result: SubmitResult): Promise<void> {
+    if (this.nativeBridge) return;
+    this.emit({
+      type: "stateChanged",
+      snapshot: await this.wasm.getSnapshot(),
+      events: result.events,
+      logEntries: result.log_entries,
+    });
+  }
+
   async getState(): Promise<GameState> {
     this.assertNotDisposed();
     if (this.nativeBridge) return this.nativeBridge.getState();
@@ -2541,6 +2572,7 @@ export class P2PHostAdapter implements EngineAdapter {
           }
           return;
         }
+        let result: SubmitResult;
         try {
           // CRITICAL: pass `pid` (the session-bound PlayerId), NEVER
           // `msg.senderPlayerId`. The envelope check above already guarantees
@@ -2548,36 +2580,36 @@ export class P2PHostAdapter implements EngineAdapter {
           // tag with the authenticated session identity — the wire payload
           // is untrusted. This is the defense-in-depth that makes the engine
           // guard meaningful for P2P.
-          const result = this.nativeBridge
+          result = this.nativeBridge
             ? await this.nativeBridge.submitAction(msg.action, pid)
             : await this.wasm.submitAction(msg.action, pid);
+        } catch (err) {
+          // The engine refused the action: nothing applied, so this — and only
+          // this — is an action failure the guest must hear about.
+          const session = this.guestSessions.get(pid);
+          if (session) void this.send(session, actionFailureFrame(err));
+          break;
+        }
+        // Past here the action HAS applied. Everything left is delivery and
+        // bookkeeping, so a throw must not reach the guest as an action
+        // failure — that reports an applied action as failed and the guest's
+        // screen then disagrees with the authoritative engine (#7924).
+        try {
           if (isZeroCountDebugCreate(msg.action)) {
             const session = this.guestSessions.get(pid);
             if (session) await this.send(session, { type: "action_noop" });
             break;
           }
+          // Host screen first, then the guests (see `publishHostSnapshot`).
+          await this.publishHostSnapshot(result);
           await this.broadcastStateUpdate(result.events, result.log_entries);
-          // Emit local stateChanged so host UI updates for opponent actions —
-          // BEFORE the AI loop and persistence: the guests are already served
-          // above, so a throw in either later step must not cost the host its
-          // own update (#7836: host frozen on the mulligan-wait overlay while
-          // the guest played on).
-          if (!this.nativeBridge) {
-            this.emit({
-              type: "stateChanged",
-              snapshot: await this.wasm.getSnapshot(),
-              events: result.events,
-              logEntries: result.log_entries,
-            });
-          }
           // Wake the AI loop. After a guest's action lands, priority may have
           // shifted to an AI seat — without this, the AI never gets a turn
           // and the game stalls (same pattern as concedePlayer/host submit).
           await this.runAiLoop();
           this.persistAuthoritativeState();
         } catch (err) {
-          const session = this.guestSessions.get(pid);
-          if (session) void this.send(session, actionFailureFrame(err));
+          console.error("[P2PHost] delivery after an applied guest action failed:", err);
         }
         break;
       }
@@ -2596,25 +2628,23 @@ export class P2PHostAdapter implements EngineAdapter {
           });
           return;
         }
+        let result: SubmitResult;
         try {
-          const result = this.nativeBridge
+          result = this.nativeBridge
             ? await this.nativeBridge.submitInteraction(msg.submission, pid)
             : await this.wasm.submitInteraction(msg.submission, pid);
+        } catch (err) {
+          void this.send(session, actionFailureFrame(err));
+          break;
+        }
+        // Applied — same delivery contract as the "action" case above (#7924).
+        try {
+          await this.publishHostSnapshot(result);
           await this.broadcastStateUpdate(result.events, result.log_entries);
-          // Local emit before the fallible steps — same reasoning as the
-          // "action" case above (#7836).
-          if (!this.nativeBridge) {
-            this.emit({
-              type: "stateChanged",
-              snapshot: await this.wasm.getSnapshot(),
-              events: result.events,
-              logEntries: result.log_entries,
-            });
-          }
           await this.runAiLoop();
           this.persistAuthoritativeState();
         } catch (err) {
-          void this.send(session, actionFailureFrame(err));
+          console.error("[P2PHost] delivery after an applied guest interaction failed:", err);
         }
         break;
       }
@@ -2978,22 +3008,18 @@ export class P2PHostAdapter implements EngineAdapter {
       const result = this.nativeBridge
         ? await this.nativeBridge.submitAction(concedeAction, pid)
         : await this.wasm.submitAction(concedeAction, pid);
-      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
-      await this.runAiLoop();
-      this.persistAuthoritativeState();
-      if (!this.nativeBridge) {
-        this.emit({
-          type: "stateChanged",
-          snapshot: await this.wasm.getSnapshot(),
-          events: result.events,
-          logEntries: result.log_entries,
-        });
-      }
+      // Both host emissions precede the fan-out: the concession has applied,
+      // and a guest link failure must not hide it from the host's own screen
+      // (#7924). Order between them is unchanged — state, then the notice.
+      await this.publishHostSnapshot(result);
       this.emit(
         origin === "kick"
           ? { type: "playerKicked", playerId: pid, reason }
           : { type: "playerConceded", playerId: pid, reason },
       );
+      await this.broadcastStateUpdate(result.events, result.log_entries, reason);
+      await this.runAiLoop();
+      this.persistAuthoritativeState();
     } catch (err) {
       console.error("[P2PHost] concedePlayer failed:", err);
     }

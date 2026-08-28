@@ -1694,9 +1694,9 @@ export function GameProvider({
                 useGameStore.setState({ adapter });
               }
               processRemoteUpdate(event.snapshot, event.events, event.logEntries, event.rewindTargets).catch((err) => {
-              debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
-              resyncFromAdapterSafely("delivery rejected");
-            });
+                debugLog(`remote update failed: ${err instanceof Error ? err.message : String(err)}`);
+                resyncFromAdapterSafely("delivery rejected");
+              });
             }
             if (event.type === "gameOver") {
               useGameStore.setState({

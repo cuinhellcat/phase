@@ -74,6 +74,7 @@ const mocks = vi.hoisted(() => {
   return {
     initialize: vi.fn(async () => undefined),
     submitAction: vi.fn(async (_action: unknown) => ({ events: [] })),
+    submitInteraction: vi.fn(async (_submission: unknown) => ({ events: [] })),
     checkDeckCompatibility,
     getState,
     getLegalActions,
@@ -201,6 +202,7 @@ vi.mock("../ws-adapter", () => ({
   }),
 }));
 const mockSubmitAction = mocks.submitAction;
+const mockSubmitInteraction = mocks.submitInteraction;
 const mockCheckDeckCompatibility = mocks.checkDeckCompatibility;
 const mockGetSnapshot = mocks.getSnapshot as unknown as AsyncMockWithResolvedValueOnce;
 const mockGetViewerSnapshot = mocks.getViewerSnapshot;
@@ -282,6 +284,7 @@ vi.mock("../wasm-adapter", () => {
     initialize: mocks.initialize,
     initializeMultiplayerHostGame: mocks.initializeMultiplayerHostGame,
     submitAction: mocks.submitAction,
+    submitInteraction: mocks.submitInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
@@ -3514,5 +3517,95 @@ describe("P2P wire-protocol version gate", () => {
     expect(reconnect).toBeDefined();
     expect(reconnect!.wireProtocolVersion).toBe(WIRE_PROTOCOL_VERSION);
     adapter.dispose();
+  });
+});
+
+/**
+ * #7924: the host's own screen must not depend on the guest fan-out.
+ *
+ * `broadcastStateUpdate` awaits `getViewerSnapshot(pid)` per guest and closes
+ * on `commitTerminalIfComplete`, and every caller runs it inside a `try`. While
+ * the host's `stateChanged` came after it, either of those rejecting froze the
+ * host on a board its own engine had already advanced, and the acting guest was
+ * told an applied action had failed.
+ *
+ * Not the dead-channel case: `trySend` resolves `false` rather than rejecting
+ * (`network/peer.ts:69-106`), so a broken link degrades the fan-out silently.
+ *
+ * These tests fail if the emission is moved back after the fan-out: the
+ * scripted `getViewerSnapshot` rejection is what the ordering has to survive.
+ */
+describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
+  function failNextFanOut(): void {
+    // The fan-out's first per-guest await, and one of its two real rejection
+    // sources — the other is the terminal commit that closes the fan-out.
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(async () => {
+      throw new Error("viewer snapshot failed");
+    });
+  }
+
+  it("still updates the host and does not reject the guest's applied action", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const events: Array<{ type: string }> = [];
+    adapter.onEvent((e) => events.push(e));
+    mockSubmitAction.mockClear();
+    failNextFanOut();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    // The engine applied it,
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    // so the host's own screen must have advanced despite the fan-out,
+    expect(events.some((e) => e.type === "stateChanged")).toBe(true);
+    // and the guest must not hear that its applied action failed.
+    const sent = await guest.getSentMessages();
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+  });
+
+  it("still updates the host and does not reject the guest's applied interaction", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    const events: Array<{ type: string }> = [];
+    adapter.onEvent((e) => events.push(e));
+    mockSubmitInteraction.mockClear();
+    failNextFanOut();
+
+    await guest.simulateData({
+      type: "interaction",
+      senderPlayerId: 1,
+      submission: {},
+    });
+    await flushPromises();
+
+    expect(mockSubmitInteraction).toHaveBeenCalled();
+    expect(events.some((e) => e.type === "stateChanged")).toBe(true);
+    const sent = await guest.getSentMessages();
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
   });
 });
