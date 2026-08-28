@@ -6319,6 +6319,35 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 701.20a + CR 608.2c: A per-hit conditional keep destination (Part
+        // in Friendship's "if its mana value is 2 or less, put it onto the
+        // battlefield. Otherwise, put it into your hand") routes each hit card
+        // to EITHER `kept_destination` (the otherwise branch) OR the
+        // `kept_destination_if` zone (reveal_until.rs's `hit_destination`
+        // selection re-checks the card-property filter per hit). Scoping the
+        // tracked set to only `kept_destination` — as the generic arm below
+        // does for the unconditional case — silently drops every hit that
+        // landed via the conditional branch, truncating a chained "from among
+        // cards put onto the battlefield this way" consumer to just the
+        // otherwise-branch hits. Track both possible landing zones so the
+        // published set matches the full resolved hit population regardless
+        // of which branch each individual hit took.
+        Effect::RevealUntil {
+            kept_destination,
+            kept_destination_if: Some((_, if_true_zone)),
+            ..
+        } => {
+            let zones = [*kept_destination, *if_true_zone];
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged { object_id, to, .. } if zones.contains(to) => {
+                        Some(*object_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -21679,6 +21708,7 @@ mod tests {
             enters_attacking: false,
             kept_optional_to: None,
             enters_under: None,
+            kept_destination_if: None,
         };
         // The RevealUntil arm is event-driven; `state`/`ability` are ignored (only
         // the GenericEffect arm reads them). Minimal state + empty-target ability.
@@ -21688,6 +21718,90 @@ mod tests {
         assert_eq!(
             affected_objects_from_events(&state, &ability, &effect, &events),
             vec![hit]
+        );
+    }
+
+    /// CR 701.20a + CR 608.2c (PR #8008 review): Part in Friendship's per-hit
+    /// conditional keep ("if its mana value is <= X, put it onto the
+    /// battlefield. Otherwise, put it into your hand") routes each hit to
+    /// EITHER `kept_destination` (the otherwise/Hand branch) OR the
+    /// `kept_destination_if` zone (Battlefield). Before this fix,
+    /// `affected_objects_from_events`'s `_` arm derived a single `dest_zone`
+    /// from `kept_destination` alone, so a hit that actually resolved through
+    /// the CONDITIONAL branch (Battlefield) was silently dropped from the
+    /// published tracked set — any chained "put a counter on it" / "from
+    /// among cards put onto the battlefield this way" consumer would see an
+    /// empty or incomplete set. This test seeds ONE `ZoneChanged` per branch
+    /// and asserts both are published.
+    #[test]
+    fn reveal_until_conditional_kept_publishes_both_destinations_for_tracked_set() {
+        let battlefield_hit = ObjectId(4);
+        let hand_hit = ObjectId(5);
+        let miss = ObjectId(6);
+        let events = vec![
+            // The conditional branch: mana value <= threshold → Battlefield.
+            GameEvent::ZoneChanged {
+                object_id: battlefield_hit,
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    battlefield_hit,
+                    Some(Zone::Library),
+                    Zone::Battlefield,
+                )),
+            },
+            // The otherwise branch: mana value > threshold → Hand
+            // (`kept_destination`).
+            GameEvent::ZoneChanged {
+                object_id: hand_hit,
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    hand_hit,
+                    Some(Zone::Library),
+                    Zone::Hand,
+                )),
+            },
+            // A dug-past non-matching card returns to the library (the rest
+            // pile) — must NOT be published.
+            GameEvent::ZoneChanged {
+                object_id: miss,
+                from: Some(Zone::Library),
+                to: Zone::Library,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    miss,
+                    Some(Zone::Library),
+                    Zone::Library,
+                )),
+            },
+        ];
+        let effect = Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
+            kept_destination: Zone::Hand,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+            kept_destination_if: Some((
+                Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+                Zone::Battlefield,
+            )),
+        };
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
+
+        let mut published = affected_objects_from_events(&state, &ability, &effect, &events);
+        published.sort();
+        let mut expected = vec![battlefield_hit, hand_hit];
+        expected.sort();
+        assert_eq!(
+            published, expected,
+            "both the conditional (battlefield) and otherwise (hand) hit destinations must be \
+             published to the tracked set — the rest-pile miss must not be"
         );
     }
 

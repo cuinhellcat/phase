@@ -5138,6 +5138,7 @@ fn rw_effect(
             enter_tapped: _,
             enters_attacking: _,
             kept_optional_to: _,
+            kept_destination_if: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::HandLibrary);

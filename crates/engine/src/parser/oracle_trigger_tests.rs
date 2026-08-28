@@ -30551,3 +30551,124 @@ fn ring_tempts_put_choice_from_among_lowers_to_counter_choice() {
         }
     }
 }
+
+/// CR 707.2 + CR 707.9b + CR 603.4 + CR 205.4a: The Notary Hobbits —
+/// "When ~ enter, if they're not a token, create two tokens that are
+/// copies of them, except the tokens aren't legendary." plus a scaled mana
+/// ability. The ETB uses gender-neutral singular "they" for the same
+/// single-permanent subject `parse_zone_change_object_token_contraction_
+/// intervening_if` already recognizes as "it" (Vaultborn Tyrant class), and
+/// the "except" clause uses plural "the tokens aren't" for the two-token
+/// count (Miirym, Sentinel Wyrm class, singular "the token isn't").
+///
+/// Reach-guard: zero `Effect::Unimplemented` and zero parse warnings prove
+/// the parse actually reached the typed shapes below rather than silently
+/// swallowing the intervening-if or the except clause (both failure modes
+/// still yield a well-typed `CopyTokenOf`, so the condition and
+/// `additional_modifications` fields are the only assertions that would
+/// actually catch a regression).
+#[test]
+fn the_notary_hobbits_etb_copy_guards_on_token_and_strips_legendary() {
+    let parsed = parse_oracle_text(
+        "When The Notary Hobbits enter, if they're not a token, create two tokens that are copies of them, except the tokens aren't legendary.\n\
+         {T}: Add {C} for each Halfling you control.",
+        "The Notary Hobbits",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Halfling".to_string(), "Advisor".to_string()],
+    );
+
+    for def in &parsed.abilities {
+        assert!(
+            !matches!(*def.effect, Effect::Unimplemented { .. }),
+            "activated ability must not be Unimplemented: {def:?}"
+        );
+    }
+    for trig in &parsed.triggers {
+        if let Some(execute) = trig.execute.as_ref() {
+            assert!(
+                !matches!(*execute.effect, Effect::Unimplemented { .. }),
+                "trigger effect must not be Unimplemented: {execute:?}"
+            );
+        }
+    }
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "expected zero parse warnings (no swallowed clauses), got {:?}",
+        parsed.parse_warnings
+    );
+
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| {
+            matches!(
+                t.execute.as_ref().map(|e| e.effect.as_ref()),
+                Some(Effect::CopyTokenOf { .. })
+            )
+        })
+        .expect("The Notary Hobbits ETB CopyTokenOf trigger");
+
+    // "if they're not a token" — the anti-recursion self-check.
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::NonToken])
+            ),
+        }),
+        "expected a NonToken intervening-if, got {:?}",
+        trigger.condition
+    );
+
+    let execute = trigger.execute.as_ref().expect("trigger execute");
+    match execute.effect.as_ref() {
+        Effect::CopyTokenOf {
+            target,
+            count,
+            additional_modifications,
+            ..
+        } => {
+            assert_eq!(*target, TargetFilter::TriggeringSource);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            assert_eq!(
+                additional_modifications,
+                &vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+                "expected the 'except the tokens aren't legendary' RemoveSupertype modification"
+            );
+        }
+        other => panic!("expected CopyTokenOf effect, got {other:?}"),
+    }
+
+    // "{T}: Add {C} for each Halfling you control." — standard tap-for-
+    // colorless-scaled-by-creature-type-count mana ability.
+    let mana_ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::Mana { .. }))
+        .expect("mana ability");
+    match mana_ability.effect.as_ref() {
+        Effect::Mana { produced, .. } => match produced {
+            ManaProduction::Colorless { count } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Subtype("Halfling".to_string()))
+                                    .controller(ControllerRef::You)
+                            ),
+                        },
+                    },
+                    "expected {{C}} scaled by Halflings you control"
+                );
+            }
+            other => panic!("expected Colorless mana production, got {other:?}"),
+        },
+        other => panic!("expected Mana effect, got {other:?}"),
+    }
+}

@@ -15347,6 +15347,22 @@ pub enum Effect {
         /// controller ("under your control" on Telemin Performance / Sméagol).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under: Option<ControllerRef>,
+        /// CR 202.3 + CR 608.2c: Dynamic branch on the hit card's own
+        /// characteristics — "if its mana value is less than or equal to the
+        /// number of lands you control, put it onto the battlefield.
+        /// Otherwise, put it into your hand" (Part in Friendship).
+        /// `Some((filter, zone))` routes a hit card matching `filter` to
+        /// `zone`; `kept_destination` is repurposed as the "otherwise" zone.
+        /// `None` (default) preserves the unconditional single-
+        /// `kept_destination` path for every existing card. Distinct from
+        /// `kept_optional_to` (a controller CHOICE between two zones, "you
+        /// may put that card onto the battlefield") — this is a
+        /// card-property-driven branch with no decision point, evaluated
+        /// with `matches_target_filter` exactly like the primary `filter`
+        /// field. Mirrors `ChangeZone.enters_modified_if`'s "gate a rider on
+        /// the moved object's own characteristics" pattern.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_destination_if: Option<(Box<TargetFilter>, Zone)>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.

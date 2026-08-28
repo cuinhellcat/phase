@@ -3655,12 +3655,23 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             kept_destination,
             rest_destination,
+            kept_destination_if,
             ..
         } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("until".into(), fmt_target(filter)));
             d.push(("kept".into(), format!("{:?}", kept_destination)));
             d.push(("rest".into(), format!("{:?}", rest_destination)));
+            // CR 202.3 + CR 608.2c: surface the card-property-driven destination
+            // branch (Part in Friendship) so coverage output distinguishes it
+            // from the unconditional `kept` default it repurposes as the
+            // "otherwise" zone.
+            if let Some((cond_filter, if_true_zone)) = kept_destination_if {
+                d.push((
+                    "kept if".into(),
+                    format!("{} -> {:?}", fmt_target(cond_filter), if_true_zone),
+                ));
+            }
         }
         Effect::Discover {
             mana_value_limit,

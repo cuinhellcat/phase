@@ -3669,12 +3669,14 @@ fn detect_condition_if(
     // conditional representation.
     //   CR 305.9   on_decline                        — "if you don't" alternative
     //   CR 701.20a kept_optional_to                  — RevealUntil decline branch
+    //   CR 202.3 + CR 608.2c kept_destination_if     — RevealUntil card-property destination branch
     //   CR 614.1a  graveyard_destination_replacement — "exile it instead" rider
     //   CR 705     win_effect / lose_effect          — flip branches
     //   CR 701.6   source_rider                      — "if countered this way, ..."
     //   CR 701.6a  countered_spell_zone              — countered-spell destination
     if evidence.has_slot("on_decline")
         || evidence.has_slot("kept_optional_to")
+        || evidence.has_slot("kept_destination_if")
         || evidence.has_slot("graveyard_destination_replacement")
         || evidence.has_slot("win_effect")
         || evidence.has_slot("lose_effect")

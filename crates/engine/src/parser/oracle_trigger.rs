@@ -6633,10 +6633,17 @@ fn build_event_object_subtype_condition(
 /// already covers explicit negation; only the apostrophe contraction needs
 /// a dedicated arm so attachment lookbacks (`if it was enchanted`) keep their
 /// leading `was` for `parse_zone_change_object_filter_predicate`.
+///
+/// Pronoun axis (mirrors `parse_cast_using_variant_intervening_if`'s "they
+/// were"/"it was" split): a self-copying permanent with a grammatically
+/// plural name — The Notary Hobbits: "When ~ enter, if they're not a
+/// token, create two tokens that are copies of them, except the tokens
+/// aren't legendary" — uses gender-neutral singular "they" for the same
+/// single-permanent subject that singular cards refer to as "it".
 fn parse_zone_change_object_token_contraction_intervening_if(
     input: &str,
 ) -> OracleResult<'_, TriggerCondition> {
-    let (rest, _) = tag("if it's not a ").parse(input)?;
+    let (rest, _) = alt((tag("if it's not a "), tag("if they're not a "))).parse(input)?;
     let (rest, _) = tag("token").parse(rest)?;
     Ok((rest, zone_change_object_token_condition(true)))
 }

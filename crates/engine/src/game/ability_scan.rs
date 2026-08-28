@@ -1555,6 +1555,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             filter,
             count,
             enters_under,
+            kept_destination_if,
             matched_disposition: _,
             kept_destination: _,
             rest_destination: _,
@@ -1568,6 +1569,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             if let Some(x) = enters_under {
                 acc = acc.or(scan_controller_ref(x));
+            }
+            // CR 608.2c: the per-hit conditional destination filter (Part in
+            // Friendship's "if its mana value is <= the number of lands you
+            // control") reads game state exactly like the primary `filter` —
+            // scan it identically.
+            if let Some((cond_filter, _zone)) = kept_destination_if {
+                acc = acc.or(scan_target_filter(cond_filter, target_ctx, mode));
             }
             acc
         }
