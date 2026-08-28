@@ -12,10 +12,12 @@ use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
-    is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+    is_zero_usize, CastOccurrence, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
     TargetSelectionConstraint, TriggerSourceContext,
 };
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaType, SpellCostCriterion, ZoneSpend,
@@ -5976,6 +5978,21 @@ pub enum TargetFilter {
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
     CostPaidObject,
+    /// CR 701.47c + CR 608.2c: "the amassed Army" / "the Army you amassed" —
+    /// the Army creature chosen by the current amass instruction, whether or
+    /// not it received counters. A resolution-local, non-targeted object
+    /// reference (the `TargetFilter` object-target counterpart of
+    /// [`ObjectScope::AmassedArmy`], which reads the same
+    /// `ResolvedAbility.amassed_army_object` snapshot for QuantityRef
+    /// properties like "the amassed Army's power"). Used by
+    /// `Effect::Attach.target` for "amass Goblins 1, then attach this
+    /// Equipment to the amassed Army" (Goblin Plate Mail): the sub-ability
+    /// chain walker in `game/effects/mod.rs` stamps `amassed_army_object`
+    /// from the `Amass` effect's resolution onto this sub-ability before it
+    /// resolves, so the attach binds to the EXACT Army amass just touched —
+    /// the newly created token, or an existing Army — never re-derived by
+    /// rescanning the battlefield for "an Army you control".
+    AmassedArmy,
     /// CR 613.1f + CR 611.2c + CR 400.7: Resolves to the single card most recently
     /// recorded on the FILTER's source object via `ChosenAttribute::Card` (written
     /// by `Effect::RememberCard`). Models "the last chosen card" — Koh, the Face
@@ -6592,6 +6609,8 @@ pub enum CardTypeSetSource {
     /// Draw->Discard set is disambiguated by CAUSE (drawn members are unstamped),
     /// so Some(Discarded) counts only discarded members. None counts all.
     TrackedSet {
+        #[serde(default, skip_serializing_if = "TrackedAnaphorSource::is_chain_set")]
+        set: TrackedAnaphorSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
     },
@@ -6833,6 +6852,34 @@ impl CardTypeSetSource {
             }
         }
     }
+
+    /// Mutable counterpart of [`try_for_each_member`](Self::try_for_each_member).
+    ///
+    /// Transformations over the population axis use the same bounded recursion
+    /// authority as readers, so a nested `AnyOf` cannot evade a rewrite that is
+    /// exhaustive over leaf sources.
+    pub fn try_for_each_member_mut(
+        &mut self,
+        depth: u32,
+        visit: &mut impl FnMut(&mut CardTypeSetSource),
+    ) -> bool {
+        let Some(depth) = depth.checked_sub(1) else {
+            return false;
+        };
+        match self {
+            CardTypeSetSource::AnyOf { sources } => {
+                let mut complete = true;
+                for member in &mut sources.0 {
+                    complete &= member.try_for_each_member_mut(depth, visit);
+                }
+                complete
+            }
+            leaf => {
+                visit(leaf);
+                true
+            }
+        }
+    }
 }
 
 /// CR 109.2: Depth budget for [`CardTypeSetSource::try_for_each_member`].
@@ -6887,6 +6934,167 @@ pub enum CastManaSpentMetric {
     OfColor { color: ManaColor },
     /// Amount of mana whose source matched the filter at payment time.
     FromSource { source_filter: TargetFilter },
+}
+
+/// A validated numeric reduction over one characteristic-bearing population.
+///
+/// CR 202.3 + CR 208.1 + CR 209.1: the source must carry enough snapshot data
+/// to answer the selected property. In particular, spell-cast journal records
+/// retain mana value but not the other object characteristics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PropertyAggregate {
+    function: AggregateFunction,
+    property: ObjectProperty,
+    source: CardTypeSetSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PropertyAggregateError {
+    #[error("turn-journal property aggregates support only ManaValue, not {0:?}")]
+    UnsupportedTurnJournalProperty(ObjectProperty),
+    #[error("property aggregate source exceeds the supported union depth")]
+    SourceDepthExceeded,
+}
+
+impl PropertyAggregate {
+    pub fn new(
+        function: AggregateFunction,
+        property: ObjectProperty,
+        source: CardTypeSetSource,
+    ) -> Result<Self, PropertyAggregateError> {
+        let mut invalid_journal = false;
+        let complete = source.try_for_each_member(UNION_DEPTH_BUDGET, &mut |leaf| {
+            if matches!(leaf, CardTypeSetSource::TurnJournal { .. })
+                && property != ObjectProperty::ManaValue
+            {
+                invalid_journal = true;
+            }
+        });
+        if !complete {
+            return Err(PropertyAggregateError::SourceDepthExceeded);
+        }
+        if invalid_journal {
+            return Err(PropertyAggregateError::UnsupportedTurnJournalProperty(
+                property,
+            ));
+        }
+        Ok(Self {
+            function,
+            property,
+            source,
+        })
+    }
+
+    pub fn function(&self) -> AggregateFunction {
+        self.function
+    }
+
+    pub fn property(&self) -> ObjectProperty {
+        self.property
+    }
+
+    pub fn source(&self) -> &CardTypeSetSource {
+        &self.source
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PropertyAggregateRepr {
+    function: AggregateFunction,
+    property: ObjectProperty,
+    source: CardTypeSetSource,
+}
+
+impl<'de> Deserialize<'de> for PropertyAggregate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let repr = PropertyAggregateRepr::deserialize(deserializer)?;
+        Self::new(repr.function, repr.property, repr.source).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum LegacyPropertyAggregateWire {
+    Aggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
+        filter: TargetFilter,
+    },
+    TrackedSetAggregate {
+        function: AggregateFunction,
+        property: ObjectProperty,
+        #[serde(default)]
+        source: TrackedAnaphorSource,
+    },
+}
+
+pub(crate) fn deserialize_quantity_ref_compat<'de, D>(
+    deserializer: D,
+) -> Result<QuantityRef, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    quantity_ref_from_value(value)
+}
+
+pub(crate) fn deserialize_boxed_quantity_ref_compat<'de, D>(
+    deserializer: D,
+) -> Result<Box<QuantityRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_quantity_ref_compat(deserializer).map(Box::new)
+}
+
+pub(crate) fn deserialize_optional_quantity_ref_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<QuantityRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(quantity_ref_from_value)
+        .transpose()
+}
+
+fn quantity_ref_from_value<E: serde::de::Error>(
+    value: serde_json::Value,
+) -> Result<QuantityRef, E> {
+    let tag = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| E::custom("quantity reference requires a string type tag"))?;
+    match tag {
+        "Aggregate" | "TrackedSetAggregate" => {
+            let legacy: LegacyPropertyAggregateWire =
+                serde_json::from_value(value).map_err(E::custom)?;
+            let (function, property, source) = match legacy {
+                LegacyPropertyAggregateWire::Aggregate {
+                    function,
+                    property,
+                    filter,
+                } => (function, property, CardTypeSetSource::Objects { filter }),
+                LegacyPropertyAggregateWire::TrackedSetAggregate {
+                    function,
+                    property,
+                    source,
+                } => (
+                    function,
+                    property,
+                    CardTypeSetSource::TrackedSet {
+                        set: source,
+                        caused_by: None,
+                    },
+                ),
+            };
+            PropertyAggregate::new(function, property, source)
+                .map(QuantityRef::PropertyAggregate)
+                .map_err(E::custom)
+        }
+        _ => serde_json::from_value(value).map_err(E::custom),
+    }
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
@@ -7116,11 +7324,7 @@ pub enum QuantityRef {
     /// `filter.extract_zones()`, so the query is zone-general.
     // TODO: no dedicated CR governs the extremum/aggregation itself; CR 202.3 is
     // cited for the mana-value property — the most common aggregated property.
-    Aggregate {
-        function: AggregateFunction,
-        property: ObjectProperty,
-        filter: TargetFilter,
-    },
+    PropertyAggregate(PropertyAggregate),
     /// CR 107.1 + CR 102.1/102.2/102.3: The [min/max], across players in
     /// `relation`, of the number
     /// of **battlefield** objects matching `filter` that the player controls
@@ -7232,15 +7436,6 @@ pub enum QuantityRef {
     /// are read in place. Used by "deals damage equal to the total mana value of
     /// those exiled cards" (Ensnared by the Mara — `Sum` over `ManaValue` of the
     /// set the preceding `ExileTop` published).
-    TrackedSetAggregate {
-        function: AggregateFunction,
-        property: ObjectProperty,
-        /// CR 608.2c: which object-id set to reduce. Defaults to `ChainSet`
-        /// (the chain-published tracked set) so existing serialized card-data
-        /// stays byte-identical — no `source` key is emitted for the default.
-        #[serde(default, skip_serializing_if = "TrackedAnaphorSource::is_chain_set")]
-        source: TrackedAnaphorSource,
-    },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter
@@ -7836,7 +8031,7 @@ impl QuantityRef {
             | QuantityRef::ObjectTypelineComponentCount { .. }
             | QuantityRef::ManaSymbolsInManaCost { .. }
             | QuantityRef::SelfManaValue
-            | QuantityRef::Aggregate { .. }
+            | QuantityRef::PropertyAggregate(_)
             | QuantityRef::ControlledByEachPlayer { .. }
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
@@ -7848,7 +8043,6 @@ impl QuantityRef {
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
             | QuantityRef::FilteredTrackedSetSize { .. }
-            | QuantityRef::TrackedSetAggregate { .. }
             | QuantityRef::ExiledFromHandThisResolution
             | QuantityRef::PreviousEffectAmount { .. }
             | QuantityRef::PreviousEffectCount
@@ -7934,7 +8128,7 @@ pub enum TrackedAnaphorSource {
 impl TrackedAnaphorSource {
     /// The default source. Used by `skip_serializing_if` so existing
     /// `TrackedSetAggregate` card-data stays byte-identical (no `source` key).
-    fn is_chain_set(&self) -> bool {
+    pub(crate) fn is_chain_set(&self) -> bool {
         matches!(self, Self::ChainSet)
     }
 }
@@ -8367,6 +8561,7 @@ pub enum PlayerFilter {
     /// the enum infinite size.
     PlayerAttribute {
         relation: PlayerRelation,
+        #[serde(deserialize_with = "deserialize_boxed_quantity_ref_compat")]
         attr: Box<QuantityRef>,
         comparator: Comparator,
         value: Box<QuantityExpr>,
@@ -8583,6 +8778,7 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
                 #[serde(tag = "type")]
                 enum Tagged {
                     Ref {
+                        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
                         qty: QuantityRef,
                     },
                     Fixed {
@@ -8968,9 +9164,11 @@ pub enum UnlessPayScaling {
     Flat,
     PerAffectedCreature,
     PerQuantityRef {
+        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
         quantity: QuantityRef,
     },
     PerAffectedAndQuantityRef {
+        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
         quantity: QuantityRef,
     },
     /// CR 118.12a + CR 202.3e: Per-affected-creature cost where the scaling quantity
@@ -8983,6 +9181,7 @@ pub enum UnlessPayScaling {
     /// quantity is resolved per-creature using that creature as the `TargetRef::Object`
     /// during resolution.
     PerAffectedWithRef {
+        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
         quantity: QuantityRef,
     },
 }
@@ -9580,8 +9779,10 @@ pub enum ParsedCondition {
     /// Compares a player-relative quantity against each opponent's quantity.
     /// The comparison must hold for ALL opponents.
     QuantityVsEachOpponent {
+        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
         lhs: QuantityRef,
         comparator: Comparator,
+        #[serde(deserialize_with = "deserialize_quantity_ref_compat")]
         rhs: QuantityRef,
     },
     /// CR 601.3 / CR 602.5: Generic measurable restriction predicate.
@@ -15146,6 +15347,22 @@ pub enum Effect {
         /// controller ("under your control" on Telemin Performance / Sméagol).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under: Option<ControllerRef>,
+        /// CR 202.3 + CR 608.2c: Dynamic branch on the hit card's own
+        /// characteristics — "if its mana value is less than or equal to the
+        /// number of lands you control, put it onto the battlefield.
+        /// Otherwise, put it into your hand" (Part in Friendship).
+        /// `Some((filter, zone))` routes a hit card matching `filter` to
+        /// `zone`; `kept_destination` is repurposed as the "otherwise" zone.
+        /// `None` (default) preserves the unconditional single-
+        /// `kept_destination` path for every existing card. Distinct from
+        /// `kept_optional_to` (a controller CHOICE between two zones, "you
+        /// may put that card onto the battlefield") — this is a
+        /// card-property-driven branch with no decision point, evaluated
+        /// with `matches_target_filter` exactly like the primary `filter`
+        /// field. Mirrors `ChangeZone.enters_modified_if`'s "gate a rider on
+        /// the moved object's own characteristics" pattern.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_destination_if: Option<(Box<TargetFilter>, Zone)>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
@@ -16776,6 +16993,23 @@ impl TargetFilter {
         }
     }
 
+    /// True when this filter carries the typed "other than the currently
+    /// resolving object" marker at any structural position.
+    pub fn contains_other_than_trigger_object(&self) -> bool {
+        match self {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::OtherThanTriggerObject)),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+                .iter()
+                .any(TargetFilter::contains_other_than_trigger_object),
+            TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+                filter.contains_other_than_trigger_object()
+            }
+            _ => false,
+        }
+    }
+
     /// CR 613.1f + CR 702.1: True when this filter tree asks a KIND-level keyword
     /// question (`HasKeywordKind` / `WithoutKeywordKind`) at any structural
     /// position. Mirrors [`Self::references_cost_paid_object`]'s recursion.
@@ -16888,6 +17122,16 @@ impl TargetFilter {
                 | TargetFilter::Neighbor { .. }
                 | TargetFilter::AttachedTo
                 | TargetFilter::CostPaidObject
+                // CR 701.47c: "the amassed Army" / "the Army you amassed" is
+                // resolved from `ResolvedAbility.amassed_army_object` after
+                // the current amass instruction runs — never declared as a
+                // target slot. Mirrors `CostPaidObject` immediately above:
+                // without this arm, the targeting layer treats it as a CR 115
+                // target needing legal candidates BEFORE amass has created or
+                // chosen the Army, so it always finds zero legal targets and
+                // the whole ability (Amass head included) is removed from the
+                // stack for lack of a legal target before it ever resolves.
+                | TargetFilter::AmassedArmy
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
@@ -22683,6 +22927,13 @@ pub struct SpellContext {
     /// when an activated or triggered ability was put onto the stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_transformation_count: Option<u32>,
+    /// CR 701.3a + CR 608.2d: Semantic bindings for `Effect::Attach` roles:
+    /// selected attachment targets, the selected host, and forwarded
+    /// event-scoped attachment candidates. This runtime resolution context keeps
+    /// those roles distinct across resolution-time choices without expanding
+    /// `ResolvedAbility` literals.
+    #[serde(default, skip_serializing_if = "AttachTargetBindings::is_empty")]
+    pub attach_target_bindings: AttachTargetBindings,
 }
 
 impl SpellContext {
@@ -26707,6 +26958,138 @@ pub enum DetachedRemainder {
     HoldsPublisher,
 }
 
+/// CR 701.3a + CR 608.2d: The three semantic roles of an [`Effect::Attach`]
+/// instruction: selected attachment targets, selected host, and forwarded
+/// event-scoped attachment candidates.
+///
+/// `targets` remains the compatibility/chain anaphor projection. This narrow
+/// binding preserves all three roles across resolution-time choices, where
+/// appending a selected Equipment to the generic target vector would otherwise
+/// make them ambiguous.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachTargetBindings {
+    #[serde(flatten)]
+    inner: Option<Box<AttachTargetBindingsInner>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct AttachTargetBindingsInner {
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_attach_attachment_targets"
+    )]
+    attachment_targets: Vec<ObjectIncarnationRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_attach_host_target"
+    )]
+    host_target: Option<ObjectIncarnationRef>,
+    /// Attachments that the immediately preceding forward-result instruction
+    /// moved to the battlefield. This is distinct
+    /// from `attachment_targets`: the former is the finite event-scoped choice
+    /// population, while the latter records the one object the player selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachment_candidates: Vec<ObjectIncarnationRef>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AttachObjectBindingCompat {
+    Exact(ObjectIncarnationRef),
+    Legacy(TargetRef),
+}
+
+impl AttachObjectBindingCompat {
+    fn into_object_ref<E: de::Error>(self) -> Result<Option<ObjectIncarnationRef>, E> {
+        match self {
+            Self::Exact(reference) => Ok(Some(reference)),
+            Self::Legacy(TargetRef::Object(object_id)) => Ok(Some(ObjectIncarnationRef::of(
+                object_id,
+                LEGACY_INCARNATION,
+            ))),
+            Self::Legacy(TargetRef::Player(_)) => Ok(None),
+        }
+    }
+}
+
+fn deserialize_attach_attachment_targets<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ObjectIncarnationRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<AttachObjectBindingCompat>::deserialize(deserializer)?
+        .into_iter()
+        .try_fold(Vec::new(), |mut bindings, binding| {
+            let Some(reference) = binding.into_object_ref()? else {
+                return Err(de::Error::custom("attachment role must be an object"));
+            };
+            bindings.push(reference);
+            Ok(bindings)
+        })
+}
+
+fn deserialize_attach_host_target<'de, D>(
+    deserializer: D,
+) -> Result<Option<ObjectIncarnationRef>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<AttachObjectBindingCompat>::deserialize(deserializer)?
+        .map(AttachObjectBindingCompat::into_object_ref)
+        .transpose()
+        .map(Option::flatten)
+}
+
+impl AttachTargetBindings {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner.as_deref().is_none_or(|inner| {
+            inner.attachment_targets.is_empty()
+                && inner.host_target.is_none()
+                && inner.attachment_candidates.is_empty()
+        })
+    }
+
+    pub(crate) fn attachment_targets(&self) -> &[ObjectIncarnationRef] {
+        self.inner
+            .as_deref()
+            .map_or(&[], |inner| inner.attachment_targets.as_slice())
+    }
+
+    pub(crate) fn host_target(&self) -> Option<&ObjectIncarnationRef> {
+        self.inner
+            .as_deref()
+            .and_then(|inner| inner.host_target.as_ref())
+    }
+
+    pub(crate) fn bind_attachment(&mut self, target: ObjectIncarnationRef) {
+        self.inner
+            .get_or_insert_default()
+            .attachment_targets
+            .push(target);
+    }
+
+    pub(crate) fn set_attachment_targets(&mut self, targets: Vec<ObjectIncarnationRef>) {
+        self.inner.get_or_insert_default().attachment_targets = targets;
+    }
+
+    pub(crate) fn bind_host(&mut self, target: ObjectIncarnationRef) {
+        self.inner.get_or_insert_default().host_target = Some(target);
+    }
+
+    pub(crate) fn bind_attachment_candidates(&mut self, candidates: Vec<ObjectIncarnationRef>) {
+        self.inner.get_or_insert_default().attachment_candidates = candidates;
+    }
+
+    pub(crate) fn attachment_candidates(&self) -> &[ObjectIncarnationRef] {
+        self.inner
+            .as_deref()
+            .map_or(&[], |inner| inner.attachment_candidates.as_slice())
+    }
+}
+
 /// Runtime ability data passed to effect handlers at resolution time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAbility {
@@ -26716,6 +27099,10 @@ pub struct ResolvedAbility {
     /// context below; callers must never use this raw id to rebind a departed
     /// source to a newer incarnation.
     pub source_id: ObjectId,
+    /// CR 601.2i + CR 707.10: Exact finalized cast represented by this
+    /// resolving spell ability. Spell copies that were not cast carry `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_occurrence: Option<CastOccurrence>,
     /// CR 400.7: Exact source incarnation captured for self-transform guards.
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
@@ -27093,6 +27480,7 @@ impl ResolvedAbility {
             effect,
             targets,
             source_id,
+            cast_occurrence: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -27149,6 +27537,87 @@ impl ResolvedAbility {
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
         }
+    }
+
+    pub(crate) fn bind_attach_attachment_target(&mut self, target: ObjectIncarnationRef) {
+        self.context.attach_target_bindings.bind_attachment(target);
+    }
+
+    pub(crate) fn set_attach_attachment_targets(&mut self, targets: Vec<ObjectIncarnationRef>) {
+        self.context
+            .attach_target_bindings
+            .set_attachment_targets(targets);
+    }
+
+    pub(crate) fn bind_attach_host_target(&mut self, target: ObjectIncarnationRef) {
+        self.context.attach_target_bindings.bind_host(target);
+    }
+
+    pub(crate) fn bind_attach_attachment_candidates(
+        &mut self,
+        candidates: Vec<ObjectIncarnationRef>,
+    ) {
+        self.context
+            .attach_target_bindings
+            .bind_attachment_candidates(candidates);
+    }
+
+    pub(crate) fn attach_attachment_targets(&self) -> &[ObjectIncarnationRef] {
+        self.context.attach_target_bindings.attachment_targets()
+    }
+
+    pub(crate) fn attach_host_target(&self) -> Option<&ObjectIncarnationRef> {
+        self.context.attach_target_bindings.host_target()
+    }
+
+    pub(crate) fn attach_attachment_candidates(&self) -> &[ObjectIncarnationRef] {
+        self.context.attach_target_bindings.attachment_candidates()
+    }
+
+    /// Stamp or clear one cast coordinate on every complete ability graph
+    /// stored by this node, including the spell snapshot embedded by Epic.
+    pub fn set_cast_occurrence_recursive(&mut self, occurrence: Option<CastOccurrence>) {
+        self.cast_occurrence = occurrence;
+        if let Effect::EpicCopy { spell } = &mut self.effect {
+            spell.set_cast_occurrence_recursive(occurrence);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_cast_occurrence_recursive(occurrence);
+        }
+        if let Some(branch) = self.else_ability.as_mut() {
+            branch.set_cast_occurrence_recursive(occurrence);
+        }
+    }
+
+    pub(crate) fn normalize_cast_occurrence_for_loop_recursive(&mut self) {
+        if let Some(occurrence) = self.cast_occurrence.as_mut() {
+            occurrence.turn_journal_index = 0;
+        }
+        if let Effect::EpicCopy { spell } = &mut self.effect {
+            spell.normalize_cast_occurrence_for_loop_recursive();
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.normalize_cast_occurrence_for_loop_recursive();
+        }
+        if let Some(branch) = self.else_ability.as_mut() {
+            branch.normalize_cast_occurrence_for_loop_recursive();
+        }
+    }
+
+    pub(crate) fn cast_occurrence_matches_recursive(&self, occurrence: CastOccurrence) -> bool {
+        self.cast_occurrence == Some(occurrence)
+            && self
+                .sub_ability
+                .as_deref()
+                .is_none_or(|sub| sub.cast_occurrence_matches_recursive(occurrence))
+            && self
+                .else_ability
+                .as_deref()
+                .is_none_or(|branch| branch.cast_occurrence_matches_recursive(occurrence))
+            && match &self.effect {
+                Effect::EpicCopy { spell } => spell.cast_occurrence_matches_recursive(occurrence),
+                _ => true,
+            }
     }
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
@@ -28253,6 +28722,69 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn attach_target_bindings_keep_spell_context_construction_and_wire_shape_stable() {
+        let external_style = SpellContext {
+            optional_effect_performed: true,
+            ..SpellContext::default()
+        };
+        assert!(external_style.attach_target_bindings.is_empty());
+
+        let absent: SpellContext =
+            serde_json::from_value(serde_json::json!({})).expect("legacy context deserializes");
+        assert!(absent.attach_target_bindings.is_empty());
+
+        let empty: SpellContext = serde_json::from_value(serde_json::json!({
+            "attach_target_bindings": {}
+        }))
+        .expect("empty attachment bindings deserialize");
+        assert!(empty.attach_target_bindings.is_empty());
+
+        let legacy: SpellContext = serde_json::from_value(serde_json::json!({
+            "attach_target_bindings": {
+                "attachment_targets": [{ "Object": 11 }],
+                "host_target": { "Object": 12 }
+            }
+        }))
+        .expect("legacy TargetRef attachment bindings deserialize");
+        assert_eq!(
+            legacy.attach_target_bindings.attachment_targets(),
+            &[ObjectIncarnationRef::of(ObjectId(11), LEGACY_INCARNATION)]
+        );
+        assert_eq!(
+            legacy.attach_target_bindings.host_target(),
+            Some(&ObjectIncarnationRef::of(ObjectId(12), LEGACY_INCARNATION))
+        );
+
+        let mut populated = SpellContext::default();
+        populated
+            .attach_target_bindings
+            .bind_attachment(ObjectIncarnationRef::of(ObjectId(11), 1));
+        populated
+            .attach_target_bindings
+            .bind_host(ObjectIncarnationRef::of(ObjectId(12), 2));
+        populated
+            .attach_target_bindings
+            .bind_attachment_candidates(vec![ObjectIncarnationRef::of(ObjectId(13), 2)]);
+        let wire = serde_json::to_value(&populated).expect("attachment bindings serialize");
+        assert_eq!(
+            wire["attach_target_bindings"]["attachment_targets"],
+            serde_json::json!([{ "object_id": 11, "incarnation": 1 }])
+        );
+        assert_eq!(
+            wire["attach_target_bindings"]["host_target"],
+            serde_json::json!({ "object_id": 12, "incarnation": 2 })
+        );
+        assert_eq!(
+            wire["attach_target_bindings"]["attachment_candidates"],
+            serde_json::json!([{ "object_id": 13, "incarnation": 2 }])
+        );
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),
+            populated
+        );
+    }
+
     /// CR 102.1 — `TargetFilter::PlayerMatching::is_player_scope()` is a DECIDED
     /// arm, not a wildcard default.
     ///
@@ -28411,6 +28943,7 @@ mod tests {
     #[test]
     fn try_for_each_member_unrolls_unions_and_bounds_depth() {
         let leaf = |n: u32| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
             caused_by: (n > 0).then_some(ThisWayCause::Discarded),
         };
         let union = CardTypeSetSource::any_of(vec![
@@ -28498,7 +29031,10 @@ mod tests {
         // A snapshot population is NOT a zone read (CR 400.7 / CR 608.2c), and
         // that is asserted rather than left implicit.
         for snapshot in [
-            CardTypeSetSource::TrackedSet { caused_by: None },
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
             CardTypeSetSource::TurnJournal {
                 journal: TurnJournalKind::SpellsCast,
                 scope: CountScope::Controller,
@@ -28702,7 +29238,10 @@ mod tests {
         };
         for source in [
             CardTypeSetSource::ExiledBySource,
-            CardTypeSetSource::TrackedSet { caused_by: None },
+            CardTypeSetSource::TrackedSet {
+                set: TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
             objects.clone(),
             CardTypeSetSource::any_of(vec![
                 objects,
@@ -28724,6 +29263,221 @@ mod tests {
                 "the current reading must win for {json}",
             );
         }
+    }
+
+    #[test]
+    fn legacy_property_aggregate_variants_deserialize_and_reserialize_canonically() {
+        let legacy_objects = r#"{"type":"Aggregate","function":"Sum","property":"Power","filter":{"type":"Typed","type_filters":["Creature"],"properties":[]}}"#;
+        let legacy_tracked = r#"{"type":"TrackedSetAggregate","function":"Max","property":"ManaValue","source":"TriggeringBatch"}"#;
+        let legacy_tracked_default =
+            r#"{"type":"TrackedSetAggregate","function":"Min","property":"Power"}"#;
+
+        for (payload, expected_source) in [
+            (
+                legacy_objects,
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ),
+            (
+                legacy_tracked,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    caused_by: None,
+                },
+            ),
+            (
+                legacy_tracked_default,
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                },
+            ),
+        ] {
+            let wrapped = format!(r#"{{"type":"Ref","qty":{payload}}}"#);
+            let expr: QuantityExpr =
+                serde_json::from_str(&wrapped).expect("legacy aggregate loads at its wire field");
+            let QuantityExpr::Ref {
+                qty: node @ QuantityRef::PropertyAggregate(aggregate),
+            } = &expr
+            else {
+                panic!("legacy aggregate must lift to PropertyAggregate: {expr:?}");
+            };
+            assert_eq!(aggregate.source(), &expected_source);
+            let canonical = serde_json::to_string(&expr).expect("canonical aggregate serializes");
+            assert!(canonical.contains(r#""type":"PropertyAggregate""#));
+            assert!(canonical.contains(r#""source""#));
+            let canonical_value: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+            let canonical_qty = &canonical_value["qty"];
+            assert!(!canonical_qty.as_object().unwrap().contains_key("filter"));
+            assert!(!canonical.contains("TrackedSetAggregate"));
+            assert_eq!(
+                serde_json::from_str::<QuantityExpr>(&canonical).unwrap(),
+                expr
+            );
+            assert!(matches!(node, QuantityRef::PropertyAggregate(_)));
+        }
+    }
+
+    /// Every direct `QuantityRef` carrier must use the compatibility deserializer,
+    /// not only `QuantityExpr::Ref`. This is the bounded direct-field census:
+    /// `PlayerFilter::PlayerAttribute`, all three quantity-bearing
+    /// `UnlessPayScaling` variants, and both sides of
+    /// `ParsedCondition::QuantityVsEachOpponent`. The three `StaticMode`
+    /// carriers are pinned separately in `types::statics`.
+    #[test]
+    fn legacy_property_aggregate_loads_through_every_direct_quantity_ref_carrier() {
+        let legacy_objects = serde_json::json!({
+            "type": "Aggregate",
+            "function": "Sum",
+            "property": "Power",
+            "filter": { "type": "Any" }
+        });
+        let legacy_tracked = serde_json::json!({
+            "type": "TrackedSetAggregate",
+            "function": "Max",
+            "property": "ManaValue",
+            "source": "TriggeringBatch"
+        });
+        let assert_canonical = |value: &serde_json::Value| {
+            let json = serde_json::to_string(value).unwrap();
+            assert!(json.contains(r#""type":"PropertyAggregate""#), "{json}");
+            assert!(!json.contains(r#""type":"Aggregate""#), "{json}");
+            assert!(!json.contains("TrackedSetAggregate"), "{json}");
+        };
+
+        let player_filter = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::All,
+            attr: Box::new(QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: 1 }),
+        };
+        let mut wire = serde_json::to_value(player_filter).unwrap();
+        wire["attr"] = legacy_objects.clone();
+        let loaded: PlayerFilter = serde_json::from_value(wire).unwrap();
+        assert_canonical(&serde_json::to_value(loaded).unwrap());
+
+        for scaling in [
+            UnlessPayScaling::PerQuantityRef {
+                quantity: QuantityRef::LifeAboveStarting,
+            },
+            UnlessPayScaling::PerAffectedAndQuantityRef {
+                quantity: QuantityRef::LifeAboveStarting,
+            },
+            UnlessPayScaling::PerAffectedWithRef {
+                quantity: QuantityRef::LifeAboveStarting,
+            },
+        ] {
+            let mut wire = serde_json::to_value(scaling).unwrap();
+            wire["data"]["quantity"] = legacy_tracked.clone();
+            let loaded: UnlessPayScaling = serde_json::from_value(wire).unwrap();
+            assert_canonical(&serde_json::to_value(loaded).unwrap());
+        }
+
+        for field in ["lhs", "rhs"] {
+            let restriction = ParsedCondition::QuantityVsEachOpponent {
+                lhs: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+            };
+            let mut wire = serde_json::to_value(restriction).unwrap();
+            wire[field] = if field == "lhs" {
+                legacy_objects.clone()
+            } else {
+                legacy_tracked.clone()
+            };
+            let loaded: ParsedCondition = serde_json::from_value(wire).unwrap();
+            assert_canonical(&serde_json::to_value(loaded).unwrap());
+        }
+    }
+
+    #[test]
+    fn property_aggregate_wire_tags_require_their_exact_population_shape() {
+        let canonical_source = r#"{"type":"Objects","filter":{"type":"Any"}}"#;
+        let typed_filter = r#"{"type":"Typed","type_filters":["Creature"],"properties":[]}"#;
+        let wrap = |qty: &str| format!(r#"{{"type":"Ref","qty":{qty}}}"#);
+
+        let canonical = format!(
+            r#"{{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{canonical_source}}}"#
+        );
+        assert!(serde_json::from_str::<QuantityExpr>(&wrap(&canonical)).is_ok());
+
+        for rejected in [
+            r#"{"type":"PropertyAggregate","function":"Sum","property":"Power"}"#.to_string(),
+            format!(
+                r#"{{"type":"PropertyAggregate","function":"Sum","property":"Power","filter":{typed_filter}}}"#
+            ),
+            format!(
+                r#"{{"type":"Aggregate","function":"Sum","property":"Power","source":{canonical_source}}}"#
+            ),
+            r#"{"type":"Aggregate","function":"Sum","property":"Power"}"#.to_string(),
+            format!(
+                r#"{{"type":"TrackedSetAggregate","function":"Sum","property":"Power","filter":{typed_filter}}}"#
+            ),
+            format!(
+                r#"{{"type":"TrackedSetAggregate","function":"Sum","property":"Power","source":{canonical_source}}}"#
+            ),
+        ] {
+            assert!(
+                serde_json::from_str::<QuantityExpr>(&wrap(&rejected)).is_err(),
+                "crossed or incomplete aggregate shape must be rejected: {rejected}",
+            );
+        }
+
+        let legacy = format!(
+            r#"{{"type":"Aggregate","function":"Sum","property":"Power","filter":{typed_filter}}}"#
+        );
+        assert!(serde_json::from_str::<QuantityExpr>(&wrap(&legacy)).is_ok());
+    }
+
+    #[test]
+    fn property_aggregate_rejects_incompatible_source_property_pairs() {
+        let journal = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        assert!(PropertyAggregate::new(
+            AggregateFunction::Sum,
+            ObjectProperty::ManaValue,
+            journal.clone()
+        )
+        .is_ok());
+        assert_eq!(
+            PropertyAggregate::new(AggregateFunction::Max, ObjectProperty::Power, journal),
+            Err(PropertyAggregateError::UnsupportedTurnJournalProperty(
+                ObjectProperty::Power
+            ))
+        );
+
+        let mixed = CardTypeSetSource::any_of(vec![
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::Any,
+            },
+            CardTypeSetSource::TurnJournal {
+                journal: TurnJournalKind::SpellsCast,
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        ])
+        .unwrap();
+        assert!(matches!(
+            PropertyAggregate::new(AggregateFunction::Min, ObjectProperty::Toughness, mixed),
+            Err(PropertyAggregateError::UnsupportedTurnJournalProperty(
+                ObjectProperty::Toughness
+            ))
+        ));
+
+        let invalid_json = r#"{"type":"PropertyAggregate","function":"Sum","property":"Power","source":{"type":"TurnJournal","journal":"SpellsCast","scope":"Controller"}}"#;
+        assert!(serde_json::from_str::<QuantityRef>(invalid_json).is_err());
     }
 
     #[test]

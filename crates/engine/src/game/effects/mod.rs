@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::game::conditions::{
     eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
@@ -24,9 +24,9 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor, GameState,
     LKISnapshot, ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation,
-    PendingCopyTokenBatch, PendingCostMoveResume, PendingDiscardBatchCompletion,
-    PendingPlayerScopeSacrificeChoice, PendingPlayerScopeSacrificeCompletion,
-    PendingPlayerScopeSacrificeFollowUp, WaitingFor, ZoneChangeRecord,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
+    PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
+    ResolutionOptionalPaymentOption, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -720,7 +720,7 @@ pub(crate) fn mark_pending_continuation_parent(state: &mut GameState, kind: Effe
 /// All `pending_continuation.take()` sites should use this helper rather
 /// than rolling their own `take + resolve_ability_chain`, so the parent
 /// event is never silently dropped.
-fn restore_continuation_trigger_firing(
+pub(super) fn restore_continuation_trigger_firing(
     state: &mut GameState,
     continuation_firing: Option<crate::types::identifiers::TriggerFiring>,
 ) {
@@ -814,7 +814,13 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             search_attach_host,
             trigger_context,
             trigger_firing,
+            attachment_choice,
+            attachment_remainder: _,
         } = cont;
+        debug_assert!(
+            attachment_choice.is_none(),
+            "an attachment choice must be consumed by its EffectZoneChoice handler"
+        );
         restore_continuation_trigger_firing(state, trigger_firing);
         state.resolving_continuation_attach_host = search_attach_host;
         let source_id = chain.source_id;
@@ -1081,10 +1087,11 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // authorize a synthetic entry completion.
         }
         ResolutionFrame::PostReplacement(drains) => {
-            if matches!(
+            let retired_paused_dispatch = matches!(
                 drains.resident().map(|drain| &drain.status),
                 Some(crate::types::game_state::DrainStatus::Paused)
-            ) {
+            );
+            if retired_paused_dispatch {
                 // CR 614.6 + CR 615.5: the direct child has answered the
                 // continuation's prompt, so retire precisely the resident
                 // paused dispatch before considering later ready work.
@@ -1107,6 +1114,19 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                         .take_active_post_replacement()
                         .expect("post-replacement dispatcher may remove only its active frame");
                 }
+            }
+            // CR 608.2c + CR 614.12a + CR 615.5: Retiring a paused replacement
+            // dispatch can expose the next ordinary continuation. Drain that
+            // exact continuation before priority; if it is the remaining
+            // Attach operation, its own completion boundary owns the printed
+            // tail. A typed Attach-choice owner remains action-owned.
+            if retired_paused_dispatch
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .active_ability_continuation()
+                    .is_some_and(|continuation| continuation.attachment_choice.is_none())
+            {
+                drain_pending_continuation(state, events);
             }
         }
     }
@@ -1830,6 +1850,8 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
             search_attach_host,
             trigger_context,
             trigger_firing,
+            attachment_choice,
+            attachment_remainder,
         } = existing;
         super::ability_utils::append_to_sub_chain(&mut head, *chain);
         state.push_ability_continuation(AbilityContinuationFrame {
@@ -1842,6 +1864,8 @@ fn prepend_to_pending_continuation(state: &mut GameState, mut head: ResolvedAbil
                 // re-latched to whatever is live at splice time.
                 trigger_context,
                 trigger_firing,
+                attachment_choice,
+                attachment_remainder,
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
@@ -3339,7 +3363,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
@@ -3370,6 +3393,9 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_counts_population_matching(source, filter_pred)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_counts_population_matching(aggregate.source(), filter_pred)
         }
         // No `TargetFilter` anywhere: player-scoped totals, per-object scopes,
         // resolution/turn counters, and cost bookkeeping.
@@ -3406,7 +3432,6 @@ fn quantity_ref_counts_population_matching(
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -4783,6 +4808,7 @@ fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
 
 /// Handler-specific execution data for a batch. Each variant carries exactly
 /// what the execute step needs to reproduce N one-by-one resolutions.
+#[cfg(test)]
 pub(crate) enum BatchExecutionPlan {
     /// Resolve `Effect::Token` `run_len` times by replaying the existing
     /// per-resolution body. Carries the resolved per-resolution `TokenSpec`
@@ -4791,7 +4817,6 @@ pub(crate) enum BatchExecutionPlan {
     /// characteristics (HIGH-1).
     Token {
         spec: crate::types::proposed_event::TokenSpec,
-        run_len: u32,
     },
     /// CR 608.2c + CR 707.2: Resolve a met copy-instead swap (`CopyTokenOf`)
     /// `prefix_len` times by replaying `token_copy::resolve` on the swapped
@@ -4801,17 +4826,14 @@ pub(crate) enum BatchExecutionPlan {
     /// ZoneChanged/TokenCreated probe events from the produced token's true
     /// characteristics.
     CopyToken {
-        copy_batch: PendingCopyTokenBatch,
-        effect_kind: EffectKind,
-        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
         probe_mana_value: u32,
-        prefix_len: u32,
     },
 }
 
 /// A proven-safe batch plan returned by `try_resolve_batch`. The driver
 /// consumes `consumed` stack entries and applies the plan once.
+#[cfg(test)]
 pub(crate) struct BatchPlan {
     plan: BatchExecutionPlan,
     /// Number of stack entries this batch consumes (drives the pop loop and
@@ -4819,12 +4841,13 @@ pub(crate) struct BatchPlan {
     consumed: u32,
 }
 
+#[cfg(test)]
 impl BatchPlan {
     /// Build a Token batch plan: resolve the base `Effect::Token` `run_len`
     /// times, producing the single per-resolution `spec` each iteration.
     pub(crate) fn token(spec: crate::types::proposed_event::TokenSpec, run_len: u32) -> Self {
         BatchPlan {
-            plan: BatchExecutionPlan::Token { spec, run_len },
+            plan: BatchExecutionPlan::Token { spec },
             consumed: run_len,
         }
     }
@@ -4833,21 +4856,14 @@ impl BatchPlan {
     /// swapped `CopyTokenOf` `prefix_len` times, producing one copy token each
     /// iteration. Consumes `prefix_len` stack entries (may be < the full run).
     pub(crate) fn copy_token(
-        copy_batch: PendingCopyTokenBatch,
-        effect_kind: EffectKind,
-        source_id: ObjectId,
         probe_spec: crate::types::proposed_event::TokenSpec,
         probe_mana_value: u32,
         prefix_len: u32,
     ) -> Self {
         BatchPlan {
             plan: BatchExecutionPlan::CopyToken {
-                copy_batch,
-                effect_kind,
-                source_id,
                 probe_spec,
                 probe_mana_value,
-                prefix_len,
             },
             consumed: prefix_len,
         }
@@ -4875,53 +4891,6 @@ impl BatchPlan {
             } => vec![*probe_mana_value],
         }
     }
-
-    /// CR 608.2: Apply the batch by replaying the per-resolution handler body
-    /// `run_len` times. The pipeline checkpoint (process_triggers + SBA) is
-    /// hoisted to once-after by the driver, but the per-token creation +
-    /// replacement + ETB bookkeeping stays at full N-fold multiplicity (§5.2).
-    pub(crate) fn execute(
-        &self,
-        state: &mut GameState,
-        ability: &ResolvedAbility,
-        events: &mut Vec<GameEvent>,
-    ) {
-        match &self.plan {
-            BatchExecutionPlan::Token { run_len, .. } => {
-                for _ in 0..*run_len {
-                    let _ = token::resolve(state, ability, events);
-                }
-            }
-            // CR 608.2c + CR 707.2: Replay the swapped `CopyTokenOf` resolver
-            // `prefix_len` times. Like the base Token arm, this intentionally
-            // bypasses `resolve_ability_chain`'s depth-0 prelude (resolution-
-            // scoped clears, NthResolutionThisTurn counter) — the instead-swap
-            // was applied ONCE in `try_resolve_batch`, and each copy is an
-            // independent per-token creation at full multiplicity (§5.2).
-            BatchExecutionPlan::CopyToken {
-                copy_batch,
-                effect_kind,
-                source_id,
-                prefix_len,
-                ..
-            } => {
-                token_copy::drive_copy_token_batches(
-                    state,
-                    VecDeque::from([copy_batch.clone()]),
-                    *effect_kind,
-                    *source_id,
-                    events,
-                );
-                for _ in 1..*prefix_len {
-                    events.push(GameEvent::EffectResolved {
-                        kind: *effect_kind,
-                        source_id: *source_id,
-                        subject: None,
-                    });
-                }
-            }
-        }
-    }
 }
 
 /// CR 608.2 + CR 608.2c: Returns a `BatchPlan` iff this effect instance is
@@ -4938,6 +4907,7 @@ impl BatchPlan {
 /// pass the battlefield-wide observer-order-invariance gate (Layer C,
 /// `game/stack.rs::observers_are_batch_safe`) before batching — that probe is
 /// complete by construction precisely because the spec emits only the ETB pair.
+#[cfg(test)]
 pub(crate) fn try_resolve_batch(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -4950,6 +4920,19 @@ pub(crate) fn try_resolve_batch(
         // in v1. The wildcard encodes "opt-in," not a forgotten arm — new
         // batch-aware handlers add an explicit arm above.
         _ => None,
+    }
+}
+
+/// Read-only admission profile for the ordinary sequential batch proof.
+///
+/// The stack runner never executes a token handler in bulk: it uses this only
+/// to decide which handler family may be speculatively resolved one entry at a
+/// time on a clone.  Token-specific source identity is intentionally owned by
+/// `token`, keeping stack mechanics from duplicating effect classification.
+pub(crate) fn supports_sequential_batch_proof(ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::Token { .. } => token::supports_sequential_batch_proof(ability),
+        _ => false,
     }
 }
 
@@ -5783,7 +5766,6 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::TrackedSetSize
             | QuantityRef::FilteredTrackedSetSize { .. }
-            | QuantityRef::TrackedSetAggregate { .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::TrackedSet { .. },
             }
@@ -5791,6 +5773,15 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
                 source: CardTypeSetSource::TrackedSet { .. },
                 ..
             } => true,
+            QuantityRef::PropertyAggregate(aggregate) => {
+                let mut found = false;
+                let complete = aggregate
+                    .source()
+                    .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+                        found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. })
+                    });
+                found || !complete
+            }
             // CR 608.2c: a player-count whose filter is keyed on the chain's
             // tracked object set is a CONSUMER of that set — the preceding
             // producer must publish it, or the count resolves to 0. This is the
@@ -6328,6 +6319,35 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 701.20a + CR 608.2c: A per-hit conditional keep destination (Part
+        // in Friendship's "if its mana value is 2 or less, put it onto the
+        // battlefield. Otherwise, put it into your hand") routes each hit card
+        // to EITHER `kept_destination` (the otherwise branch) OR the
+        // `kept_destination_if` zone (reveal_until.rs's `hit_destination`
+        // selection re-checks the card-property filter per hit). Scoping the
+        // tracked set to only `kept_destination` — as the generic arm below
+        // does for the unconditional case — silently drops every hit that
+        // landed via the conditional branch, truncating a chained "from among
+        // cards put onto the battlefield this way" consumer to just the
+        // otherwise-branch hits. Track both possible landing zones so the
+        // published set matches the full resolved hit population regardless
+        // of which branch each individual hit took.
+        Effect::RevealUntil {
+            kept_destination,
+            kept_destination_if: Some((_, if_true_zone)),
+            ..
+        } => {
+            let zones = [*kept_destination, *if_true_zone];
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged { object_id, to, .. } if zones.contains(to) => {
+                        Some(*object_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -7224,6 +7244,42 @@ pub(crate) struct UpfrontOptionalGate {
     /// `None` ⇒ the ability carries no `may_trigger_origin`, so no stored preference can key
     /// on it. That is not the same as "no preference stored": it is "no key exists".
     pub key: Option<MayTriggerAutoChoiceKey>,
+}
+
+/// CR 118.12 + CR 608.2d: enumerate the payable immediate branches of an
+/// optional root `PayCost(OneOf)` without renumbering them. The chooser is only
+/// an adapter; affordability and execution remain owned by `game::costs`.
+pub(crate) fn resolution_optional_payment_options(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(PlayerId, Vec<ResolutionOptionalPaymentOption>)> {
+    let Effect::PayCost {
+        cost: AbilityCost::OneOf { costs },
+        scale: None,
+        payer,
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer)?;
+    let scope = crate::game::costs::PaymentScope::Resolution {
+        ability,
+        cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+    };
+    let options = costs
+        .iter()
+        .enumerate()
+        .filter(|(_, cost)| {
+            crate::game::costs::is_direct_resolution_optional_payment_branch(cost)
+                && crate::game::costs::supported_at_resolution(cost)
+                && crate::game::costs::can_pay(state, payer, ability.source_id, cost, &scope)
+        })
+        .map(|(index, cost)| ResolutionOptionalPaymentOption {
+            index,
+            cost: cost.clone(),
+        })
+        .collect();
+    Some((payer, options))
 }
 
 pub(crate) fn upfront_optional_gate(
@@ -10305,6 +10361,26 @@ fn should_repeat_while_condition(
     true
 }
 
+/// Whether `pending` is the remaining, already-bound subset of `ability`'s
+/// Attach operation after an earlier selected attachment raised a child.
+///
+/// The strict subset is the provenance proof: a merely similar Attach
+/// continuation is not enough to claim ownership of this instruction's tail.
+fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &ResolvedAbility) -> bool {
+    let remaining = pending.chain.attach_attachment_targets();
+    let selected = ability.attach_attachment_targets();
+    pending
+        .attachment_remainder
+        .as_ref()
+        .is_some_and(|remainder| remainder.producer.as_ref() == ability)
+        && pending.attachment_choice.is_none()
+        && matches!(pending.chain.effect, Effect::Attach { .. })
+        && pending.chain.sub_ability.is_none()
+        && !remaining.is_empty()
+        && remaining.len() < selected.len()
+        && remaining.iter().all(|target| selected.contains(target))
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -11267,6 +11343,10 @@ fn resolve_chain_body(
         ability,
         OptionalFeasibility::Known(optional_is_infeasible),
     ) {
+        let UpfrontOptionalGate {
+            prompt_player,
+            key: may_trigger_key,
+        } = gate;
         // The executable half of the `optional_for` coupling note above: this branch is
         // reachable only because the CR 101.4 fan-out already returned, so the authority's
         // `optional_for.is_some() ⇒ None` conjunct can never be the thing that admits an
@@ -11277,11 +11357,53 @@ fn resolve_chain_body(
             "CR 608.2d + CR 101.4: the fan-out early return must have taken every \
              `optional_for` ability before the up-front gate"
         );
+        if let Some((payer, costs)) = resolution_optional_payment_options(state, ability) {
+            if may_trigger_key.as_ref().is_some_and(|key| {
+                matches!(
+                    state.may_trigger_auto_choice_for_live_prompt(key),
+                    Some(AutoMayChoice::Decline)
+                )
+            }) {
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    AutoMayChoice::Decline,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+            if costs.is_empty() {
+                // CR 608.2d: an impossible optional payment is declined without
+                // opening a choice window.
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    AutoMayChoice::Decline,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+            state
+                .install_direct_choice_frame(
+                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                        ability: Box::new(ability_with_event_context_targets(state, ability)),
+                        trigger_event: state.current_trigger_event.clone(),
+                        trigger_events: state.current_trigger_events.clone(),
+                        trigger_match_count: state.current_trigger_match_count,
+                    }),
+                    WaitingFor::ResolutionOptionalPaymentChoice {
+                        player: payer,
+                        source_id: ability.source_id,
+                        costs,
+                    },
+                )
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            return Ok(());
+        }
+
         let description = ability.description.clone();
-        let UpfrontOptionalGate {
-            prompt_player,
-            key: may_trigger_key,
-        } = gate;
         // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
         // not a duplicated authority: the KEY is what has to be built in one place, and it
         // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
@@ -12234,17 +12356,36 @@ fn resolve_chain_body(
         }
     }
 
+    // CR 608.2c + CR 400.7: A Dig's kept-card delivery can complete before its
+    // continuation resumes, so its enclosing resumed resolver has no local
+    // ZoneChanged event slice. Its continuation carries the settled kept cards
+    // as object targets; the mutable "this way" ledger may now describe the
+    // later rest-pile delivery. Other forward-result effects remain event-slice
+    // scoped.
+    //
     // Extract moved objects for result forwarding when forward_result is set.
     // Used for "put onto the battlefield attached to [source]" patterns where the
     // moved card becomes the sub-ability's source and the original source becomes a target.
     let forwarded_objects: Vec<ObjectId> = if ability.forward_result {
-        events[events_before..]
+        let moved: Vec<_> = events[events_before..]
             .iter()
             .filter_map(|e| match e {
                 GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
                 _ => None,
             })
-            .collect()
+            .collect();
+        if moved.is_empty() && matches!(ability.effect, Effect::Dig { .. }) {
+            ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect()
+        } else {
+            moved
+        }
     } else {
         vec![]
     };
@@ -12915,6 +13056,38 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
+        // CR 608.2c + CR 616.1: An Attach choice or a bound remaining subset
+        // already split this node's trailing instructions into an outer
+        // continuation. An Attached replacement can leave either owner beneath
+        // its active child frame. The generic pause path must not prepend that
+        // same tail onto the child operation.
+        let attach_child_already_owns_tail = matches!(ability.effect, Effect::Attach { .. })
+            && (state
+                .resolution_stack
+                .ability_continuations()
+                .any(|pending| {
+                    pending.attachment_choice.is_some()
+                        || is_bound_attach_remainder_for(pending, ability)
+                })
+                || state
+                    .resolution_stack
+                    .has_active_post_replacement_attach_choice_pair()
+                || state
+                    .active_post_replacement_drains()
+                    .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+                    .and_then(|drain| drain.source)
+                    .is_some_and(|source_id| {
+                        ability
+                            .attach_attachment_targets()
+                            .iter()
+                            .position(|attachment| attachment.object_id == source_id)
+                            .is_some_and(|index| {
+                                index + 1 < ability.attach_attachment_targets().len()
+                            })
+                    }));
+        if attach_child_already_owns_tail {
+            return Ok(());
+        }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
         // save the sub-ability as a continuation to execute after the player responds,
         // rather than immediately processing it (which would bypass the UI).
@@ -13080,6 +13253,8 @@ fn resolve_chain_body(
             return Ok(());
         } else if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
+            let attachment_candidates =
+                attach::attachment_candidates_from_zone_change(state, sub, &forwarded_objects);
             // CR 707.10: `CopySpell { SelfRef }` copies the resolving spell
             // itself (Sevinne's Reclamation, Chain cycle). `forward_result`
             // rebinding `source_id` to the just-moved permanent would make
@@ -13206,6 +13381,9 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            if !attachment_candidates.is_empty() {
+                sub_with_context.bind_attach_attachment_candidates(attachment_candidates);
+            }
             resolve_ability_chain(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -14934,7 +15112,7 @@ mod tests {
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
-        TrackedSetId, TriggerFiring,
+        ObjectIncarnationRef, TrackedSetId, TriggerFiring,
     };
     use crate::types::keywords::Keyword;
     use crate::types::keywords::KeywordKind;
@@ -14979,6 +15157,42 @@ mod tests {
             PlayerId(0),
         )
         .condition(AbilityCondition::WhenYouDo)
+    }
+
+    #[test]
+    fn bound_attach_remainder_requires_exact_producer_provenance() {
+        let state = GameState::new_two_player(42);
+        let first = ObjectIncarnationRef::of(ObjectId(1), 0);
+        let second = ObjectIncarnationRef::of(ObjectId(2), 0);
+        let mut producer = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::Any,
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        producer.set_attach_attachment_targets(vec![first, second]);
+
+        let mut remainder_chain = producer.clone();
+        remainder_chain.set_attach_attachment_targets(vec![second]);
+        let mut pending = PendingContinuation::new(Box::new(remainder_chain), &state);
+        pending.attachment_remainder = Some(crate::types::game_state::PendingAttachmentRemainder {
+            producer: Box::new(producer.clone()),
+        });
+
+        assert!(
+            is_bound_attach_remainder_for(&pending, &producer),
+            "the stamped producer owns its bound remaining attachment subset"
+        );
+
+        let mut distinct_producer = producer.clone();
+        distinct_producer.source_id = ObjectId(101);
+        assert!(
+            !is_bound_attach_remainder_for(&pending, &distinct_producer),
+            "the same selected subset from a distinct Attach producer cannot claim this tail"
+        );
     }
 
     /// CR 608.2c + CR 614.6: a destination-bound "this way" rider must not
@@ -16180,11 +16394,17 @@ mod tests {
     #[test]
     fn token_power_toughness_tracked_set_marks_ability_as_referencing_tracked_set() {
         let tracked_pt = PtValue::Quantity(QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetAggregate {
-                function: crate::types::ability::AggregateFunction::Sum,
-                property: crate::types::ability::ObjectProperty::Power,
-                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    crate::types::ability::AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::Power,
+                    crate::types::ability::CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
         });
         let ability = ResolvedAbility::new(
             Effect::Token {
@@ -21488,6 +21708,7 @@ mod tests {
             enters_attacking: false,
             kept_optional_to: None,
             enters_under: None,
+            kept_destination_if: None,
         };
         // The RevealUntil arm is event-driven; `state`/`ability` are ignored (only
         // the GenericEffect arm reads them). Minimal state + empty-target ability.
@@ -21497,6 +21718,90 @@ mod tests {
         assert_eq!(
             affected_objects_from_events(&state, &ability, &effect, &events),
             vec![hit]
+        );
+    }
+
+    /// CR 701.20a + CR 608.2c (PR #8008 review): Part in Friendship's per-hit
+    /// conditional keep ("if its mana value is <= X, put it onto the
+    /// battlefield. Otherwise, put it into your hand") routes each hit to
+    /// EITHER `kept_destination` (the otherwise/Hand branch) OR the
+    /// `kept_destination_if` zone (Battlefield). Before this fix,
+    /// `affected_objects_from_events`'s `_` arm derived a single `dest_zone`
+    /// from `kept_destination` alone, so a hit that actually resolved through
+    /// the CONDITIONAL branch (Battlefield) was silently dropped from the
+    /// published tracked set — any chained "put a counter on it" / "from
+    /// among cards put onto the battlefield this way" consumer would see an
+    /// empty or incomplete set. This test seeds ONE `ZoneChanged` per branch
+    /// and asserts both are published.
+    #[test]
+    fn reveal_until_conditional_kept_publishes_both_destinations_for_tracked_set() {
+        let battlefield_hit = ObjectId(4);
+        let hand_hit = ObjectId(5);
+        let miss = ObjectId(6);
+        let events = vec![
+            // The conditional branch: mana value <= threshold → Battlefield.
+            GameEvent::ZoneChanged {
+                object_id: battlefield_hit,
+                from: Some(Zone::Library),
+                to: Zone::Battlefield,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    battlefield_hit,
+                    Some(Zone::Library),
+                    Zone::Battlefield,
+                )),
+            },
+            // The otherwise branch: mana value > threshold → Hand
+            // (`kept_destination`).
+            GameEvent::ZoneChanged {
+                object_id: hand_hit,
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    hand_hit,
+                    Some(Zone::Library),
+                    Zone::Hand,
+                )),
+            },
+            // A dug-past non-matching card returns to the library (the rest
+            // pile) — must NOT be published.
+            GameEvent::ZoneChanged {
+                object_id: miss,
+                from: Some(Zone::Library),
+                to: Zone::Library,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    miss,
+                    Some(Zone::Library),
+                    Zone::Library,
+                )),
+            },
+        ];
+        let effect = Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            matched_disposition: crate::types::ability::RevealUntilDisposition::KeepEach,
+            kept_destination: Zone::Hand,
+            rest_destination: Zone::Library,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            kept_optional_to: None,
+            enters_under: None,
+            kept_destination_if: Some((
+                Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature))),
+                Zone::Battlefield,
+            )),
+        };
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(effect.clone(), vec![], ObjectId(0), PlayerId(0));
+
+        let mut published = affected_objects_from_events(&state, &ability, &effect, &events);
+        published.sort();
+        let mut expected = vec![battlefield_hit, hand_hit];
+        expected.sort();
+        assert_eq!(
+            published, expected,
+            "both the conditional (battlefield) and otherwise (hand) hit destinations must be \
+             published to the tracked set — the rest-pile miss must not be"
         );
     }
 
@@ -25913,13 +26218,18 @@ mod tests {
 
         let condition = AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::Toughness,
-                    filter: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
-                    ),
-                },
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Toughness,
+                        crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    )
+                    .expect("statically valid property aggregate"),
+                ),
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 40 },
@@ -26544,36 +26854,46 @@ mod tests {
             Effect::Token {
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 toughness: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 types: vec!["Creature".to_string(), "Illusion".to_string()],
                 colors: vec![ManaColor::Blue],
@@ -26689,36 +27009,46 @@ mod tests {
             Effect::Token {
                 name: "Illusion".to_string(),
                 power: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 toughness: PtValue::Quantity(QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: crate::types::ability::AggregateFunction::Sum,
-                        property: crate::types::ability::ObjectProperty::ManaValue,
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::ExiledBySource,
-                                TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                    FilterProp::Owned {
-                                        controller: ControllerRef::You,
-                                    },
-                                ])),
-                            ],
-                        },
-                    },
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            crate::types::ability::AggregateFunction::Sum,
+                            crate::types::ability::ObjectProperty::ManaValue,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::And {
+                                    filters: vec![
+                                        TargetFilter::ExiledBySource,
+                                        TargetFilter::Typed(TypedFilter::default().properties(
+                                            vec![FilterProp::Owned {
+                                                controller: ControllerRef::You,
+                                            }],
+                                        )),
+                                    ],
+                                },
+                            },
+                        )
+                        .expect("statically valid property aggregate"),
+                    ),
                 }),
                 types: vec!["Creature".to_string(), "Illusion".to_string()],
                 colors: vec![ManaColor::Blue],

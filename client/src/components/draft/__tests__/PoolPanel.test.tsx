@@ -81,7 +81,7 @@ describe("PoolPanel — CR 903.13e granted filler", () => {
       <PoolPanel
         view={{
           ...TEST_VIEW,
-          grantable_commander_filler: { card_name: "Faceless One", max_copies: 2 },
+          grantable_commander_fillers: [{ card_name: "Faceless One", max_copies: 2 }],
         }}
       />,
     );
@@ -89,11 +89,35 @@ describe("PoolPanel — CR 903.13e granted filler", () => {
     expect(screen.getByText(GRANTED)).toBeInTheDocument();
   });
 
-  it("renders no grant line when the draft's set grants none", () => {
+  /**
+   * CR 903.13e states its grants per contained set, so a mixed-set draft
+   * publishes several — and each gets its OWN line, with its own cap. A render
+   * that took only the first (`fillers[0]`) drops the second here.
+   */
+  it("renders one grant line per granted filler for a mixed-set draft", () => {
+    render(
+      <PoolPanel
+        view={{
+          ...TEST_VIEW,
+          grantable_commander_fillers: [
+            { card_name: "The Prismatic Piper", max_copies: 2 },
+            { card_name: "Faceless One", max_copies: 2 },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText(GRANTED)).toBeInTheDocument();
+    expect(
+      screen.getByText("+ up to 2 × The Prismatic Piper (commander only)"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no grant line when the draft's sets grant none", () => {
     render(<PoolPanel view={TEST_VIEW} />);
 
     // Reach-guard: the panel rendered at all.
-    expect(screen.getByText("1 cards drafted")).toBeInTheDocument();
+    expect(screen.getByText("1 card drafted")).toBeInTheDocument();
     expect(screen.queryByText(GRANTED)).toBeNull();
   });
 
@@ -110,13 +134,13 @@ describe("PoolPanel — CR 903.13e granted filler", () => {
       <PoolPanel
         view={{
           ...TEST_VIEW,
-          grantable_commander_filler: { card_name: "Faceless One", max_copies: 2 },
+          grantable_commander_fillers: [{ card_name: "Faceless One", max_copies: 2 }],
         }}
       />,
     );
 
     // Reach-guard: the collapsed header still renders.
-    expect(screen.getByText("1 cards drafted")).toBeInTheDocument();
+    expect(screen.getByText("1 card drafted")).toBeInTheDocument();
     expect(screen.queryByText(GRANTED)).toBeNull();
   });
 });

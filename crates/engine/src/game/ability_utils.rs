@@ -17,7 +17,7 @@ use crate::types::game_state::{
     GameState, PtDirection, TargetEffectDetail, TargetSelectionConstraint, TargetSelectionProgress,
     TargetSelectionSlot,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -3951,7 +3951,12 @@ fn assign_attach_attachment_selected_slots(
                 "Missing required target".to_string(),
             ));
         }
-        ability.targets.extend(window.iter().flatten().cloned());
+        for target in window.iter().flatten() {
+            ability.targets.push(target.clone());
+            if let Some(binding) = attach_object_binding(state, target)? {
+                ability.bind_attach_attachment_target(binding);
+            }
+        }
         *next_slot = end_slot;
     } else {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
@@ -3960,7 +3965,12 @@ fn assign_attach_attachment_selected_slots(
             ));
         };
         match selected_slot {
-            Some(target) => ability.targets.push(target.clone()),
+            Some(target) => {
+                ability.targets.push(target.clone());
+                if let Some(binding) = attach_object_binding(state, target)? {
+                    ability.bind_attach_attachment_target(binding);
+                }
+            }
             None if allow_skip => {}
             None => {
                 return Err(EngineError::InvalidAction(
@@ -4021,6 +4031,9 @@ fn assign_attach_attachment_declared_targets(
         for slot_index in 0..attachment_window {
             if let Some(target) = targets.get(*next_target) {
                 ability.targets.push(target.clone());
+                if let Some(binding) = attach_object_binding(state, target)? {
+                    ability.bind_attach_attachment_target(binding);
+                }
                 *next_target += 1;
             } else if slot_index < bounds.min {
                 return Err(EngineError::InvalidAction(
@@ -4032,6 +4045,9 @@ fn assign_attach_attachment_declared_targets(
         }
     } else if let Some(target) = targets.get(*next_target) {
         ability.targets.push(target.clone());
+        if let Some(binding) = attach_object_binding(state, target)? {
+            ability.bind_attach_attachment_target(binding);
+        }
         *next_target += 1;
     } else if !allow_skip {
         return Err(EngineError::InvalidAction(
@@ -4039,6 +4055,27 @@ fn assign_attach_attachment_declared_targets(
         ));
     }
     Ok(())
+}
+
+/// CR 400.7: Captures the exact incarnation of an object selected into an
+/// attachment role, so a later object reusing its storage ID cannot satisfy
+/// that role after a zone change made it a new object.
+fn attach_object_binding(
+    state: &GameState,
+    target: &TargetRef,
+) -> Result<Option<ObjectIncarnationRef>, EngineError> {
+    let TargetRef::Object(object_id) = target else {
+        return Ok(None);
+    };
+    Ok(Some(
+        state
+            .objects
+            .get(object_id)
+            .map(ObjectIncarnationRef::from_object)
+            .ok_or_else(|| {
+                EngineError::InvalidAction("Selected attachment left play".to_string())
+            })?,
+    ))
 }
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
@@ -4625,7 +4662,6 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
         // CR 608.2i: the look-back sibling of `EnteredThisTurn` carries the same
         // kind of population filter, so it must reach the same recursion instead
@@ -4648,6 +4684,9 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_target_slot_filter(source)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            characteristic_source_target_slot_filter(aggregate.source())
         }
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
             CastManaSpentMetric::FromSource { source_filter } => {
@@ -6648,6 +6687,8 @@ fn assign_targets_recursive(
         if ability.context.additional_cost_paid {
             assign_targets_recursive(state, sub_ability, targets, next_target)?;
             ability.targets = sub_ability.targets.clone();
+            ability.context.attach_target_bindings =
+                sub_ability.context.attach_target_bindings.clone();
             return Ok(());
         }
     }
@@ -6704,6 +6745,9 @@ fn assign_targets_recursive(
             if attach_host_filter_needs_target_slot(&target) {
                 if let Some(target) = targets.get(*next_target) {
                     ability.targets.push(target.clone());
+                    if let Some(binding) = attach_object_binding(state, target)? {
+                        ability.bind_attach_host_target(binding);
+                    }
                     *next_target += 1;
                 } else if !ability.optional_targeting {
                     return Err(EngineError::InvalidAction(
@@ -6959,6 +7003,8 @@ fn assign_selected_slots_recursive(
         if ability.context.additional_cost_paid {
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
             ability.targets = sub_ability.targets.clone();
+            ability.context.attach_target_bindings =
+                sub_ability.context.attach_target_bindings.clone();
             return Ok(());
         }
     }
@@ -7067,7 +7113,12 @@ fn assign_selected_slots_recursive(
                     ));
                 };
                 match selected_slot {
-                    Some(target) => ability.targets.push(target.clone()),
+                    Some(target) => {
+                        ability.targets.push(target.clone());
+                        if let Some(binding) = attach_object_binding(state, target)? {
+                            ability.bind_attach_host_target(binding);
+                        }
+                    }
                     None if ability.optional_targeting => {}
                     None => {
                         return Err(EngineError::InvalidAction(
@@ -14285,6 +14336,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(900),
@@ -14406,11 +14458,16 @@ mod tests {
         assert!(filter_references_target_creature_quantity(&shares_quality));
 
         let aggregate = QuantityExpr::Ref {
-            qty: QuantityRef::Aggregate {
-                function: AggregateFunction::Max,
-                property: ObjectProperty::ManaValue,
-                filter: target_power_filter(),
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Max,
+                    ObjectProperty::ManaValue,
+                    crate::types::ability::CardTypeSetSource::Objects {
+                        filter: target_power_filter(),
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
         };
         assert!(quantity_expr_references_target_creature(&aggregate));
 

@@ -885,6 +885,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }

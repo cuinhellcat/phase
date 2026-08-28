@@ -95,6 +95,14 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
+ *       replaced in GameState snapshots by the canonical
+ *       QuantityRef.PropertyAggregate tag with a validated source object. New
+ *       peers migrate both legacy input tags, but a v34 peer cannot parse the
+ *       canonical tag emitted by v35, so P2P first contact rejects the skew.
+ *  34 — GameState gained serialized cast-occurrence provenance and prepared-copy links.
+ *  33 — Resolution-time optional PayCost(OneOf) branch choice added a
+ *       serialized WaitingFor/GameAction pair.
  *  32 — FormatConfig.deck_size changed from a bare u16 to the adjacently
  *       tagged DeckSizeRule enum (Minimum(u16) / Exactly(u16)), because
  *       CR 903.13f(1) makes Commander Draft a command-zone format with a
@@ -195,7 +203,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 32 as const;
+export const WIRE_PROTOCOL_VERSION = 35 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

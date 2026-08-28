@@ -72,6 +72,9 @@ function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPla
     pool_groups: EMPTY_DRAFT_POOL_GROUPS,
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -136,7 +139,7 @@ describe("ServerDraftAdapter", () => {
     // Start a createDraft flow — this triggers attachSocket.
     const createPromise = adapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",
@@ -190,7 +193,7 @@ describe("ServerDraftAdapter", () => {
     const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
     const createPromise = setupFailingAdapter.createDraft({
       displayName: "Alice",
-      setCode: "MKM",
+      setCodes: ["MKM"],
       kind: "Premier",
       public: true,
       tournamentFormat: "Swiss",
@@ -484,6 +487,41 @@ describe("ServerDraftAdapter", () => {
 
     const result = await pickPromise;
     expect(result.pick_number).toBe(2);
+  });
+
+  it("DraftStateUpdate preserves workspace presentation metadata", async () => {
+    const pickPromise = adapter.submitPick("card-003");
+    const workspaceMetadata: Pick<
+      DraftPlayerView["pool_groups"],
+      "workspace_capabilities" | "workspace_row_classification"
+    > = {
+      workspace_capabilities: {
+        rarity_group_order: ["mythic", "rare", "uncommon", "common", "rarity_other"],
+      },
+      workspace_row_classification: {
+        creature_instance_ids: ["creature-1", "creature-2"],
+        noncreature_instance_ids: ["instant-1"],
+      },
+    };
+    const view = createMockDraftView({
+      pick_number: 3,
+      pool_groups: {
+        ...EMPTY_DRAFT_POOL_GROUPS,
+        ...workspaceMetadata,
+      },
+    });
+
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftStateUpdate",
+        data: { view },
+      }),
+    );
+
+    const result = await pickPromise;
+    expect(result.pool_groups).toMatchObject(workspaceMetadata);
+    expect(adapter.currentDraftView?.pool_groups).toMatchObject(workspaceMetadata);
   });
 
   it("DraftTimerSync emits timerSync event", () => {

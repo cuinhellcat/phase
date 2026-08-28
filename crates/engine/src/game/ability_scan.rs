@@ -92,8 +92,8 @@
 //! for the conflict model and its CR 603.3b commutation argument.
 
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
-    CountScope, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
+    AbilityCondition, AbilityCost, AbilityDefinition, CardTypeSetSource, ContinuousModification,
+    ControllerRef, CountScope, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
     ForEachCategoryAction, GuessSubject, KeeperConstraint, ManaProduction, ModalChoice,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     RepeatContinuation, ReplacementCondition, ResolvedAbility, StaticCondition, TargetFilter,
@@ -228,6 +228,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         //      none of which express a resolution-time dynamic read ----
         targets: _,                // concrete announced target refs (already resolved)
         source_id: _,              // object id
+        cast_occurrence: _,        // finalized-cast provenance, no dynamic read
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
         noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
@@ -1554,6 +1555,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             filter,
             count,
             enters_under,
+            kept_destination_if,
             matched_disposition: _,
             kept_destination: _,
             rest_destination: _,
@@ -1567,6 +1569,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             if let Some(x) = enters_under {
                 acc = acc.or(scan_controller_ref(x));
+            }
+            // CR 608.2c: the per-hit conditional destination filter (Part in
+            // Friendship's "if its mana value is <= the number of lands you
+            // control") reads game state exactly like the primary `filter` —
+            // scan it identically.
+            if let Some((cond_filter, _zone)) = kept_destination_if {
+                acc = acc.or(scan_target_filter(cond_filter, target_ctx, mode));
             }
             acc
         }
@@ -1867,6 +1876,57 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
     }
 }
 
+fn scan_property_aggregate_source(source: &CardTypeSetSource, mode: ScanMode) -> Axes {
+    let mut axes = Axes::NONE;
+    let complete =
+        source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
+            axes = axes.or(match leaf {
+                CardTypeSetSource::Objects { filter } => Axes {
+                    event: false,
+                    sibling: true,
+                    projected: false,
+                }
+                .or(scan_target_filter(
+                    filter,
+                    FilterReadContext::LiveBoardCensus,
+                    mode,
+                )),
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    ..
+                } => Axes {
+                    event: true,
+                    sibling: false,
+                    projected: false,
+                },
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    ..
+                } => Axes::NONE,
+                // CR 603.3b: the journal population is projected turn state,
+                // while an optional event-relative filter still reads the
+                // triggering event and must participate in trigger ordering.
+                CardTypeSetSource::TurnJournal { filter, .. } => Axes {
+                    event: false,
+                    sibling: false,
+                    projected: true,
+                }
+                .or(filter.as_ref().map_or(Axes::NONE, |filter| {
+                    scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
+                })),
+                CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+                    Axes::CONSERVATIVE
+                }
+                CardTypeSetSource::AnyOf { .. } => Axes::NONE,
+            });
+        });
+    if complete {
+        axes
+    } else {
+        Axes::CONSERVATIVE
+    }
+}
+
 fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
     match x {
         QuantityRef::HandSize { player, .. } => {
@@ -2092,22 +2152,8 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::SelfManaValue => Axes::NONE,
-        QuantityRef::Aggregate {
-            filter,
-            function: _,
-            property: _,
-        } => {
-            let mut acc = Axes {
-                event: false,
-                sibling: true,
-                projected: false,
-            };
-            acc = acc.or(scan_target_filter(
-                filter,
-                FilterReadContext::LiveBoardCensus,
-                mode,
-            ));
-            acc
+        QuantityRef::PropertyAggregate(aggregate) => {
+            scan_property_aggregate_source(aggregate.source(), mode)
         }
         QuantityRef::ControlledByEachPlayer {
             filter,
@@ -2175,21 +2221,6 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        QuantityRef::TrackedSetAggregate {
-            function: _,
-            property: _,
-            source,
-        } => match source {
-            // Chain-published set: reads no trigger/sibling context (unchanged).
-            TrackedAnaphorSource::ChainSet => Axes::NONE,
-            // Reads `state.current_trigger_events` (the triggering event) →
-            // event axis true, mirroring `QuantityRef::EventContextAmount` below.
-            TrackedAnaphorSource::TriggeringBatch => Axes {
-                event: true,
-                sibling: false,
-                projected: false,
-            },
-        },
         QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
         // CR 608.2c + CR 608.2i: every channel and every aggregate reads
         // resolution-local state — `last_effect_amount` /
@@ -3084,6 +3115,9 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::AttachedTo => Axes::NONE,
         TargetFilter::LastCreated => Axes::NONE,
         TargetFilter::LastRevealed | TargetFilter::LastZoneChanged => Axes::NONE,
+        // CR 701.47c: per-resolution local (the Army amass just touched) — no
+        // event/sibling/projected axis, mirroring `ObjectScope::AmassedArmy`.
+        TargetFilter::AmassedArmy => Axes::NONE,
         TargetFilter::CostPaidObject => Axes {
             event: true,
             sibling: false,
@@ -6434,6 +6468,101 @@ mod tests {
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::ManaColor;
     use crate::types::player::{PlayerCounterKind, PlayerId};
+
+    #[test]
+    fn property_aggregate_source_scan_axes_are_exhaustive() {
+        use crate::types::ability::{
+            CardTypeSetSource, CountScope, ObjectProperty, PropertyAggregate, TrackedAnaphorSource,
+            TurnJournalKind, ZoneRef,
+        };
+
+        let chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+        };
+        let journal = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: None,
+        };
+        let event_filtered_journal = CardTypeSetSource::TurnJournal {
+            journal: TurnJournalKind::SpellsCast,
+            scope: CountScope::Controller,
+            filter: Some(TargetFilter::TriggeringSource),
+        };
+        let rows = vec![
+            (
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Any,
+                },
+                Axes {
+                    event: false,
+                    sibling: true,
+                    projected: false,
+                },
+            ),
+            (
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    caused_by: None,
+                },
+                Axes {
+                    event: true,
+                    sibling: false,
+                    projected: false,
+                },
+            ),
+            (chain.clone(), Axes::NONE),
+            (
+                journal.clone(),
+                Axes {
+                    event: false,
+                    sibling: false,
+                    projected: true,
+                },
+            ),
+            (
+                event_filtered_journal,
+                Axes {
+                    event: true,
+                    sibling: false,
+                    projected: true,
+                },
+            ),
+            (
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                },
+                Axes::CONSERVATIVE,
+            ),
+            (CardTypeSetSource::ExiledBySource, Axes::CONSERVATIVE),
+            (
+                CardTypeSetSource::any_of(vec![chain, journal]).unwrap(),
+                Axes {
+                    event: false,
+                    sibling: false,
+                    projected: true,
+                },
+            ),
+        ];
+        for (source, expected) in rows {
+            let qty = QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::ManaValue,
+                    source.clone(),
+                )
+                .unwrap(),
+            );
+            let actual = scan_quantity_ref(&qty, ScanMode::Conservative);
+            assert_eq!(
+                (actual.event, actual.sibling, actual.projected),
+                (expected.event, expected.sibling, expected.projected),
+                "{source:?}"
+            );
+        }
+    }
 
     fn ability_with_amount(qty: QuantityRef) -> ResolvedAbility {
         ResolvedAbility::new(

@@ -1,13 +1,13 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
-    AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CastTimingPermission,
-    CastingPermission, ChoiceType, ContinuousModification, CostObjectCount, CostPaidObjectSnapshot,
-    CounterCostSelection, Duration, Effect, EffectKind, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef, TypeFilter,
+    AdditionalCost, BoardWideCostModifier, CardPlayMode, CardSelectionMode, CardTypeSetSource,
+    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
+    CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, EffectKind, FilterProp,
+    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
+    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -2693,6 +2693,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -19301,8 +19302,24 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         QuantityRef::LifeAboveStarting | QuantityRef::StartingLifeTotal => true,
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
-        | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. } => !filter_references_target_player(filter),
+        | QuantityRef::CountersOnObjects { filter, .. } => !filter_references_target_player(filter),
+        QuantityRef::PropertyAggregate(aggregate) => {
+            let mut relative = true;
+            let complete = aggregate.source().try_for_each_member(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| match leaf {
+                    CardTypeSetSource::Objects { filter } => {
+                        relative &= !filter_references_target_player(filter);
+                    }
+                    CardTypeSetSource::Zone { .. } => {}
+                    CardTypeSetSource::ExiledBySource
+                    | CardTypeSetSource::TrackedSet { .. }
+                    | CardTypeSetSource::TurnJournal { .. }
+                    | CardTypeSetSource::AnyOf { .. } => relative = false,
+                },
+            );
+            complete && relative
+        }
         QuantityRef::CountersOn { scope, .. }
         | QuantityRef::Power { scope }
         | QuantityRef::BasePower { scope }
@@ -20631,13 +20648,14 @@ pub fn handle_cancel_cast(
 
     if let Some(source_id) = pending.cancel_restore_prepared_source {
         // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
-        // the source's prepared marker and clear the synthetic copy object.
+        // the source's prepared marker and leave its linked copy in exile.
+        // Announcement never committed the Exile -> Stack zone change, so the
+        // same copy remains the CR 722.3c object authorized for a later cast.
         if let Some(source) = state.objects.get_mut(&source_id) {
             if source.zone == Zone::Battlefield {
                 source.prepared = Some(PreparedState);
             }
         }
-        state.objects.remove(&pending.object_id);
     }
 }
 

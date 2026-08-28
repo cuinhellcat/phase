@@ -102,23 +102,24 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, CastingPermission,
-    ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
-    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
-    DelayedTriggerLifetime, DieResultBranch, DoubleTarget, Duration, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MultiTargetSpec, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, WheneverEventExpiry, ZoneOwner,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastPermissionConstraint,
+    CastingPermission, ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousModification, ControlWindow, ControllerRef,
+    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
+    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DoubleTarget, Duration,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, GuessSubject,
+    IntensityScope, IterationKindBinding, KeeperConstraint, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NumberDistinctness, ObjectProperty,
+    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
+    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    WheneverEventExpiry, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -3581,11 +3582,20 @@ pub(crate) fn parse_cast_this_way_enters_with_counter(lower: &str) -> Option<(Co
         tag("that permanent enters with "),
         tag("that artifact enters with "),
         // Self-granting permission (Undead Sprinter) refers to itself as "this
-        // creature", normalized to the `~` self-reference token upstream before
-        // this parser runs — distinct from the anaphoric "that creature" a
+        // creature" in the printed Oracle text. The main parse pipeline
+        // normalizes that phrase to the `~` self-reference token upstream
+        // before this parser runs, but this recognizer is also the shared
+        // authority `swallow_check`'s carrier-scoping detectors call directly
+        // against RAW, un-normalized unit text (by design — see
+        // `enters_with_counter_carrier_is_only_enters_with_marker`), so both
+        // the normalized and literal CR 201.5 self-reference forms must be
+        // accepted here — distinct from the anaphoric "that creature" a
         // separate-source grant uses.
         tag("~ enters with "),
         tag("it enters with "),
+        tag("this creature enters with "),
+        tag("this permanent enters with "),
+        tag("this artifact enters with "),
     ))
     .parse(lower)
     .ok()?;
@@ -8981,6 +8991,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
@@ -13111,6 +13122,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             enters_attacking: false,
             kept_optional_to: None,
             enters_under: None,
+            kept_destination_if: None,
         }));
     }
 
@@ -13163,6 +13175,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         enters_attacking: false,
         kept_optional_to: None,
         enters_under: None,
+        kept_destination_if: None,
     }))
 }
 
@@ -27798,12 +27811,23 @@ fn def_slots_reference_triggering_batch(def: &AbilityDefinition) -> bool {
     fn expr_references_batch(expr: &QuantityExpr) -> bool {
         match expr {
             QuantityExpr::Ref {
-                qty:
-                    QuantityRef::TrackedSetAggregate {
-                        source: TrackedAnaphorSource::TriggeringBatch,
-                        ..
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            } => {
+                let mut found = false;
+                let complete = aggregate.source().try_for_each_member(
+                    crate::types::ability::UNION_DEPTH_BUDGET,
+                    &mut |leaf| {
+                        found |= matches!(
+                            leaf,
+                            CardTypeSetSource::TrackedSet {
+                                set: TrackedAnaphorSource::TriggeringBatch,
+                                ..
+                            }
+                        );
                     },
-            } => true,
+                );
+                found || !complete
+            }
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => false,
             QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
@@ -27843,12 +27867,23 @@ fn def_slots_reference_triggering_batch(def: &AbilityDefinition) -> bool {
 fn rebind_tracked_aggregate_expr(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::TrackedSetAggregate {
-                    source: source @ TrackedAnaphorSource::TriggeringBatch,
-                    ..
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } => {
+            let mut source = aggregate.source().clone();
+            let complete = source.try_for_each_member_mut(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    if let CardTypeSetSource::TrackedSet { set, .. } = leaf {
+                        if *set == TrackedAnaphorSource::TriggeringBatch {
+                            *set = TrackedAnaphorSource::ChainSet;
+                        }
+                    }
                 },
-        } => *source = TrackedAnaphorSource::ChainSet,
+            );
+            assert!(complete, "validated property aggregate source depth");
+            *aggregate = PropertyAggregate::new(aggregate.function(), aggregate.property(), source)
+                .expect("retargeting a tracked population preserves aggregate validity");
+        }
         QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }

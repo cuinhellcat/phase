@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -1123,6 +1124,14 @@ pub struct ManaSpentSourceSnapshot {
     pub lki: LKISnapshot,
 }
 
+/// CR 601.2i: Stable coordinate of one finalized cast in its caster's
+/// turn-scoped spell-cast journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CastOccurrence {
+    pub caster: PlayerId,
+    pub turn_journal_index: u32,
+}
+
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {
@@ -2076,9 +2085,18 @@ pub struct ResolveAllConsentParticipant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveAllConsentRun {
     pub epoch: u64,
-    pub max_resolutions: u32,
+    /// Legacy numeric saves use `0` for no cap. The shared resolution-session
+    /// budget keeps that established wire shape while normalizing it in memory.
+    #[serde(default)]
+    pub max_resolutions: StackResolutionBudget,
     pub priority_snapshot: ResolveAllPrioritySnapshot,
     pub participants: Vec<ResolveAllConsentParticipant>,
+    /// The complete sparse auto-pass map captured before a fresh Resolve All
+    /// run installs its temporary shared-resolution overlay. `None` identifies
+    /// a pre-session legacy consent run; `Some(empty)` is a deliberately
+    /// captured empty baseline and must remain distinguishable on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_pass_baseline: Option<BTreeMap<PlayerId, AutoPassMode>>,
 }
 
 impl ResolveAllConsentRun {
@@ -2372,6 +2390,25 @@ pub struct CommanderDamageEntry {
 /// without the other and break the "pause emits the same event as
 /// non-pause" invariant.
 ///
+/// The exact resolution-time Attach instruction that owns an
+/// `EffectZoneChoice`. The operation stays typed across a host choice followed
+/// by an attachment choice; its enclosing continuation frame carries only the
+/// later printed chain tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttachmentChoice {
+    pub operation: Box<ResolvedAbility>,
+}
+
+/// The exact Attach instruction that created an ordinary continuation for its
+/// remaining already-selected attachments. This is distinct from
+/// [`PendingAttachmentChoice`]: no player choice owns this continuation, but
+/// the producer identity proves which Attach instruction already split off its
+/// printed tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingAttachmentRemainder {
+    pub producer: Box<ResolvedAbility>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingContinuation {
     pub chain: Box<ResolvedAbility>,
@@ -2393,6 +2430,14 @@ pub struct PendingContinuation {
     /// paused, then restored before the continuation resumes resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) trigger_firing: Option<TriggerFiring>,
+    /// A child Attach choice owns this operation while its normal continuation
+    /// parent retains only the following instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_choice: Option<PendingAttachmentChoice>,
+    /// The producer identity for an ordinary continuation containing only the
+    /// unprocessed members of a selected multi-attachment operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_remainder: Option<PendingAttachmentRemainder>,
 }
 
 impl PendingContinuation {
@@ -2406,6 +2451,8 @@ impl PendingContinuation {
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
+            attachment_choice: None,
+            attachment_remainder: None,
         }
     }
 
@@ -2424,6 +2471,8 @@ impl PendingContinuation {
             search_attach_host: None,
             trigger_context: ResolvingTriggerContext::capture(state),
             trigger_firing: state.resolving_trigger_firing,
+            attachment_choice: None,
+            attachment_remainder: None,
         }
     }
 }
@@ -5282,6 +5331,195 @@ pub struct CloakExileMember {
     pub attachments: Vec<ObjectId>,
 }
 
+/// CR 614.1 + CR 616.1 + CR 400.7: The settled subset of a Dig's chosen cards.
+/// The choice itself is not an outcome: replacements may redirect or prevent
+/// individual zone changes, so downstream "this way" instructions consume only
+/// selected incarnations that arrived at the requested destination.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigKeptDeliveryOutcome {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
+}
+
+impl DigKeptDeliveryOutcome {
+    pub fn pending(state: &GameState, selected: Vec<ObjectId>, destination: Zone) -> Self {
+        Self {
+            selected: selected
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect(),
+            completed: Vec::new(),
+            destination: Some(destination),
+            settled: false,
+        }
+    }
+
+    /// CR 614.1 + CR 616.1 + CR 400.7: Records only selected incarnations whose
+    /// final, settled zone is the requested destination after replacements.
+    pub fn settle_from_logical_group(&mut self, state: &GameState, group: &LogicalZoneChangeGroup) {
+        let Some(destination) = self.destination.filter(|_| !self.settled) else {
+            return;
+        };
+        let moved: BTreeSet<_> = group
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| match &occurrence.event {
+                // A replacement can leave an intermediate `ZoneChanged` event
+                // behind while ultimately redirecting the card elsewhere. The
+                // settled object's current zone is therefore the authority for
+                // the requested-destination arrival, not that intermediate
+                // event alone.
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination
+                        && state
+                            .objects
+                            .get(object_id)
+                            .is_some_and(|object| object.zone == destination) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.completed = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|identity| moved.contains(&identity.object_id))
+            .collect();
+        self.settled = true;
+    }
+
+    pub fn selected_ids(&self) -> Vec<ObjectId> {
+        self.selected
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+
+    pub fn completed_ids(&self) -> Vec<ObjectId> {
+        self.completed
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+}
+
+/// The settled subset of a Dig's unkept rest pile. This is deliberately
+/// independent from [`DigKeptDeliveryOutcome`]: the two zone-change groups can
+/// settle at different times and replacements can redirect either group.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigRestDeliveryOutcome {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed: Vec<ObjectIncarnationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settled: bool,
+}
+
+impl DigRestDeliveryOutcome {
+    pub fn pending(state: &GameState, selected: Vec<ObjectId>, destination: Zone) -> Self {
+        Self {
+            selected: selected
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(ObjectIncarnationRef::from_object)
+                })
+                .collect(),
+            completed: Vec::new(),
+            destination: Some(destination),
+            settled: false,
+        }
+    }
+
+    pub fn settle_from_logical_group(&mut self, state: &GameState, group: &LogicalZoneChangeGroup) {
+        let Some(destination) = self.destination.filter(|_| !self.settled) else {
+            return;
+        };
+        let moved: BTreeSet<_> = group
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| match &occurrence.event {
+                GameEvent::ZoneChanged { object_id, to, .. }
+                    if *to == destination
+                        && state
+                            .objects
+                            .get(object_id)
+                            .is_some_and(|object| object.zone == destination) =>
+                {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        self.completed = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|identity| moved.contains(&identity.object_id))
+            .collect();
+        self.settled = true;
+    }
+
+    pub fn completed_ids(&self) -> Vec<ObjectId> {
+        self.completed
+            .iter()
+            .map(|identity| identity.object_id)
+            .collect()
+    }
+}
+
+/// Identifies which half of a Dig is settling through a shared rest-pile
+/// completion. A kept delivery can pause before the rest-pile routing begins,
+/// while each half needs its own settled-object outcome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DigDeliveryStage {
+    Kept,
+    #[default]
+    Rest,
+}
+
+/// CR 614.1 + CR 616.1 + CR 400.7: Stamp a Dig delivery completion with its
+/// exact settled destination arrivals. Only the zone pipeline owns a complete
+/// logical group, so this is the single seam where a selected pile becomes an
+/// actual delivery outcome.
+pub(crate) fn settle_dig_delivery_outcome(
+    completion: &mut BatchCompletion,
+    state: &GameState,
+    group: &LogicalZoneChangeGroup,
+) {
+    match completion {
+        BatchCompletion::RevealRestPile {
+            delivery_stage: DigDeliveryStage::Kept,
+            kept_delivery,
+            ..
+        } => kept_delivery.settle_from_logical_group(state, group),
+        BatchCompletion::RevealRestPile {
+            delivery_stage: DigDeliveryStage::Rest,
+            rest_delivery,
+            ..
+        } => rest_delivery.settle_from_logical_group(state, group),
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BatchCompletion {
     /// CR 303.4g + CR 614.1 + CR 616.1: A return-as-Aura host had no legal
@@ -5420,20 +5658,6 @@ pub enum BatchCompletion {
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,
     },
-    /// CR 614.1 + CR 616.1 + CR 608.2c: A Dig kept-card batch settled outside
-    /// the battlefield. Its rest routing, tracked-set publication, and
-    /// continuation drain must follow the delivery, while the published set and
-    /// parent-target continuation set remain independently typed.
-    DigKeptDeliveryComplete {
-        player: PlayerId,
-        source_id: Option<ObjectId>,
-        rest_cards: Vec<ObjectId>,
-        rest_destination: Zone,
-        #[serde(default)]
-        rest_order: DigRestOrder,
-        publish_tracked_set: Vec<ObjectId>,
-        continuation_targets: Vec<ObjectId>,
-    },
     /// CR 701.13a + CR 614.1 + CR 616.1: A per-category exile member has
     /// settled, so its tracked-set extension and next-member prompt can run.
     ForEachCategoryExileComplete {
@@ -5471,6 +5695,10 @@ pub enum BatchCompletion {
     /// runs exactly once after the kept delivery settles — otherwise the rest
     /// cards strand in the library (the early-`return` bug).
     RevealRestPile {
+        /// A Dig first carries the kept delivery through this completion, then
+        /// changes to `Rest` before it routes the deferred unkept pile.
+        #[serde(default)]
+        delivery_stage: DigDeliveryStage,
         /// The player whose continuation drains after the pile lands.
         player: PlayerId,
         /// CR 400.7: The resolving effect's source, preserved so any rest-pile
@@ -5510,6 +5738,20 @@ pub enum BatchCompletion {
         /// pile. `None` for every non-manifest rest pile.
         #[serde(default)]
         manifested_for_continuation: Option<ObjectId>,
+        /// Dig's selected-delivery carrier, retained when a battlefield entry
+        /// re-parks the rest-pile completion. Empty for non-Dig callers.
+        #[serde(default)]
+        kept_delivery: DigKeptDeliveryOutcome,
+        /// Dig's ParentTarget continuation inputs. They stay separate from the
+        /// publish set because the latter can intentionally address the rest
+        /// pile while ParentTarget still refers to the kept delivery.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        continuation_targets: Vec<ObjectId>,
+        /// The exact unkept rest identities that completed their requested
+        /// delivery. It is separate from the kept delivery because its logical
+        /// zone-change group can settle later, after a replacement-choice park.
+        #[serde(default)]
+        rest_delivery: DigRestDeliveryOutcome,
     },
     /// CR 608.2c + CR 616.1: The rest half of a deterministic mass Dig settled
     /// after a replacement choice. Resume its selected-card delivery only now,
@@ -11303,6 +11545,14 @@ impl PersistedGameState {
     }
 }
 
+/// A payable root branch advertised by the engine. `index` is its position in
+/// the original `AbilityCost::OneOf`, even when unpayable siblings are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionOptionalPaymentOption {
+    pub index: usize,
+    pub cost: AbilityCost,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -12442,6 +12692,13 @@ pub enum WaitingFor {
         /// private printed selector used to persist the answer.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         same_card_may_trigger_choice_available: bool,
+    },
+    /// CR 118.12 + CR 608.2d: the payer may decline or choose one currently
+    /// payable, server-authored branch of a root `PayCost(OneOf)` instruction.
+    ResolutionOptionalPaymentChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        costs: Vec<ResolutionOptionalPaymentOption>,
     },
     /// CR 702.95a + CR 608.2d: Soulbond partner choice made while the PairWith
     /// effect resolves. The listed objects are legal choices, not targets.
@@ -13898,6 +14155,7 @@ impl WaitingFor {
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+            WaitingFor::ResolutionOptionalPaymentChoice { .. } => "ResolutionOptionalPaymentChoice",
             WaitingFor::PairChoice { .. } => "PairChoice",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
@@ -14069,6 +14327,7 @@ impl WaitingFor {
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
+            | WaitingFor::ResolutionOptionalPaymentChoice { player, .. }
             | WaitingFor::PairChoice { player, .. }
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::RespondToShortcut { player, .. }
@@ -14415,7 +14674,7 @@ impl WaitingFor {
     /// `engine_combat::handle_declare_attackers` tax pause are where the class boundary
     /// between "declaring" (a member) and "paying to declare" (not a member) is drawn.
     ///
-    /// FAIL-CLOSED: the other 114 variants fall through to `false`, and `false` keeps
+    /// FAIL-CLOSED: every other variant falls through to `false`, and `false` keeps
     /// the ring-clearing behaviour, so a newly added variant defaults to the safe side
     /// without anyone remembering to update this list.
     pub fn is_forced_cascade_window(&self) -> bool {
@@ -14548,13 +14807,264 @@ pub enum AutoPassRequest {
     },
 }
 
+/// Per-window continuation rule for a stack-resolution session.
+///
+/// CR 117.3d + CR 117.4: a stack entry resolves only after consecutive passes;
+/// this policy selects the engine's authorized pass behavior without changing
+/// that priority rule.
+///
+/// `Committed` is the historical `UntilStackEmpty` meaning: once a player has
+/// armed it, the engine keeps passing until the stack empties or grows beyond
+/// the captured baseline. `RecheckNoMeaningfulPriorityAction` is reserved for
+/// an AI continuation that reuses a representative's own verified pass while
+/// the exact fenced stack cohort remains active. This is an AI policy choice,
+/// not an inference that the player lacks another legal action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StackResolutionPolicy {
+    #[default]
+    Committed,
+    RecheckNoMeaningfulPriorityAction,
+}
+
+impl StackResolutionPolicy {
+    fn is_committed(policy: &Self) -> bool {
+        *policy == Self::Committed
+    }
+}
+
+/// A persisted resolution cap. The established `0` wire spelling and an
+/// absent field both mean no cap; nonzero values preserve the exact cap.
+///
+/// CR 117.3d + CR 117.4: the cap bounds automated consecutive passes; it never
+/// changes the rules condition that resolves the top stack entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackResolutionBudget {
+    #[default]
+    Unlimited,
+    Limited(NonZeroU32),
+}
+
+impl StackResolutionBudget {
+    pub const fn from_legacy_max_resolutions(max_resolutions: u32) -> Self {
+        if max_resolutions == 0 {
+            Self::Unlimited
+        } else {
+            Self::Limited(NonZeroU32::new(max_resolutions).expect("nonzero branch"))
+        }
+    }
+
+    pub const fn max_resolutions(self) -> Option<u32> {
+        match self {
+            Self::Unlimited => None,
+            Self::Limited(max_resolutions) => Some(max_resolutions.get()),
+        }
+    }
+
+    const fn wire_value(self) -> u32 {
+        match self {
+            Self::Unlimited => 0,
+            Self::Limited(max_resolutions) => max_resolutions.get(),
+        }
+    }
+}
+
+impl Serialize for StackResolutionBudget {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.wire_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for StackResolutionBudget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::from_legacy_max_resolutions(u32::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
+/// A complete, entry-local snapshot used to prove that a later stack entry is
+/// the same entry authorized when a resolution session began. It reads only
+/// data stored on the entry; in particular it never rebinds a departed source
+/// through the live object map (CR 400.7 / CR 113.7a).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionEntryFence {
+    pub entry_id: ObjectId,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub provenance: StackResolutionEntryProvenance,
+    /// CR 400.7 / CR 603.7c: delayed-trigger referent pins.
+    pub target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 400.7 / CR 601.2c: ordinary selected-target pins.
+    pub selected_target_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+/// Exhaustive provenance of one stack-entry kind. Keeping every field that is
+/// present on the source `StackEntryKind` makes a fence fail closed when a
+/// future kind field changes: the capture match below must be extended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StackResolutionEntryProvenance {
+    Spell {
+        card_id: CardId,
+        ability: Option<Box<ResolvedAbility>>,
+        casting_variant: CastingVariant,
+        actual_mana_spent: u32,
+    },
+    ActivatedAbility {
+        source_id: ObjectId,
+        ability: Box<ResolvedAbility>,
+    },
+    TriggeredAbility(Box<TriggeredAbilityProvenance>),
+    KeywordAction {
+        action: KeywordAction,
+    },
+}
+
+/// Captured fields for a triggered stack entry. Heap indirection keeps the
+/// provenance enum compact while preserving its exhaustive fence semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggeredAbilityProvenance {
+    source_id: ObjectId,
+    ability: Box<ResolvedAbility>,
+    condition: Option<TriggerCondition>,
+    trigger_event: Option<GameEvent>,
+    description: Option<String>,
+    source_name: String,
+    subject_match_count: Option<u32>,
+    die_result: Option<i32>,
+    provenance: Option<SyntheticTriggerProvenance>,
+}
+
+impl StackResolutionEntryFence {
+    pub fn capture(entry: &StackEntry) -> Self {
+        let provenance = match &entry.kind {
+            StackEntryKind::Spell {
+                card_id,
+                ability,
+                casting_variant,
+                actual_mana_spent,
+            } => StackResolutionEntryProvenance::Spell {
+                card_id: *card_id,
+                ability: ability.clone(),
+                casting_variant: *casting_variant,
+                actual_mana_spent: *actual_mana_spent,
+            },
+            StackEntryKind::ActivatedAbility { source_id, ability } => {
+                StackResolutionEntryProvenance::ActivatedAbility {
+                    source_id: *source_id,
+                    ability: ability.clone(),
+                }
+            }
+            StackEntryKind::TriggeredAbility {
+                source_id,
+                ability,
+                condition,
+                trigger_event,
+                description,
+                source_name,
+                subject_match_count,
+                die_result,
+                provenance,
+            } => StackResolutionEntryProvenance::TriggeredAbility(Box::new(
+                TriggeredAbilityProvenance {
+                    source_id: *source_id,
+                    ability: ability.clone(),
+                    condition: condition.clone(),
+                    trigger_event: trigger_event.clone(),
+                    description: description.clone(),
+                    source_name: source_name.clone(),
+                    subject_match_count: *subject_match_count,
+                    die_result: *die_result,
+                    provenance: provenance.clone(),
+                },
+            )),
+            StackEntryKind::KeywordAction { action } => {
+                StackResolutionEntryProvenance::KeywordAction {
+                    action: action.clone(),
+                }
+            }
+        };
+        let (target_incarnations, selected_target_incarnations) = entry
+            .ability()
+            .map(|ability| {
+                (
+                    ability.target_incarnations.clone(),
+                    ability.selected_target_incarnations.clone(),
+                )
+            })
+            .unwrap_or_default();
+
+        Self {
+            entry_id: entry.id,
+            source_id: entry.source_id,
+            controller: entry.controller,
+            provenance,
+            target_incarnations,
+            selected_target_incarnations,
+        }
+    }
+
+    /// Compares captured stack data only. This stays correct even when the
+    /// source object has left the battlefield and live LKI lookup is impossible.
+    pub fn matches_captured_entry(&self, entry: &StackEntry) -> bool {
+        self == &Self::capture(entry)
+    }
+}
+
+/// The temporary auto-pass overlay installed for a shared resolution session.
+/// The full sparse map is retained so ending the session can restore the exact
+/// pre-session preferences transactionally.
+///
+/// CR 117.3d + CR 117.4: records only temporary pass preferences, leaving the
+/// engine's ordinary consecutive-pass and stack-resolution procedure intact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionAutoPassOverlay {
+    pub baseline: BTreeMap<PlayerId, AutoPassMode>,
+}
+
+/// Persisted state for the one ordinary stack-resolution runner shared by
+/// consented human Resolve All and verified AI continuation.
+///
+/// CR 117.3d + CR 117.4: retains the exact cohort and pass policy for an
+/// ordinary priority-driven resolution sequence rather than directly resolving
+/// stack entries outside the rules procedure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackResolutionSession {
+    /// Ordered from the next entry to resolve toward the bottom of the
+    /// authorized stack cohort.
+    pub entries: Vec<StackResolutionEntryFence>,
+    #[serde(default)]
+    pub cursor: usize,
+    pub representatives: BTreeSet<PlayerId>,
+    /// AI representatives whose verified pass is a policy authorization for
+    /// later priority windows in this exact fenced cohort. Absence is
+    /// conservative: that representative must receive an explicit decision.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub verified_pass_representatives: BTreeSet<PlayerId>,
+    #[serde(default)]
+    pub budget: StackResolutionBudget,
+    #[serde(default)]
+    pub policy: StackResolutionPolicy,
+    pub auto_pass_overlay: StackResolutionAutoPassOverlay,
+}
+
 /// What the engine stores for auto-pass (includes captured state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AutoPassMode {
     /// Auto-pass while stack is non-empty. Clears when stack empties or grows
     /// beyond `initial_stack_len` (the stack size when the flag was set).
-    UntilStackEmpty { initial_stack_len: usize },
+    UntilStackEmpty {
+        initial_stack_len: usize,
+        #[serde(default, skip_serializing_if = "StackResolutionPolicy::is_committed")]
+        policy: StackResolutionPolicy,
+    },
     /// Auto-pass through priority/combat stops until the turn boundary in
     /// `until` is reached — `EndOfCurrentTurn` (the flag dies at the next turn
     /// start, regardless of whose turn it is) or `MyNextTurnStart` (persists
@@ -16116,6 +16626,11 @@ declare_game_state! {
     /// Private protocol ledger behind the public consent/ready waiting states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_all_consent_run: Option<ResolveAllConsentRun>,
+    /// Private authority for an active shared stack-resolution session. Viewer
+    /// projections retain the public stack and priority state, never its frozen
+    /// cohort, target pins, or temporary auto-pass baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_resolution_session: Option<StackResolutionSession>,
     /// Trusted interaction capability scope. Viewer-filtered copies always
     /// redact this field; only the engine uses it to mint opaque decision IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -19654,6 +20169,23 @@ impl GameState {
         })
     }
 
+    /// Insert a continuation immediately outside the exact child stack raised
+    /// after `child_stack_start` was captured by its producer.
+    pub fn insert_ability_continuation_parent_at_child_boundary(
+        &mut self,
+        pending: PendingContinuation,
+        child_stack_start: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        let choose_zone_trigger_context = pending.trigger_context.clone();
+        self.resolution_stack.insert_parent_at_child_boundary(
+            super::resolution::ResolutionFrame::AbilityContinuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context,
+            }),
+            child_stack_start,
+        )
+    }
+
     /// Inserts the continuation outside an active general-drain/draw pair so
     /// the paused `PostReplacement` frame remains the draw's exact immediate
     /// parent until the child draw is complete.
@@ -19704,6 +20236,14 @@ impl GameState {
         &mut self,
     ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
         self.resolution_stack.take_active_ability_continuation()
+    }
+
+    /// Consume only the continuation that owns the active Attach choice.
+    pub fn take_active_attachment_choice_continuation(
+        &mut self,
+    ) -> Result<Option<AbilityContinuationFrame>, ResolutionStackError> {
+        self.resolution_stack
+            .take_active_attachment_choice_continuation()
     }
 
     /// Clear the active continuation when the enclosing resolution is
@@ -19770,6 +20310,23 @@ impl GameState {
             pending: None,
             devour_eligible_snapshot: Some(snapshot),
         });
+    }
+
+    /// CR 614.12a + CR 614.13a: A Devour-only ChangeZone frame owns the
+    /// pre-entry eligibility snapshot for exactly one completed entry event.
+    /// Once that event's replacement work has returned without parking an
+    /// iteration, retire the now-ownerless frame.
+    pub fn clear_completed_active_devour_snapshot(&mut self) -> bool {
+        if !self.active_change_zone_frame().is_some_and(|frame| {
+            frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+        }) {
+            return false;
+        }
+
+        let _ = self
+            .take_active_change_zone_frame()
+            .expect("a completed Devour-only ChangeZone frame must be active");
+        true
     }
 
     /// Parks a newly paused ChangeZone iteration. A Devour-only frame belongs
@@ -20812,26 +21369,27 @@ impl GameState {
             .finish_post_replacement_dispatch(dispatch)
     }
 
-    /// Retires only the exact top general drain whose continuation paused and
-    /// whose MultiDraw child has already completed.
+    /// CR 608.2c + CR 614.1a: Retires the exact top general drain after its
+    /// interrupted instruction completes. An empty Attach replacement pair
+    /// also retires its marked child before generic continuation draining can
+    /// replay that instruction.
     pub fn finish_active_paused_post_replacement_dispatch(&mut self) {
         let finished = self
             .active_post_replacement_drains_mut()
             .and_then(PostReplacementDrainStack::finish_paused_dispatch);
         if finished.is_some() {
-            self.remove_empty_active_post_replacement_frame();
+            if !self
+                .resolution_stack
+                .take_active_empty_post_replacement_attach_choice_pair()
+            {
+                self.remove_empty_active_post_replacement_frame();
+            }
             // CR 614.12a + CR 614.13a: a Devour-only ChangeZone snapshot stays
             // resident while its exact post-replacement child resolves. Once that
             // child is retired, the snapshot is again the active owner and its
             // single-entry lifetime ends. A pending iteration keeps its snapshot
             // for the remaining co-arrivers.
-            if self.active_change_zone_frame().is_some_and(|frame| {
-                frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
-            }) {
-                let _ = self
-                    .take_active_change_zone_frame()
-                    .expect("a completed Devour-only ChangeZone frame must be active");
-            }
+            self.clear_completed_active_devour_snapshot();
         }
     }
 
@@ -22184,6 +22742,7 @@ impl GameState {
             },
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
             resolve_all_consent_run: None,
+            stack_resolution_session: None,
             interaction_session_id: None,
             interaction_generation: 0,
             next_interaction_serial: default_interaction_serial(),
@@ -23234,6 +23793,15 @@ impl GameState {
         // CR 732.2a recurrence certification that shares this seam can confirm a
         // repeat.
         clone.chain_tracked_set_id = None;
+        // CR 104.4b: the journal coordinate is monotonic provenance, while the
+        // caster and Some-vs-None state remain rules-relevant. Canonicalize the
+        // coordinate on both object and stack-ability carriers so derived stack
+        // equality cannot split an otherwise recurring position.
+        for (_, object) in clone.objects.iter_mut() {
+            if let Some(occurrence) = object.cast_occurrence.as_mut() {
+                occurrence.turn_journal_index = 0;
+            }
+        }
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
@@ -23247,6 +23815,13 @@ impl GameState {
         for entry in clone.stack.iter_mut() {
             if let Some(ability) = entry.ability_mut() {
                 ability.clear_trigger_identity_recursive();
+                ability.normalize_cast_occurrence_for_loop_recursive();
+            }
+        }
+        if let Some(entry) = clone.resolving_stack_entry.as_mut() {
+            if let Some(ability) = entry.ability_mut() {
+                ability.clear_trigger_identity_recursive();
+                ability.normalize_cast_occurrence_for_loop_recursive();
             }
         }
         // `PendingTrigger::timestamp` is a live CR 603.3b ordering key. It is
@@ -24082,6 +24657,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.contraption_sprocket == y.contraption_sprocket
         && x.is_suspected == y.is_suspected // CR 701.60a designation
         && x.prepared == y.prepared // SOS prepare/unprepare toggle
+        && x.prepared_copy_source == y.prepared_copy_source // CR 722.3c linked exile copy
         && x.room_unlocks == y.room_unlocks // CR 709.5c door lock/unlock
         // §5.2c ADD set (v5, S6): firewall-blind per-iteration accumulators on
         // live battlefield/exile objects.
@@ -24090,6 +24666,9 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.detained_by == y.detained_by // CR 701.35a detain set
         && x.casting_permissions == y.casting_permissions // CR 715.3d exile-grant Vec
         && x.saddled_by == y.saddled_by // CR 702.171c saddle set
+        // #6865: a cast occurrence is resolution-semantic provenance while the
+        // spell remains on the stack. Comparing it is fail-safe for loop detection.
+        && x.cast_occurrence == y.cast_occurrence
 }
 
 /// CR 104.4b compile-time totality guard for the object-growth cover gate's
@@ -24135,6 +24714,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         waiting_for: _,
         next_resolve_all_consent_epoch: _,
         resolve_all_consent_run: _,
+        stack_resolution_session: _,
         interaction_session_id: _,
         interaction_generation: _,
         next_interaction_serial: _,
@@ -24503,6 +25083,7 @@ impl PartialEq for GameState {
             && self.waiting_for == other.waiting_for
             && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
             && self.resolve_all_consent_run == other.resolve_all_consent_run
+            && self.stack_resolution_session == other.stack_resolution_session
             && self.lands_played_this_turn == other.lands_played_this_turn
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
@@ -24845,6 +25426,7 @@ mod resolved_information_tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(101),
@@ -24997,7 +25579,7 @@ mod forced_cascade_window_tests {
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j /
     /// CR 310.11 / CR 703.1 + CR 117.3a: the membership matrix for
     /// [`WaitingFor::is_forced_cascade_window`], asserted in BOTH directions —
-    /// thirteen members and eight non-members, each named.
+    /// thirteen members and nine non-members, each named.
     ///
     /// The class is defined by "no player has priority here", and each half of the
     /// matrix pins a different consequence:
@@ -25177,6 +25759,14 @@ mod forced_cascade_window_tests {
         ];
 
         let not_forced: Vec<(&str, WaitingFor)> = vec![
+            (
+                "ResolutionOptionalPaymentChoice — a Phyrexian branch can MOVE LIFE",
+                WaitingFor::ResolutionOptionalPaymentChoice {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    costs: Vec::new(),
+                },
+            ),
             (
                 "Priority{active} — CR 704.3 SBA point, must sample or clear",
                 WaitingFor::Priority {
@@ -28797,8 +29387,129 @@ mod tests {
             )
             .unwrap(),
             AutoPassMode::UntilStackEmpty {
-                initial_stack_len: 3
+                initial_stack_len: 3,
+                policy: StackResolutionPolicy::Committed,
             }
+        );
+    }
+
+    #[test]
+    fn stack_resolution_budget_keeps_the_legacy_numeric_wire_contract() {
+        #[derive(Deserialize)]
+        struct BudgetCarrier {
+            #[serde(default)]
+            budget: StackResolutionBudget,
+        }
+
+        assert_eq!(
+            serde_json::to_string(&StackResolutionBudget::Unlimited).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            serde_json::from_str::<StackResolutionBudget>("0").unwrap(),
+            StackResolutionBudget::Unlimited
+        );
+        assert_eq!(
+            StackResolutionBudget::from_legacy_max_resolutions(0),
+            StackResolutionBudget::Unlimited,
+            "an in-memory legacy zero normalizes before it can acquire a divergent meaning"
+        );
+        assert_eq!(
+            serde_json::from_str::<StackResolutionBudget>("17").unwrap(),
+            StackResolutionBudget::Limited(NonZeroU32::new(17).unwrap())
+        );
+        assert!(
+            NonZeroU32::new(0).is_none(),
+            "a zero cap is not representable"
+        );
+        assert!(
+            serde_json::from_str::<StackResolutionBudget>("null").is_err(),
+            "only the established numeric zero, not null, means unlimited"
+        );
+        assert_eq!(
+            serde_json::from_str::<BudgetCarrier>("{}").unwrap().budget,
+            StackResolutionBudget::Unlimited,
+            "a pre-session save with no cap field is unlimited"
+        );
+    }
+
+    #[test]
+    fn until_stack_empty_uses_committed_policy_for_legacy_and_new_payloads() {
+        let committed = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 3,
+            policy: StackResolutionPolicy::Committed,
+        };
+        assert_eq!(
+            serde_json::to_string(&committed).unwrap(),
+            r#"{"type":"UntilStackEmpty","initial_stack_len":3}"#,
+            "the default policy retains the old persisted shape"
+        );
+        let rechecking = AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 3,
+            policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+        };
+        assert_eq!(
+            serde_json::from_str::<AutoPassMode>(
+                r#"{"type":"UntilStackEmpty","initial_stack_len":3,"policy":"RecheckNoMeaningfulPriorityAction"}"#
+            )
+            .unwrap(),
+            rechecking
+        );
+    }
+
+    #[test]
+    fn stack_resolution_entry_fence_uses_latched_lki_and_both_target_pin_vectors() {
+        let mut ability = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(ObjectId(8))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(3);
+        ability.target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 4)];
+        ability.selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 5)];
+        let entry = StackEntry {
+            id: ObjectId(6),
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(7),
+                ability: Box::new(ability),
+            },
+        };
+
+        let fence = StackResolutionEntryFence::capture(&entry);
+        assert_eq!(fence.entry_id, ObjectId(6));
+        assert_eq!(fence.source_id, ObjectId(7));
+        assert_eq!(fence.controller, PlayerId(0));
+        assert_eq!(
+            fence.target_incarnations,
+            vec![ObjectIncarnationRef::of(ObjectId(8), 4)]
+        );
+        assert_eq!(
+            fence.selected_target_incarnations,
+            vec![ObjectIncarnationRef::of(ObjectId(8), 5)]
+        );
+        assert!(
+            fence.matches_captured_entry(&entry),
+            "comparison must use the entry's latched source state, without a live source object"
+        );
+
+        let mut changed_lki = entry.clone();
+        changed_lki.ability_mut().unwrap().source_incarnation = Some(9);
+        assert!(
+            !fence.matches_captured_entry(&changed_lki),
+            "a changed LKI source capture invalidates the fence even when ids match"
+        );
+
+        let mut changed_selected_pin = entry;
+        changed_selected_pin
+            .ability_mut()
+            .unwrap()
+            .selected_target_incarnations = vec![ObjectIncarnationRef::of(ObjectId(8), 10)];
+        assert!(
+            !fence.matches_captured_entry(&changed_selected_pin),
+            "ordinary selected-target pins are independently fenced"
         );
     }
 
@@ -28924,6 +29635,112 @@ mod tests {
             state.loop_fingerprint(),
             "a live counter-kind result can change a following resolution action"
         );
+    }
+
+    #[test]
+    fn normalize_for_loop_canonicalizes_cast_coordinates_but_preserves_identity_shape() {
+        fn ability_graph(occurrence: CastOccurrence) -> ResolvedAbility {
+            let mut epic =
+                ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(500), occurrence.caster);
+            epic.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(500),
+                occurrence.caster,
+            )));
+            epic.else_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(500),
+                occurrence.caster,
+            )));
+            let mut root = ResolvedAbility::new(
+                Effect::EpicCopy {
+                    spell: Box::new(epic),
+                },
+                Vec::new(),
+                ObjectId(500),
+                occurrence.caster,
+            );
+            root.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(500),
+                occurrence.caster,
+            )));
+            root.else_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(500),
+                occurrence.caster,
+            )));
+            root.set_cast_occurrence_recursive(Some(occurrence));
+            root
+        }
+
+        fn stack_state(occurrence: CastOccurrence) -> GameState {
+            let mut state = GameState::new_two_player(7);
+            let mut object = GameObject::new(
+                ObjectId(500),
+                CardId(500),
+                occurrence.caster,
+                "Loop Spell".to_string(),
+                Zone::Stack,
+            );
+            object.cast_occurrence = Some(occurrence);
+            state.objects.insert(object.id, object);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(500),
+                source_id: ObjectId(500),
+                controller: occurrence.caster,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(500),
+                    ability: Some(Box::new(ability_graph(occurrence))),
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            state
+        }
+
+        let earlier = stack_state(CastOccurrence {
+            caster: PlayerId(0),
+            turn_journal_index: 4,
+        });
+        let later = stack_state(CastOccurrence {
+            caster: PlayerId(0),
+            turn_journal_index: 5,
+        });
+        assert!(loop_states_equal(
+            &earlier.normalize_for_loop(),
+            &later.normalize_for_loop()
+        ));
+
+        let mut absent = earlier.clone();
+        absent
+            .objects
+            .get_mut(&ObjectId(500))
+            .unwrap()
+            .cast_occurrence = None;
+        absent
+            .stack
+            .back_mut()
+            .and_then(StackEntry::ability_mut)
+            .unwrap()
+            .set_cast_occurrence_recursive(None);
+        assert!(!loop_states_equal(
+            &earlier.normalize_for_loop(),
+            &absent.normalize_for_loop()
+        ));
+
+        let other_caster = stack_state(CastOccurrence {
+            caster: PlayerId(1),
+            turn_journal_index: 5,
+        });
+        assert!(!loop_states_equal(
+            &earlier.normalize_for_loop(),
+            &other_caster.normalize_for_loop()
+        ));
     }
 
     /// T-loop (§4 Condition 2): the all-zone incarnation bump advances a source's
@@ -33124,6 +33941,59 @@ mod tests {
         assert!(!none_json.contains("spell_object_id"));
     }
 
+    #[test]
+    fn legacy_stack_object_and_resolved_ability_default_cast_occurrence_to_none() {
+        let object = crate::game::game_object::GameObject::new(
+            ObjectId(6865),
+            CardId(6865),
+            PlayerId(0),
+            "Legacy Stack Spell".to_string(),
+            Zone::Stack,
+        );
+        let ability =
+            ResolvedAbility::new(Effect::Investigate, Vec::new(), ObjectId(6865), PlayerId(0));
+
+        let object_json = serde_json::to_value(&object).expect("serialize object");
+        let ability_json = serde_json::to_value(&ability).expect("serialize ability");
+        assert!(object_json.get("cast_occurrence").is_none());
+        assert!(ability_json.get("cast_occurrence").is_none());
+        let legacy_object: crate::game::game_object::GameObject =
+            serde_json::from_value(object_json.clone()).expect("legacy object loads");
+        let legacy_ability: ResolvedAbility =
+            serde_json::from_value(ability_json.clone()).expect("legacy ability loads");
+        assert_eq!(legacy_object.cast_occurrence, None);
+        assert_eq!(legacy_ability.cast_occurrence, None);
+
+        let occurrence = CastOccurrence {
+            caster: PlayerId(1),
+            turn_journal_index: 8,
+        };
+        let mut present_object = object;
+        present_object.cast_occurrence = Some(occurrence);
+        let mut present_ability = ability;
+        present_ability.cast_occurrence = Some(occurrence);
+        let object_round_trip: crate::game::game_object::GameObject = serde_json::from_value(
+            serde_json::to_value(&present_object).expect("serialize present object"),
+        )
+        .expect("present object loads");
+        let ability_round_trip: ResolvedAbility = serde_json::from_value(
+            serde_json::to_value(&present_ability).expect("serialize present ability"),
+        )
+        .expect("present ability loads");
+        assert_eq!(object_round_trip.cast_occurrence, Some(occurrence));
+        assert_eq!(ability_round_trip.cast_occurrence, Some(occurrence));
+
+        let mut malformed_object = object_json;
+        malformed_object["cast_occurrence"] = serde_json::json!("not an occurrence");
+        assert!(
+            serde_json::from_value::<crate::game::game_object::GameObject>(malformed_object)
+                .is_err()
+        );
+        let mut malformed_ability = ability_json;
+        malformed_ability["cast_occurrence"] = serde_json::json!("not an occurrence");
+        assert!(serde_json::from_value::<ResolvedAbility>(malformed_ability).is_err());
+    }
+
     /// CR 601.2a: A snapshot with a real `from_zone` value (the modern non-Option
     /// encoding) must deserialize unchanged — the legacy adapter must not
     /// rewrite valid origin zones.
@@ -34239,5 +35109,40 @@ mod tests {
             "the latch fires on DISAGREEMENT, not on repetition — without this arm an \
              always-false equality would satisfy (a) and (b)"
         );
+    }
+
+    #[test]
+    fn resolve_all_consent_baseline_distinguishes_legacy_missing_from_captured_empty() {
+        let run = ResolveAllConsentRun {
+            epoch: 1,
+            max_resolutions: StackResolutionBudget::Unlimited,
+            priority_snapshot: ResolveAllPrioritySnapshot {
+                waiting_player: PlayerId(0),
+                priority_player: PlayerId(0),
+                priority_pass_count: 0,
+                priority_passes: BTreeSet::new(),
+            },
+            participants: vec![ResolveAllConsentParticipant {
+                representative: PlayerId(0),
+                authorized_submitter: PlayerId(0),
+                granted: true,
+            }],
+            auto_pass_baseline: Some(BTreeMap::new()),
+        };
+        let captured_empty = serde_json::to_value(&run).expect("fresh run serializes");
+        assert_eq!(
+            captured_empty["auto_pass_baseline"],
+            serde_json::json!({}),
+            "a fresh empty baseline is persisted rather than collapsed into legacy absence"
+        );
+
+        let mut legacy_wire = captured_empty;
+        legacy_wire
+            .as_object_mut()
+            .expect("run wire is an object")
+            .remove("auto_pass_baseline");
+        let legacy: ResolveAllConsentRun =
+            serde_json::from_value(legacy_wire).expect("legacy run without the new field loads");
+        assert_eq!(legacy.auto_pass_baseline, None);
     }
 }

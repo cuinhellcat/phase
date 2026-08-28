@@ -38,6 +38,7 @@ pub fn resolve(
         enters_attacking,
         kept_optional_to,
         enters_under,
+        kept_destination_if,
     ) = match &ability.effect {
         Effect::RevealUntil {
             player,
@@ -50,6 +51,7 @@ pub fn resolve(
             enters_attacking,
             kept_optional_to,
             enters_under,
+            kept_destination_if,
         } => (
             player,
             filter,
@@ -61,6 +63,7 @@ pub fn resolve(
             *enters_attacking,
             *kept_optional_to,
             enters_under.as_ref(),
+            kept_destination_if.as_ref(),
         ),
         _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
     };
@@ -223,7 +226,17 @@ pub fn resolve(
             enters_under,
         )?;
         for hit in &hit_cards {
-            match kept_destination {
+            // CR 608.2c: "if its mana value is <comparator> <quantity>, put it
+            // onto the battlefield. Otherwise, put it into your hand" (Part in
+            // Friendship) — a per-hit-card branch on the card's own
+            // characteristics, evaluated exactly like the primary `filter`
+            // field. `kept_destination` is the "otherwise" branch when the
+            // card does not match.
+            let hit_destination = kept_destination_if
+                .filter(|(cond_filter, _)| matches_target_filter(state, *hit, cond_filter, &ctx))
+                .map(|(_, zone)| *zone)
+                .unwrap_or(kept_destination);
+            match hit_destination {
                 Zone::Battlefield => {
                     // CR 614.1c + CR 306.5b / CR 310.4b: route the battlefield entry
                     // through the zone-change pipeline so the full delivery tail runs
@@ -256,6 +269,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -265,6 +280,9 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -308,6 +326,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -317,6 +337,9 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -343,6 +366,8 @@ pub fn resolve(
                             zone_pipeline::defer_completion_on_pause(
                                 state,
                                 BatchCompletion::RevealRestPile {
+                                    delivery_stage:
+                                        crate::types::game_state::DigDeliveryStage::Rest,
                                     player: revealing_player,
                                     source_id: Some(ability.source_id),
                                     rest_cards: revealed_misses,
@@ -352,6 +377,9 @@ pub fn resolve(
                                     publish_tracked_set: None,
                                     emit_reveal_until_resolved: Some(ability.source_id),
                                     manifested_for_continuation: None,
+                                    kept_delivery: Default::default(),
+                                    continuation_targets: Vec::new(),
+                                    rest_delivery: Default::default(),
                                 },
                             );
                             return Ok(());
@@ -385,6 +413,7 @@ pub fn resolve(
             zone_pipeline::defer_completion_on_pause(
                 state,
                 BatchCompletion::RevealRestPile {
+                    delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player: revealing_player,
                     source_id: Some(ability.source_id),
                     rest_cards: Vec::new(),
@@ -394,6 +423,9 @@ pub fn resolve(
                     publish_tracked_set: None,
                     emit_reveal_until_resolved: Some(ability.source_id),
                     manifested_for_continuation: None,
+                    kept_delivery: Default::default(),
+                    continuation_targets: Vec::new(),
+                    rest_delivery: Default::default(),
                 },
             );
             return Ok(());
@@ -717,6 +749,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(100),
@@ -744,6 +777,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                kept_destination_if: None,
             },
             targets,
             ObjectId(100),
@@ -812,6 +846,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1382,6 +1417,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
                     enters_under: None,
+                    kept_destination_if: None,
                 },
                 vec![],
                 ObjectId(100),
@@ -1502,6 +1538,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Library),
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(100),
@@ -1576,6 +1613,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Battlefield),
                 enters_under: None,
+                kept_destination_if: None,
             },
             vec![],
             ObjectId(100),

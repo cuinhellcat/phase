@@ -164,6 +164,105 @@ fn set_cards_per_pack(set_pool: &LimitedSetPool) -> Result<u8, String> {
     })
 }
 
+/// The sets backing a draft and the order their boosters are opened in.
+///
+/// `pools` carries each distinct set once; `sequence` names which of them fills
+/// each booster, in pack order, so a set may be drafted more than once without
+/// its pool data crossing the WASM boundary more than once. A one-element
+/// sequence is a single-set draft.
+///
+/// JSON shape:
+///   `{ "pools": [<LimitedSetPool>, ...], "sequence": ["isd", "dka", "avr"] }`
+#[derive(Deserialize)]
+struct SetPackSequence {
+    pools: Vec<LimitedSetPool>,
+    sequence: Vec<String>,
+}
+
+/// A set-backed draft's source, pack shape, and generator, resolved from the
+/// selection the client sent. Single authority for turning a `SetPackSequence`
+/// into the three things every set-backed entry point needs.
+struct ResolvedSetSelection {
+    source: DraftSource,
+    /// Nominal booster size (the first pack's). Per-pack sizes are recorded on
+    /// the session at `StartDraft` from the packs this generator produces.
+    cards_per_pack: u8,
+    pack_count: u8,
+    generator: PackGenerator,
+}
+
+impl ResolvedSetSelection {
+    /// Parse and validate a client selection. `expected_packs` constrains the
+    /// sequence length for event kinds the engine fixes (Sealed opens exactly
+    /// six boosters); `None` lets the selection decide how many packs to open.
+    fn parse(selection_json: &str, expected_packs: Option<u8>) -> Result<Self, String> {
+        let selection: SetPackSequence = serde_json::from_str(selection_json)
+            .map_err(|e| format!("Failed to parse set selection: {e}"))?;
+        Self::resolve(selection, expected_packs)
+    }
+
+    /// Validate an already-deserialized selection. The pod boundary reaches
+    /// this directly, since its sequence arrives inside a `PoolInput` frame
+    /// rather than as a JSON string of its own.
+    fn resolve(selection: SetPackSequence, expected_packs: Option<u8>) -> Result<Self, String> {
+        let named = u8::try_from(selection.sequence.len())
+            .ok()
+            .filter(|count| (1..=MAX_PACK_COUNT).contains(count))
+            .ok_or_else(|| format!("A draft must name between 1 and {MAX_PACK_COUNT} sets"))?;
+
+        // A sequence SHORTER than the event's pack count repeats its last entry
+        // (`entry_for_pack`) — that is the rule `DraftSource::Set` is defined
+        // by, and it is how a single-set draft stays a one-element sequence
+        // instead of the same code copied once per booster. A LONGER sequence
+        // names boosters the event never opens, so it is the caller's error
+        // rather than a silent truncation.
+        let pack_count = expected_packs.unwrap_or(named);
+        if named > pack_count {
+            return Err(format!(
+                "This event opens {pack_count} packs, but {named} sets were named"
+            ));
+        }
+
+        // Resolve every named set against the supplied pools up front, so a set
+        // with no pool data names itself here instead of surfacing as a short
+        // pack mid-draft.
+        let indices = selection
+            .sequence
+            .iter()
+            .map(|code| {
+                selection
+                    .pools
+                    .iter()
+                    .position(|pool| pool.code.eq_ignore_ascii_case(code))
+                    .ok_or_else(|| format!("No pool data was supplied for set '{code}'"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Every booster must have a size MTGJSON agrees on; pack 1's is the
+        // session's nominal one.
+        for &index in &indices {
+            set_cards_per_pack(&selection.pools[index])?;
+        }
+        let cards_per_pack = set_cards_per_pack(&selection.pools[indices[0]])?;
+
+        // Carry the pools' own casing into the source, so the per-pack set
+        // codes the view publishes match the codes on the cards it deals.
+        let codes: Vec<String> = indices
+            .iter()
+            .map(|&index| selection.pools[index].code.clone())
+            .collect();
+        let generator =
+            PackGenerator::for_sequence(selection.pools, &codes).map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            source: DraftSource::Set { codes },
+            cards_per_pack,
+            pack_count,
+            generator,
+        })
+    }
+}
+
 /// Initialize panic hook for better error messages in WASM.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
@@ -186,34 +285,35 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
 
 /// Start a Quick Draft session: 1 human + 7 bots.
 ///
-/// - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+/// - `selection_json`: serialized [`SetPackSequence`] — the distinct set pools
+///   from draft-pools.json plus the set filling each booster, in pack order.
+///   The sequence length is the draft's pack count, and a set may repeat.
 /// - `difficulty`: 0=VeryEasy, 1=Easy, 2=Medium, 3=Hard, 4=VeryHard
 /// - `seed`: RNG seed for deterministic pack generation
 ///
 /// Returns the initial DraftPlayerView as a JS object.
 #[wasm_bindgen]
 pub fn start_quick_draft(
-    set_pool_json: &str,
+    selection_json: &str,
     difficulty: u8,
     seed: u32,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
+    // The procedure table is the single authority for how many boosters this
+    // kind opens; the selection only decides which set fills each of them.
+    let quick_procedure = DraftKind::Quick.procedure();
+    let selection =
+        ResolvedSetSelection::parse(selection_json, Some(quick_procedure.packs_per_player))
+            .map_err(|e| JsValue::from_str(&e))?;
 
     let ai_difficulty = map_difficulty(difficulty);
-    let set_code = set_pool.code.clone();
-    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
-    let quick_procedure = DraftKind::Quick.procedure();
 
     let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
+        set_code: selection.source.set_code(),
+        source: selection.source,
         kind: DraftKind::Quick,
         pod_size: quick_procedure.pod_size,
-        cards_per_pack,
-        pack_count: quick_procedure.packs_per_player,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
         min_deck_size: quick_procedure.min_deck_size,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
@@ -233,7 +333,7 @@ pub fn start_quick_draft(
     }
 
     let mut draft_session = DraftSession::new(config, seats, "quick-draft".to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+    let pack_gen = selection.generator;
 
     // Apply StartDraft to generate packs and transition to Drafting
     session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
@@ -254,24 +354,25 @@ pub fn start_quick_draft(
 /// then the human proceeds directly to deckbuilding.
 #[wasm_bindgen]
 pub fn start_sealed_draft(
-    set_pool_json: &str,
+    selection_json: &str,
     difficulty: u8,
     seed: u32,
 ) -> Result<JsValue, JsValue> {
-    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
-    let set_code = set_pool.code.clone();
-    let cards_per_pack = set_cards_per_pack(&set_pool).map_err(|e| JsValue::from_str(&e))?;
+    // CR-independent event rule: the engine fixes sealed at the procedure's
+    // booster count (`apply_start_draft` rejects any other), so the selection
+    // must name exactly that many — mixed sets are fine, a different pack count
+    // is not.
     let sealed_procedure = DraftKind::Sealed.procedure();
+    let selection =
+        ResolvedSetSelection::parse(selection_json, Some(sealed_procedure.packs_per_player))
+            .map_err(|e| JsValue::from_str(&e))?;
     let config = DraftConfig {
-        source: DraftSource::Set {
-            code: set_code.clone(),
-        },
-        set_code,
+        set_code: selection.source.set_code(),
+        source: selection.source,
         kind: DraftKind::Sealed,
         pod_size: sealed_procedure.pod_size,
-        cards_per_pack,
-        pack_count: sealed_procedure.packs_per_player,
+        cards_per_pack: selection.cards_per_pack,
+        pack_count: selection.pack_count,
         min_deck_size: sealed_procedure.min_deck_size,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
@@ -290,7 +391,7 @@ pub fn start_sealed_draft(
     }
 
     let mut draft_session = DraftSession::new(config, seats, "sealed-draft".to_string());
-    let pack_gen = PackGenerator::new(set_pool);
+    let pack_gen = selection.generator;
     session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
         .map_err(|e| JsValue::from_str(&format!("Failed to start sealed event: {e}")))?;
     let view = filter_for_player(&draft_session, 0);
@@ -878,8 +979,9 @@ pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsVal
         .validate_sealed_snapshot()
         .map_err(|e| JsValue::from_str(&format!("Invalid draft snapshot: {e}")))?;
 
-    let offset = session.current_pack_number as u64 * session.config.cards_per_pack as u64
-        + session.pick_number as u64;
+    let offset = u64::from(session.cards_in_pack(session.current_pack_number))
+        * u64::from(session.current_pack_number)
+        + u64::from(session.pick_number);
     let resume_seed = session.config.rng_seed.wrapping_add(offset);
 
     DIFFICULTY.with(|cell| cell.set(map_difficulty(difficulty)));
@@ -1024,20 +1126,52 @@ enum SeatDescriptor {
 /// TS↔Rust mirror convention in `draft-adapter.ts`.
 ///
 /// JSON examples:
-///   `{ "type": "Set",  "data": { "set_pool_json": "<serialized LimitedSetPool>" } }`
+///   `{ "type": "Set",  "data": { "pools": [<LimitedSetPool>, ...],
+///                                 "sequence": ["isd", "dka", "avr"] } }`
 ///   `{ "type": "Cube", "data": { "cube_list_text": "...", "cube_name": "My Cube",
 ///                                 "cube_draft_settings": { ... } } }`
 #[derive(Deserialize)]
 #[serde(tag = "type", content = "data")]
 enum PoolInput {
-    Set {
-        set_pool_json: String,
-    },
+    Set(SetPoolInput),
     Cube {
         cube_list_text: String,
         cube_name: String,
         cube_draft_settings: CubeDraftSettings,
     },
+}
+
+/// A pod's set-backed pool, in either spelling a host may have written.
+///
+/// The live shape is the same [`SetPackSequence`] the single-player entry
+/// points take, so one pod boundary and one local boundary describe a pack
+/// sequence identically. Hosts that predate multi-set pods persisted a single
+/// serialized [`LimitedSetPool`] under `set_pool_json`; that snapshot restores
+/// here as the one-pack, one-pool sequence it always meant. Same contract as
+/// `DraftSource`'s `code`/`codes` alias, at the boundary rather than in the
+/// snapshot.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SetPoolInput {
+    Sequence(SetPackSequence),
+    Legacy { set_pool_json: String },
+}
+
+impl SetPoolInput {
+    /// Resolve to a pack sequence, promoting the legacy single-pool spelling.
+    fn into_sequence(self) -> Result<SetPackSequence, String> {
+        match self {
+            SetPoolInput::Sequence(sequence) => Ok(sequence),
+            SetPoolInput::Legacy { set_pool_json } => {
+                let pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
+                    .map_err(|e| format!("Failed to parse set pool: {e}"))?;
+                Ok(SetPackSequence {
+                    sequence: vec![pool.code.clone()],
+                    pools: vec![pool],
+                })
+            }
+        }
+    }
 }
 
 /// Boundary mirror of `draft_core::types::DraftProcedure` for the JS bridge.
@@ -1218,22 +1352,23 @@ fn create_multiplayer_draft_inner(
         .collect();
 
     match pool_input {
-        PoolInput::Set { set_pool_json } => {
-            let set_pool: LimitedSetPool = serde_json::from_str(&set_pool_json)
-                .map_err(|e| format!("Failed to parse set pool: {}", e))?;
-            let set_code = set_pool.code.clone();
-            let cards_per_pack = set_cards_per_pack(&set_pool)?;
+        PoolInput::Set(set_pool_input) => {
+            // The procedure table is the single authority for how many boosters
+            // this kind opens; the host's selection only decides which set fills
+            // each of them. Same contract as the single-player entry points.
             let procedure = draft_kind.procedure();
+            let selection = ResolvedSetSelection::resolve(
+                set_pool_input.into_sequence()?,
+                Some(procedure.packs_per_player),
+            )?;
 
             let config = DraftConfig {
-                source: DraftSource::Set {
-                    code: set_code.clone(),
-                },
-                set_code,
+                set_code: selection.source.set_code(),
+                source: selection.source,
                 kind: draft_kind,
                 pod_size: seats.len() as u8,
-                cards_per_pack,
-                pack_count: procedure.packs_per_player,
+                cards_per_pack: selection.cards_per_pack,
+                pack_count: selection.pack_count,
                 min_deck_size: procedure.min_deck_size,
                 addable_cards: DeckAddableCards::standard_basics(),
                 rng_seed: seed as u64,
@@ -1243,7 +1378,7 @@ fn create_multiplayer_draft_inner(
             };
 
             let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
-            let pack_gen = PackGenerator::new(set_pool);
+            let pack_gen = selection.generator;
 
             session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
                 .map_err(|e| format!("Failed to start draft: {}", e))?;
@@ -1390,13 +1525,46 @@ mod pool_input_tests {
         assert_eq!(message, "card 'Watery Grave' is not in the drafted pool");
     }
 
+    /// The live pod spelling: pools plus the pack-ordered sequence naming which
+    /// of them fills each booster — the same shape the single-player entry
+    /// points take.
     #[test]
     fn pool_input_set_round_trip() {
-        let json = r#"{"type":"Set","data":{"set_pool_json":"{\"code\":\"foo\"}"}}"#;
+        let json = r#"{"type":"Set","data":{
+            "pools":[{"code":"foo","name":"Foo","release_date":null,
+                      "pack_variants":[],"pack_variants_total_weight":0,
+                      "sheets":{},"prints":[],"basic_lands":[]}],
+            "sequence":["foo","foo","foo"]}}"#;
         let parsed: PoolInput = serde_json::from_str(json).unwrap();
         match parsed {
-            PoolInput::Set { set_pool_json } => {
-                assert_eq!(set_pool_json, "{\"code\":\"foo\"}");
+            PoolInput::Set(input) => {
+                let sequence = input.into_sequence().expect("already a sequence");
+                assert_eq!(sequence.sequence, vec!["foo".to_string(); 3]);
+                assert_eq!(sequence.pools.len(), 1);
+            }
+            _ => panic!("expected Set"),
+        }
+    }
+
+    /// The pre-multi-set spelling one pod host may still have persisted:
+    /// a single serialized pool, promoted to the one-element sequence it meant.
+    #[test]
+    fn pool_input_set_accepts_the_legacy_single_pool() {
+        let pool = r#"{"code":"foo","name":"Foo","release_date":null,
+            "pack_variants":[],"pack_variants_total_weight":0,
+            "sheets":{},"prints":[],"basic_lands":[]}"#;
+        let json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": pool }
+        })
+        .to_string();
+
+        let parsed: PoolInput = serde_json::from_str(&json).unwrap();
+        match parsed {
+            PoolInput::Set(input) => {
+                let sequence = input.into_sequence().expect("the legacy pool parses");
+                assert_eq!(sequence.sequence, vec!["foo".to_string()]);
+                assert_eq!(sequence.pools.len(), 1);
             }
             _ => panic!("expected Set"),
         }
@@ -1432,6 +1600,133 @@ mod pool_input_tests {
             }
             _ => panic!("expected Cube"),
         }
+    }
+}
+
+#[cfg(test)]
+mod set_selection_tests {
+    use super::*;
+
+    /// A minimal `LimitedSetPool` whose single variant holds `size` commons.
+    fn pool_json(code: &str, size: u8) -> String {
+        let cards: Vec<String> = (0..40)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"{code} Card {i}","set_code":"{code}","collector_number":"{n}","rarity":"common","weight":1}}"#,
+                    n = i + 1
+                )
+            })
+            .collect();
+        format!(
+            r#"{{
+                "code": "{code}",
+                "name": "{code} Set",
+                "release_date": null,
+                "pack_variants": [{{
+                    "contents": [{{
+                        "slot": "common",
+                        "count": {size},
+                        "choices": [{{ "sheet": "common", "weight": 1 }}]
+                    }}],
+                    "weight": 1
+                }}],
+                "pack_variants_total_weight": 1,
+                "sheets": {{
+                    "common": {{
+                        "cards": [{cards}],
+                        "total_weight": 40,
+                        "foil": false,
+                        "balance_colors": false
+                    }}
+                }},
+                "prints": [],
+                "basic_lands": []
+            }}"#,
+            cards = cards.join(",")
+        )
+    }
+
+    fn selection_json(pools: &[(&str, u8)], sequence: &[&str]) -> String {
+        let pools: Vec<String> = pools
+            .iter()
+            .map(|(code, size)| pool_json(code, *size))
+            .collect();
+        let sequence: Vec<String> = sequence.iter().map(|c| format!("\"{c}\"")).collect();
+        format!(
+            r#"{{ "pools": [{}], "sequence": [{}] }}"#,
+            pools.join(","),
+            sequence.join(",")
+        )
+    }
+
+    #[test]
+    fn a_selection_sets_the_pack_count_from_its_sequence_and_repeats_sets() {
+        let selection = ResolvedSetSelection::parse(
+            &selection_json(&[("AAA", 15), ("BBB", 14)], &["AAA", "BBB", "AAA"]),
+            None,
+        )
+        .expect("both named sets have pool data");
+
+        assert_eq!(selection.pack_count, 3);
+        // The nominal size follows pack 1; per-pack sizes are recorded on the
+        // session from the packs the generator produces.
+        assert_eq!(selection.cards_per_pack, 15);
+        assert_eq!(
+            selection.source,
+            DraftSource::Set {
+                codes: vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()],
+            }
+        );
+        assert_eq!(selection.source.set_code(), "AAA+BBB");
+    }
+
+    #[test]
+    fn a_selection_naming_a_set_it_did_not_supply_is_rejected() {
+        let error =
+            ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &["AAA", "MISSING"]), None)
+                .err()
+                .expect("the sequence names a set with no pool");
+
+        assert!(error.contains("MISSING"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn an_empty_selection_is_rejected() {
+        assert!(ResolvedSetSelection::parse(&selection_json(&[("AAA", 15)], &[]), None).is_err());
+    }
+
+    /// A fixed-length event opens its own booster count regardless of how many
+    /// sets the selection names. Naming fewer repeats the last entry, so the
+    /// one-element single-set shorthand still fills all six; naming MORE would
+    /// silently drop boosters, so it is refused.
+    #[test]
+    fn sealed_opens_six_boosters_from_a_shorter_or_exact_selection() {
+        let one = selection_json(&[("AAA", 15)], &["AAA"]);
+        let selection = ResolvedSetSelection::parse(&one, Some(SEALED_PACK_COUNT))
+            .expect("a one-element sequence fills every booster");
+        assert_eq!(selection.pack_count, SEALED_PACK_COUNT);
+        assert_eq!(
+            selection.source.set_code_for_pack(SEALED_PACK_COUNT - 1),
+            "AAA"
+        );
+
+        let six = selection_json(
+            &[("AAA", 15), ("BBB", 14)],
+            &["AAA", "AAA", "AAA", "BBB", "BBB", "BBB"],
+        );
+        let selection = ResolvedSetSelection::parse(&six, Some(SEALED_PACK_COUNT))
+            .expect("six boosters is a valid sealed selection");
+        assert_eq!(selection.pack_count, SEALED_PACK_COUNT);
+        assert_eq!(selection.source.set_code_for_pack(5), "BBB");
+
+        let seven = selection_json(
+            &[("AAA", 15)],
+            &["AAA", "AAA", "AAA", "AAA", "AAA", "AAA", "AAA"],
+        );
+        let error = ResolvedSetSelection::parse(&seven, Some(SEALED_PACK_COUNT))
+            .err()
+            .expect("seven sets name a booster sealed never opens");
+        assert!(error.contains('7'), "unexpected error: {error}");
     }
 }
 
@@ -1690,6 +1985,174 @@ mod create_multiplayer_draft_tests {
             .iter()
             .all(|pack| pack.len() == 3));
 
+        clear_state();
+    }
+
+    /// One set pool with `code`, three commons, a fixed 3-card booster.
+    fn pod_pool_json(code: &str) -> String {
+        format!(
+            r#"{{
+            "code": "{code}",
+            "name": "Set {code}",
+            "release_date": null,
+            "pack_variants": [{{
+                "contents": [{{ "slot": "common", "count": 3, "choices": [{{ "sheet": "common", "weight": 1 }}] }}],
+                "weight": 1
+            }}],
+            "pack_variants_total_weight": 1,
+            "sheets": {{
+                "common": {{
+                    "cards": [
+                        {{ "name": "Alpha", "set_code": "{code}", "collector_number": "1", "rarity": "common", "weight": 1 }},
+                        {{ "name": "Beta", "set_code": "{code}", "collector_number": "2", "rarity": "common", "weight": 1 }},
+                        {{ "name": "Gamma", "set_code": "{code}", "collector_number": "3", "rarity": "common", "weight": 1 }}
+                    ],
+                    "total_weight": 3,
+                    "foil": false,
+                    "balance_colors": false
+                }}
+            }},
+            "prints": [],
+            "basic_lands": []
+        }}"#
+        )
+    }
+
+    /// A pod's `PoolInput::Set` in the live sequence spelling.
+    fn pod_sequence_pool_input(pools: &[&str], sequence: &[&str]) -> String {
+        let pools: Vec<serde_json::Value> = pools
+            .iter()
+            .map(|code| serde_json::from_str(&pod_pool_json(code)).expect("pool fixture"))
+            .collect();
+        serde_json::json!({
+            "type": "Set",
+            "data": { "pools": pools, "sequence": sequence }
+        })
+        .to_string()
+    }
+
+    fn two_human_seats_json() -> &'static str {
+        r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#
+    }
+
+    /// THE multiplayer multi-set claim: a pod host names one set per booster,
+    /// and the pod that starts opens those sets in that order.
+    ///
+    /// Asserts the ORDER, not just the set membership — a pod that resolved
+    /// only its first code, or that deduped the sequence, would deal every
+    /// later booster from the wrong set while still reporting the right sets.
+    #[test]
+    fn a_pod_opens_each_booster_from_its_own_set_in_pack_order() {
+        clear_state();
+        let view = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("a three-booster Premier pod is a valid multi-set selection");
+
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "BBB".to_string(), "AAA".to_string()]
+        );
+        // Pack 1 is open, so every card in hand comes from the sequence's first
+        // entry — the pool the generator resolved for that booster.
+        let pack = view.current_pack.expect("current pack");
+        assert_eq!(pack.len(), 3);
+        assert!(
+            pack.iter().all(|card| card.set_code == "AAA"),
+            "pack 1 must be dealt from the sequence's first set: {:?}",
+            pack.iter().map(|c| &c.set_code).collect::<Vec<_>>()
+        );
+        clear_state();
+    }
+
+    /// The kind's procedure fixes how many boosters a pod opens. A host who
+    /// names MORE sets than that is refused at creation rather than having the
+    /// extra boosters silently dropped. Premier opens three; Sealed opens six.
+    #[test]
+    fn a_pod_refuses_a_sequence_longer_than_its_kinds_pack_count() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA", "BBB"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect_err("four sets name a booster Premier never opens");
+        assert!(err.contains('4'), "unexpected error: {err}");
+
+        let sealed = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA", "BBB"], &["AAA", "BBB", "AAA", "BBB", "AAA", "BBB"]),
+            two_human_seats_json(),
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("six boosters is a valid Sealed pod selection");
+        assert_eq!(sealed.pack_set_codes.len(), 6);
+        clear_state();
+    }
+
+    /// A sequence naming a set the host shipped no pool for is refused by name,
+    /// rather than starting a pod whose later packs come up empty.
+    #[test]
+    fn a_pod_refuses_a_sequence_naming_an_unsupplied_set() {
+        clear_state();
+        let err = create_multiplayer_draft_inner(
+            &pod_sequence_pool_input(&["AAA"], &["AAA", "MISSING", "AAA"]),
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect_err("the sequence names a set with no pool data");
+        assert!(err.contains("MISSING"), "unexpected error: {err}");
+        clear_state();
+    }
+
+    /// A host that persisted its pod before multi-set pods existed wrote a
+    /// single serialized `LimitedSetPool`. Resuming must restore the pod it
+    /// always described — every booster from that one set — not fail the frame.
+    #[test]
+    fn a_pod_resumes_from_the_legacy_single_pool_spelling() {
+        clear_state();
+        let legacy = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": pod_pool_json("AAA") }
+        })
+        .to_string();
+
+        let view = create_multiplayer_draft_inner(
+            &legacy,
+            two_human_seats_json(),
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+        )
+        .expect("a legacy single-pool pod still starts");
+
+        assert_eq!(
+            view.pack_set_codes,
+            vec!["AAA".to_string(), "AAA".to_string(), "AAA".to_string()],
+            "a one-element sequence repeats its last entry for every booster"
+        );
         clear_state();
     }
 
@@ -1970,8 +2433,8 @@ mod create_multiplayer_draft_tests {
     /// The CR 903.13e granting twin of `commander_pool_input_json()`.
     ///
     /// Identical but for the set code, which is the only thing that makes the
-    /// grant fire: `session_concessions` latches `DraftSource::Set { code }`
-    /// and matches it case-insensitively against the engine's
+    /// grant fire: `session_concessions` latches `DraftSource::Set { codes }`
+    /// and matches each of them case-insensitively against the engine's
     /// `DRAFT_SET_CONCESSIONS` table, where "CMM" grants up to two copies of
     /// The Prismatic Piper. The grant is therefore LATCHED from what the draft
     /// contained rather than hand-set on the session, which is what makes the
