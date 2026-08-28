@@ -2343,23 +2343,35 @@ export class P2PHostAdapter implements EngineAdapter {
    * link degrades the fan-out silently rather than rejecting it. The ordering
    * matters for the per-viewer snapshot and the terminal commit.
    *
-   * The trade is deliberate and not symmetric: this reads one local snapshot,
-   * while the fan-out reads one per guest and then commits a terminal result.
-   * Not covered: if `getSnapshot` itself throws, the guests go unserved and
-   * stay on their last delivered state until the next successful delivery —
-   * the stale-state watchdog does not close that gap, because a guest whose
-   * adapter cache and screen are the same stale state shows no divergence.
+   * **This never rejects.** Running before the fan-out would otherwise turn a
+   * failed local read into a starved delivery: the guests would never receive
+   * an action the engine has already applied, and their watchdog cannot
+   * recover a state their adapter cache never held
+   * (`game/staleStateWatchdog.ts` — its check compares screen against that
+   * cache, and an undelivered update leaves both equally stale). Symmetry is
+   * the whole point of the ordering: on THIS path neither side may starve the
+   * other, so a failure here is logged and the caller continues to the fan-out.
+   *
+   * The symmetry stops at the guest-message paths. The host's own
+   * `submitAction` / `submitInteraction` still await the fan-out without a
+   * `try`, so a rejection there aborts before the host commits its own applied
+   * action and leaves the remaining guests unserved. Naming it rather than
+   * changing a public adapter contract in this PR.
    *
    * No-op under `nativeBridge`, which publishes its own revisions.
    */
   private async publishHostSnapshot(result: SubmitResult): Promise<void> {
     if (this.nativeBridge) return;
-    this.emit({
-      type: "stateChanged",
-      snapshot: await this.wasm.getSnapshot(),
-      events: result.events,
-      logEntries: result.log_entries,
-    });
+    try {
+      this.emit({
+        type: "stateChanged",
+        snapshot: await this.wasm.getSnapshot(),
+        events: result.events,
+        logEntries: result.log_entries,
+      });
+    } catch (err) {
+      console.error("[P2PHost] host snapshot publication failed:", err);
+    }
   }
 
   async getState(): Promise<GameState> {

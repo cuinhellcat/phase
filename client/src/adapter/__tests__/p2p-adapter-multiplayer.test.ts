@@ -3792,14 +3792,35 @@ describe("P2P wire-protocol version gate", () => {
  * scripted `getViewerSnapshot` rejection is what the ordering has to survive.
  */
 describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
-  function failNextFanOut(): void {
+  /**
+   * Returns a reach guard: `consumed()` is true only if the scripted rejection
+   * actually ran. Without it every assertion below is also the picture of a
+   * completely healthy run, so an injection that silently stops being reached
+   * would leave the test green and measuring nothing.
+   */
+  function failNextFanOut(): { consumed: () => boolean } {
     // The fan-out's first per-guest await, and one of its two real rejection
     // sources — the other is the terminal commit that closes the fan-out.
+    let reached = false;
     (mockGetViewerSnapshot as unknown as {
       mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
     }).mockImplementationOnce(async () => {
+      reached = true;
       throw new Error("viewer snapshot failed");
     });
+    return { consumed: () => reached };
+  }
+
+  /** Same guard for the host's own snapshot read. */
+  function failNextHostSnapshotRead(): { consumed: () => boolean } {
+    let reached = false;
+    (mockGetSnapshot as unknown as {
+      mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
+    }).mockImplementationOnce(async () => {
+      reached = true;
+      throw new Error("host snapshot read failed");
+    });
+    return { consumed: () => reached };
   }
 
   it("still updates the host and does not reject the guest's applied action", async () => {
@@ -3814,7 +3835,7 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     const events: Array<{ type: string }> = [];
     adapter.onEvent((e) => events.push(e));
     mockSubmitAction.mockClear();
-    failNextFanOut();
+    const injection = failNextFanOut();
 
     await guest.simulateData({
       type: "action",
@@ -3823,7 +3844,9 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     });
     await flushPromises();
 
-    // The engine applied it,
+    // The scripted failure actually happened,
+    expect(injection.consumed()).toBe(true);
+    // the engine applied the action,
     expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
     // so the host's own screen must have advanced despite the fan-out,
     expect(events.some((e) => e.type === "stateChanged")).toBe(true);
@@ -3847,7 +3870,7 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     const events: Array<{ type: string }> = [];
     adapter.onEvent((e) => events.push(e));
     mockSubmitInteraction.mockClear();
-    failNextFanOut();
+    const injection = failNextFanOut();
 
     await guest.simulateData({
       type: "interaction",
@@ -3856,9 +3879,46 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     });
     await flushPromises();
 
+    expect(injection.consumed()).toBe(true);
     expect(mockSubmitInteraction).toHaveBeenCalled();
     expect(events.some((e) => e.type === "stateChanged")).toBe(true);
     const sent = await guest.getSentMessages();
+    expect(sent.some((m) => {
+      const type = (m as { type?: string }).type;
+      return type === "action_rejected" || type === "action_failed";
+    })).toBe(false);
+  });
+
+  // The ordering must not starve the other side either: the host's own read
+  // runs first, so a rejection there would stop the fan-out for an action the
+  // engine has already applied — and the guest watchdog cannot recover a state
+  // its adapter cache never held.
+  it("still serves the guests when the host's own snapshot read fails", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    mockSubmitAction.mockClear();
+    const before = (await guest.getSentMessages()).length;
+    // `publishHostSnapshot` is the first `getSnapshot` caller after this point;
+    // the fan-out's own per-guest reads use `getViewerSnapshot` and still work.
+    const injection = failNextHostSnapshotRead();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    const sent = (await guest.getSentMessages()).slice(before);
+    expect(sent.some((m) => (m as { type?: string }).type === "state_update")).toBe(true);
     expect(sent.some((m) => {
       const type = (m as { type?: string }).type;
       return type === "action_rejected" || type === "action_failed";
