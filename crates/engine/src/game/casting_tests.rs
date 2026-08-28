@@ -45696,10 +45696,11 @@ fn an_unelected_energy_permission_does_not_zero_an_evoke_election() {
     );
 }
 
-/// CR 601.2a (#7981 review round 2): an exiled card can be authorized by an
-/// object-attached `PlayFromExile` grant while a battlefield static ALSO
-/// authorizes it. The cast commits to the grant it elected; the static is not
-/// its route, so the static's `Additional` extra cost must not be imposed.
+/// CR 601.3 + CR 601.2f (#7981 review round 2): an exiled card can be
+/// authorized by an object-attached `PlayFromExile` grant while a battlefield
+/// static ALSO authorizes it. The engine preserves the elected permission as
+/// casting provenance, so the unelected static's `Additional` extra cost must
+/// not be imposed.
 ///
 /// The legality flip is the discriminator: the player is at 0 life, so the
 /// static's pay-life rider is unpayable. With the elected grant carried through
