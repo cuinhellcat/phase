@@ -10721,7 +10721,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
@@ -10752,6 +10751,9 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             card_type_set_source_binding_diverges(source)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_binding_diverges(aggregate.source())
         }
         // CR 601.2h: `AbilityTarget` is a target-slot read that
         // `quantity::resolve_event_scoped_ref` explicitly answers `None` for at
@@ -10785,7 +10787,6 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // unrelated earlier resolution left in the ledger (or nothing at all).
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -10977,6 +10978,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // `ResolvedAbility`, so this matches nothing at fire time. The
         // population-level counterpart of `ObjectScope::CostPaidObject`.
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
 
         // ---- RESOLUTION-PUBLISHED LEDGERS (CR 608.2c): established BY a
         // ---- resolution, so the fire-time read is a different moment's set.
@@ -14824,7 +14826,6 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
         | QuantityRef::SacrificedThisTurn { filter, .. }
@@ -14862,6 +14863,9 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_references_cost_paid_object(source)
         }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            characteristic_source_references_cost_paid_object(aggregate.source())
+        }
 
         // Mana-spent metering embeds a `TargetFilter` through its metric enum.
         QuantityRef::ManaSpentToCast { metric, .. } => match metric {
@@ -14898,7 +14902,6 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -21135,7 +21138,10 @@ pub mod tests {
         for source in [
             clean,
             CardTypeSetSource::ExiledBySource,
-            CardTypeSetSource::TrackedSet { caused_by: None },
+            CardTypeSetSource::TrackedSet {
+                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                caused_by: None,
+            },
         ] {
             assert!(
                 !characteristic_source_references_cost_paid_object(&source),
@@ -26436,44 +26442,54 @@ pub mod tests {
                                 name: "Illusion".to_string(),
                                 power: crate::types::ability::PtValue::Quantity(
                                     QuantityExpr::Ref {
-                                        qty: QuantityRef::Aggregate {
-                                            function: crate::types::ability::AggregateFunction::Sum,
-                                            property:
+                                        qty: QuantityRef::PropertyAggregate(
+                                            crate::types::ability::PropertyAggregate::new(
+                                                crate::types::ability::AggregateFunction::Sum,
                                                 crate::types::ability::ObjectProperty::ManaValue,
-                                            filter: TargetFilter::And {
-                                                filters: vec![
-                                                    TargetFilter::ExiledBySource,
-                                                    TargetFilter::Typed(
-                                                        TypedFilter::default().properties(vec![
-                                                            FilterProp::Owned {
-                                                                controller: ControllerRef::You,
-                                                            },
-                                                        ]),
-                                                    ),
-                                                ],
-                                            },
-                                        },
+                                                crate::types::ability::CardTypeSetSource::Objects {
+                                                    filter: TargetFilter::And {
+                                                        filters: vec![
+                                                            TargetFilter::ExiledBySource,
+                                                            TargetFilter::Typed(
+                                                                TypedFilter::default().properties(
+                                                                    vec![FilterProp::Owned {
+                                                                        controller:
+                                                                            ControllerRef::You,
+                                                                    }],
+                                                                ),
+                                                            ),
+                                                        ],
+                                                    },
+                                                },
+                                            )
+                                            .expect("statically valid property aggregate"),
+                                        ),
                                     },
                                 ),
                                 toughness: crate::types::ability::PtValue::Quantity(
                                     QuantityExpr::Ref {
-                                        qty: QuantityRef::Aggregate {
-                                            function: crate::types::ability::AggregateFunction::Sum,
-                                            property:
+                                        qty: QuantityRef::PropertyAggregate(
+                                            crate::types::ability::PropertyAggregate::new(
+                                                crate::types::ability::AggregateFunction::Sum,
                                                 crate::types::ability::ObjectProperty::ManaValue,
-                                            filter: TargetFilter::And {
-                                                filters: vec![
-                                                    TargetFilter::ExiledBySource,
-                                                    TargetFilter::Typed(
-                                                        TypedFilter::default().properties(vec![
-                                                            FilterProp::Owned {
-                                                                controller: ControllerRef::You,
-                                                            },
-                                                        ]),
-                                                    ),
-                                                ],
-                                            },
-                                        },
+                                                crate::types::ability::CardTypeSetSource::Objects {
+                                                    filter: TargetFilter::And {
+                                                        filters: vec![
+                                                            TargetFilter::ExiledBySource,
+                                                            TargetFilter::Typed(
+                                                                TypedFilter::default().properties(
+                                                                    vec![FilterProp::Owned {
+                                                                        controller:
+                                                                            ControllerRef::You,
+                                                                    }],
+                                                                ),
+                                                            ),
+                                                        ],
+                                                    },
+                                                },
+                                            )
+                                            .expect("statically valid property aggregate"),
+                                        ),
                                     },
                                 ),
                                 types: vec!["Creature".to_string(), "Illusion".to_string()],
@@ -30990,6 +31006,7 @@ pub mod tests {
             obj.card_types.core_types.push(CoreType::Creature);
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Ajani, Nacatl Avenger".to_string(),
                 power: None,
                 toughness: None,
@@ -45813,6 +45830,179 @@ pub mod tests {
             None,
             Some(&unchosen),
         ));
+    }
+
+    /// CR 603.2 + CR 603.6a: a permanent spell's real Stack→Battlefield
+    /// transition must remain visible to both the trigger index and ordinary
+    /// post-action collection. This is a diagnostic reproduction for the
+    /// Gilgamesh / Sokka-and-Suki report; it deliberately asserts each seam
+    /// separately so a failure identifies candidate routing versus collection.
+    #[test]
+    fn permanent_spell_entry_keeps_gilgamesh_and_sokka_etb_sources_visible() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::CastPaymentMode;
+
+        const GILGAMESH: &str = "Whenever Gilgamesh enters or attacks, draw a card.";
+        const SOKKA_AND_SUKI: &str =
+            "Whenever Sokka and Suki or another Ally you control enters, draw a card.";
+
+        fn resolve_free_permanent_spell(
+            runner: &mut crate::game::scenario::GameRunner,
+            object_id: ObjectId,
+        ) -> Vec<GameEvent> {
+            let card_id = runner.state().objects[&object_id].card_id;
+            runner
+                .act(GameAction::CastSpell {
+                    object_id,
+                    card_id,
+                    targets: Vec::new(),
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("free permanent spell cast must be accepted");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("first player must be able to pass priority");
+            runner
+                .act(GameAction::PassPriority)
+                .expect("second player must resolve the permanent spell")
+                .events
+        }
+
+        fn assert_entry_seams(
+            state: &GameState,
+            resolution_events: &[GameEvent],
+            entering: ObjectId,
+            expected_sources: &[ObjectId],
+            unrelated: ObjectId,
+            label: &str,
+        ) {
+            let entry_event = resolution_events
+                .iter()
+                .find(|event| {
+                    matches!(
+                        event,
+                        GameEvent::ZoneChanged {
+                            object_id,
+                            from: Some(Zone::Stack),
+                            to: Zone::Battlefield,
+                            ..
+                        } if *object_id == entering
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: resolving the permanent must emit its Stack→Battlefield \
+                         ZoneChanged event; events={resolution_events:?}"
+                    )
+                });
+
+            let candidates = crate::game::trigger_index::candidates_for_event(state, entry_event);
+            for source in expected_sources {
+                assert!(
+                    candidates.contains(source),
+                    "{label}: trigger source {source:?} must be returned by \
+                     candidates_for_event for the real Stack→Battlefield event; \
+                     candidates={candidates:?}, event={entry_event:?}"
+                );
+            }
+            assert!(
+                !candidates.contains(&unrelated),
+                "{label}: attacks-only source {unrelated:?} must not be a \
+                 Stack→Battlefield candidate; candidates={candidates:?}"
+            );
+
+            let mut collector_state = state.clone();
+            let pending =
+                collect_pending_triggers(&mut collector_state, std::slice::from_ref(entry_event));
+            for source in expected_sources {
+                assert!(
+                    pending
+                        .iter()
+                        .any(|context| context.pending.source_id == *source),
+                    "{label}: indexed source {source:?} must produce an ordinary pending \
+                     trigger context for the real entry event; pending_sources={:?}",
+                    pending
+                        .iter()
+                        .map(|context| context.pending.source_id)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        let mut gilgamesh_scenario = GameScenario::new();
+        gilgamesh_scenario.at_phase(Phase::PreCombatMain);
+        let gilgamesh = gilgamesh_scenario
+            .add_creature_to_hand_from_oracle(P0, "Gilgamesh", 3, 3, GILGAMESH)
+            .id();
+        let gilgamesh_unrelated = gilgamesh_scenario
+            .add_creature_from_oracle(
+                P0,
+                "Unrelated attacker",
+                2,
+                2,
+                "Whenever ~ attacks, draw a card.",
+            )
+            .id();
+        let mut gilgamesh_runner = gilgamesh_scenario.build();
+        let gilgamesh_events = resolve_free_permanent_spell(&mut gilgamesh_runner, gilgamesh);
+        assert_entry_seams(
+            gilgamesh_runner.state(),
+            &gilgamesh_events,
+            gilgamesh,
+            &[gilgamesh],
+            gilgamesh_unrelated,
+            "Gilgamesh",
+        );
+        assert!(
+            gilgamesh_runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == gilgamesh),
+            "Gilgamesh: the ordinary post-action pipeline must put its ETB trigger on \
+             the stack; stack={:?}",
+            gilgamesh_runner.state().stack
+        );
+
+        let mut sokka_scenario = GameScenario::new();
+        sokka_scenario.at_phase(Phase::PreCombatMain);
+        let sokka = sokka_scenario
+            .add_creature_from_oracle(P0, "Sokka and Suki", 3, 3, SOKKA_AND_SUKI)
+            .with_subtypes(vec!["Human", "Warrior", "Ally"])
+            .id();
+        let entering_ally = sokka_scenario
+            .add_creature_to_hand_from_oracle(P0, "Test Ally", 1, 1, "")
+            .with_subtypes(vec!["Ally"])
+            .id();
+        let sokka_unrelated = sokka_scenario
+            .add_creature_from_oracle(
+                P0,
+                "Unrelated attacker",
+                2,
+                2,
+                "Whenever ~ attacks, draw a card.",
+            )
+            .id();
+        let mut sokka_runner = sokka_scenario.build();
+        let sokka_events = resolve_free_permanent_spell(&mut sokka_runner, entering_ally);
+        assert_entry_seams(
+            sokka_runner.state(),
+            &sokka_events,
+            entering_ally,
+            &[sokka],
+            sokka_unrelated,
+            "Sokka and Suki",
+        );
+        assert!(
+            sokka_runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == sokka),
+            "Sokka and Suki: the ordinary post-action pipeline must put its Ally ETB \
+             trigger on the stack; stack={:?}",
+            sokka_runner.state().stack
+        );
     }
 }
 

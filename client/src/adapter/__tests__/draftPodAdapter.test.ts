@@ -15,6 +15,7 @@ import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView } from "../draft-adapter";
 import { loadDraftHostSession } from "../../services/draftPersistence";
+import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -57,6 +58,8 @@ const mockHostRequestResume = vi.fn();
 const mockHostDispose = vi.fn();
 const mockHostTerminateDraft = vi.fn(async () => {});
 const mockHostRestoreFromPersisted = vi.fn(async (): Promise<DraftPlayerView | null> => null);
+const mockHostUpdateWorkspace = vi.fn(async () => {});
+const mockHostGetWorkspaceState = vi.fn((): DraftWorkspaceState | null => null);
 
 vi.mock("../p2p-draft-host", () => ({
   P2PDraftHost: vi.fn().mockImplementation(function () {
@@ -74,6 +77,8 @@ vi.mock("../p2p-draft-host", () => ({
       dispose: mockHostDispose,
       terminateDraft: mockHostTerminateDraft,
       restoreFromPersisted: mockHostRestoreFromPersisted,
+      updateHostWorkspace: mockHostUpdateWorkspace,
+      getHostWorkspaceState: mockHostGetWorkspaceState,
       isFull: false,
       isStarted: false,
       isPaused: false,
@@ -87,6 +92,7 @@ const mockGuestInitialize = vi.fn(async () => {});
 const mockGuestSubmitPick = vi.fn(async () => {});
 const mockGuestSubmitPickWithDraftEffect = vi.fn(async () => {});
 const mockGuestSubmitDeck = vi.fn(async () => {});
+const mockGuestUpdateWorkspace = vi.fn(async () => {});
 const mockGuestLeave = vi.fn(async () => {});
 const mockGuestDispose = vi.fn();
 
@@ -98,6 +104,7 @@ vi.mock("../p2p-draft-guest", () => ({
       submitPick: mockGuestSubmitPick,
       submitPickWithDraftEffect: mockGuestSubmitPickWithDraftEffect,
       submitDeck: mockGuestSubmitDeck,
+      updateWorkspace: mockGuestUpdateWorkspace,
       leave: mockGuestLeave,
       dispose: mockGuestDispose,
       view: null,
@@ -129,9 +136,17 @@ function mockView(status: string): DraftPlayerView {
       type_filter_options: [],
       color_filter_options: [],
       color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+      workspace_capabilities: { rarity_group_order: null },
+      workspace_row_classification: {
+        creature_instance_ids: [],
+        noncreature_instance_ids: [],
+      },
     },
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -146,6 +161,12 @@ function mockView(status: string): DraftPlayerView {
     match_config: { match_type: "Bo1" },
   };
 }
+
+const restoredWorkspace: DraftWorkspaceState = {
+  schemaVersion: 1,
+  placements: { card: { zone: "deck", row: 0, column: 1, order: 0 } },
+  virtualBasics: [],
+};
 
 function mockHostResult() {
   return {
@@ -210,7 +231,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("transitions to lobby after initialization", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -229,7 +250,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("can suspend without terminating the persisted host draft", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -249,7 +270,7 @@ describe("DraftPodHostAdapter", () => {
 
     await expect(
       adapter.initialize({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -264,7 +285,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates startDraft to P2PDraftHost", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -291,13 +312,14 @@ describe("DraftPodHostAdapter", () => {
       draftStarted: true,
       draftCode: "ABCDE",
       draftSessionJson: "{}",
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     });
     const restoredView = mockView("MatchInProgress");
     mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
+    mockHostGetWorkspaceState.mockReturnValue(restoredWorkspace);
 
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -307,7 +329,85 @@ describe("DraftPodHostAdapter", () => {
     });
 
     expect(adapter.status).toBe("matchInProgress");
+    expect(events).toContainEqual({
+      type: "workspaceRestored",
+      workspaceState: restoredWorkspace,
+    });
     expect(events).toContainEqual({ type: "viewUpdated", view: restoredView });
+    expect(events.findIndex((event) => event.type === "workspaceRestored"))
+      .toBeLessThan(events.findIndex((event) => event.type === "viewUpdated"));
+  });
+
+  it.each([
+    ["non-null", restoredWorkspace],
+    ["null", null],
+  ] as const)("emits %s restoration before view and host initialization resolves", async (_label, state) => {
+    vi.mocked(loadDraftHostSession).mockResolvedValue({
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: {},
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "ABCDE",
+      draftSessionJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      perSeatWorkspaceSnapshots: {},
+    });
+    const restoredView = mockView("Drafting");
+    mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
+    mockHostGetWorkspaceState.mockReturnValue(state);
+    let resolveInitialize!: () => void;
+    mockHostInitialize.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveInitialize = resolve;
+    }));
+    const observed: string[] = [];
+    adapter.onEvent((event) => {
+      if (event.type === "workspaceRestored") {
+        observed.push(`workspace:${event.workspaceState === null ? "null" : "state"}`);
+        void expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized");
+      }
+      if (event.type === "viewUpdated") observed.push("view");
+    });
+
+    const initialization = adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId: "draft-1",
+    });
+    await vi.waitFor(() => expect(observed).toEqual([
+      `workspace:${state === null ? "null" : "state"}`,
+      "view",
+    ]));
+    expect(mockHostInitialize).toHaveBeenCalledOnce();
+    expect(mockHostUpdateWorkspace).not.toHaveBeenCalled();
+    resolveInitialize();
+    await initialization;
+    await adapter.updateWorkspace(restoredWorkspace);
+    expect(mockHostUpdateWorkspace).toHaveBeenCalledWith(restoredWorkspace);
+  });
+
+  it("awaits workspace delegation and propagates host rejection", async () => {
+    await expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized");
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+    mockHostUpdateWorkspace.mockRejectedValueOnce(new Error("host update failed"));
+    await expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("host update failed");
   });
 
   it("destroys a post-hostRoom host when its restore is aborted", async () => {
@@ -328,7 +428,7 @@ describe("DraftPodHostAdapter", () => {
       draftStarted: true,
       draftCode: "draft-1",
       draftSessionJson: "{}",
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     });
     let resolveRestore!: (view: DraftPlayerView | null) => void;
     mockHostRestoreFromPersisted.mockImplementationOnce(() => new Promise((resolve) => {
@@ -336,7 +436,7 @@ describe("DraftPodHostAdapter", () => {
     }));
     const controller = new AbortController();
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -367,7 +467,7 @@ describe("DraftPodHostAdapter", () => {
       resolveSession = resolve;
     }));
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -398,7 +498,7 @@ describe("DraftPodHostAdapter", () => {
       }),
     );
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -419,7 +519,7 @@ describe("DraftPodHostAdapter", () => {
     const replacementResult = mockHostResult();
     (hostRoom as ReturnType<typeof vi.fn>).mockResolvedValueOnce(replacementResult);
     await replacement.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -439,7 +539,7 @@ describe("DraftPodHostAdapter", () => {
     }));
     const controller = new AbortController();
     const initializing = adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -460,7 +560,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates submitPick and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -475,7 +575,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates draft-effect picks and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -490,7 +590,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates submitDeck and returns view", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -510,7 +610,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates host controls (kick, pause, resume)", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -536,7 +636,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("maps P2PDraftHost events to DraftPodHostEvents", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -605,7 +705,7 @@ describe("DraftPodHostAdapter", () => {
   it("never reports pairing for a Complete pod", async () => {
     stubCardDataFetch();
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "CommanderDraft",
       podSize: 4,
       hostDisplayName: "Host",
@@ -636,7 +736,7 @@ describe("DraftPodHostAdapter", () => {
    */
   it("still reaches pairing on roundAdvanced", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -656,7 +756,7 @@ describe("DraftPodHostAdapter", () => {
    */
   it("still reaches matchInProgress on pairingsGenerated", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -672,7 +772,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("cleans up on dispose", async () => {
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -691,7 +791,7 @@ describe("DraftPodHostAdapter", () => {
     const unsub = adapter.onEvent((e) => extraEvents.push(e));
 
     await adapter.initialize({
-      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -895,6 +995,15 @@ describe("DraftPodGuestAdapter", () => {
     );
   });
 
+  it("awaits workspace delegation and propagates guest rejection", async () => {
+    await expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Guest not initialized");
+    await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+    await adapter.updateWorkspace(restoredWorkspace);
+    expect(mockGuestUpdateWorkspace).toHaveBeenCalledWith(restoredWorkspace);
+    mockGuestUpdateWorkspace.mockRejectedValueOnce(new Error("guest update failed"));
+    await expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("guest update failed");
+  });
+
   it("throws when actions called before initialize", async () => {
     await expect(adapter.submitPick(["x"])).rejects.toThrow("Guest not initialized");
     await expect(adapter.submitDeck([], [])).rejects.toThrow("Guest not initialized");
@@ -913,6 +1022,19 @@ describe("DraftPodGuestAdapter", () => {
       type: "joined",
       seatIndex: 3,
       draftCode: "draft-001",
+    });
+
+    guestEventHandler({ type: "workspaceRestored", workspaceState: restoredWorkspace });
+    guestEventHandler({ type: "viewUpdated", view: mockView("Lobby") });
+    guestEventHandler({ type: "workspaceRestored", workspaceState: null });
+    expect(events.slice(-3).map((event) => event.type)).toEqual([
+      "workspaceRestored",
+      "viewUpdated",
+      "workspaceRestored",
+    ]);
+    expect(events[events.length - 1]).toEqual({
+      type: "workspaceRestored",
+      workspaceState: null,
     });
 
     // Simulate view update with drafting status

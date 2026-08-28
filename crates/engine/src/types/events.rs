@@ -535,6 +535,7 @@ impl EventObjectSnapshot {
             | TargetFilter::LastRevealed
             | TargetFilter::LastZoneChanged
             | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::ExiledCardByIndex { .. }

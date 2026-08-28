@@ -17,7 +17,8 @@ use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::engine::{
     apply_interaction_with_rejection, apply_with_rejection, preflight_debug_action_with_rejection,
-    recover_orphaned_resolve_all, resolve_all_ready_prefix_with_rejection,
+    resume_restored_stack_automation, RestoredStackAutomationOutcome,
+    RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::preview::{
@@ -25,7 +26,7 @@ use engine::game::preview::{
 };
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::draft_set_concessions;
+use engine::game::deck_validation::draft_set_concessions_for;
 use engine::game::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -897,32 +898,41 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
 /// frontend must not re-derive partner-pairing rules — it filters its candidate
 /// list through this. Returns an empty array if the database isn't loaded.
 ///
-/// `draft_set_code` is the set code of the draft boosters this deck is being
-/// built from, or `null` for constructed play. CR 903.13f(3) conditions its
-/// partner grant on what the DRAFT contained, which is a session property no
-/// pair of card names can express — so the caller supplies the set code and the
-/// ENGINE maps it to a grant. The client never learns which sets grant what.
+/// `draft_set_codes` is every set whose draft boosters this deck's draft
+/// CONTAINED, as an array — or `null`/`undefined`, which is read as the empty
+/// array, i.e. constructed play. CR 903.13f(3)
+/// conditions its partner grant on what the DRAFT contained, which is a session
+/// property no pair of card names can express — so the caller supplies the set
+/// codes and the ENGINE maps them to a grant. The client never learns which
+/// sets grant what.
+///
+/// A LIST rather than one code, because CR 903.13f(3) asks about containment: a
+/// mixed draft that opened Commander Masters and other boosters contained
+/// Commander Masters, and the grant is in force. The engine takes the union.
 ///
 /// It is a REQUIRED third parameter, and `JsValue` rather than
-/// `Option<String>`, on purpose: that matches this file's existing convention
+/// `Vec<String>`, on purpose: that matches this file's existing convention
 /// for engine-typed arguments and makes a stale caller a compile error rather
 /// than a silent `undefined`.
 #[wasm_bindgen(js_name = commanderPartnerCandidates)]
 pub fn commander_partner_candidates(
     first_commander: String,
     candidates: JsValue,
-    draft_set_code: JsValue,
+    draft_set_codes: JsValue,
 ) -> Result<JsValue, JsValue> {
     let candidates: Vec<String> = serde_wasm_bindgen::from_value(candidates)
         .map_err(|e| JsValue::from_str(&format!("Invalid candidate list: {e}")))?;
-    let draft_set_code: Option<String> = serde_wasm_bindgen::from_value(draft_set_code)
-        .map_err(|e| JsValue::from_str(&format!("Invalid draft set code: {e}")))?;
-    // CR 903.13f(3): `None` means constructed play, which grants nothing.
-    let grant = draft_set_code
-        .as_deref()
-        .map(draft_set_concessions)
-        .unwrap_or_default()
-        .partner_grant;
+    // `Option`, not a bare `Vec`, so a caller with no draft behind the deck can
+    // say so as `null` rather than having to construct an empty array — and so
+    // a JS `undefined` degrades to constructed play instead of throwing. This
+    // boundary is an in-process call with one typed TS caller, so it does not
+    // need `deck_loading::deserialize_draft_set_codes`' legacy single-string
+    // arm: no stored or wire payload reaches it.
+    let draft_set_codes: Option<Vec<String>> = serde_wasm_bindgen::from_value(draft_set_codes)
+        .map_err(|e| JsValue::from_str(&format!("Invalid draft set codes: {e}")))?;
+    let draft_set_codes = draft_set_codes.unwrap_or_default();
+    // CR 903.13f(3): an empty list means constructed play, which grants nothing.
+    let grant = draft_set_concessions_for(draft_set_codes.iter().map(String::as_str)).partner_grant;
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let Some(db) = db.as_ref() else {
@@ -1296,7 +1306,7 @@ fn validate_deck_list_seats(
                 &deck.planar_deck,
                 &deck.scheme_deck,
                 &deck.signature_spell,
-                deck_list.draft_set_code.as_deref(),
+                &deck_list.draft_set_codes,
                 game_format,
                 match_type,
                 player_count,
@@ -1320,7 +1330,7 @@ fn validate_deck_list_seats(
                 &deck.planar_deck,
                 &deck.scheme_deck,
                 &deck.signature_spell,
-                deck_list.draft_set_code.as_deref(),
+                &deck_list.draft_set_codes,
                 game_format,
                 match_type,
                 player_count,
@@ -1695,6 +1705,19 @@ fn record_replay_action(is_debug_action: bool, actor: PlayerId, action_for_repla
             }
             cell.set(log);
         }
+    });
+}
+
+/// Record the AI-only verified-pass seam. This has a distinct typed replay
+/// marker because replaying its visible `PassPriority` payload through the
+/// ordinary reducer would omit the retained stack recheck session.
+fn record_verified_ai_priority_pass(actor: PlayerId, semantic_owner: PlayerId) {
+    REPLAY_LOG.with(|cell| {
+        let mut log = cell.take();
+        if let Some(log) = log.as_mut() {
+            log.push_verified_ai_priority_pass(actor, semantic_owner);
+        }
+        cell.set(log);
     });
 }
 
@@ -2295,10 +2318,6 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
-    // A snapshot written while a Resolve All latch was outstanding restores
-    // with no acting seat; the consumer that would have advanced it lived in
-    // the worker that produced the snapshot.
-    recover_orphaned_resolve_all(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2306,6 +2325,50 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
     Ok(())
+}
+
+/// Explicitly drive any persisted stack automation after a successful restore.
+///
+/// [`restore_game_state`] deliberately remains an undo/decode boundary: it
+/// installs a playable snapshot but never manufactures a priority pass. This
+/// separately-invoked transition is the only WASM owner allowed to ask the
+/// engine to resume a saved `StackResolutionSession` or legacy Ready latch.
+/// Its bounded engine-authored presentation describes the automated burst;
+/// callers read the final game snapshot through the normal state exports.
+#[wasm_bindgen]
+pub fn resume_restored_game_state() -> Result<JsValue, JsValue> {
+    resume_loaded_stack_automation(false)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+/// Resume persisted stack automation from the state currently installed in
+/// this WASM instance.
+///
+/// A normal local restore has already invalidated undo's abandoned replay and
+/// proposal authority, so its no-op resume leaves those stores alone. A real
+/// engine transition (including an authorization repair) invalidates them once
+/// at the same boundary. Multiplayer host resume installs a new game identity,
+/// so it requests that reset even for an ordinary-priority no-op.
+fn resume_loaded_stack_automation(
+    reset_on_noop: bool,
+) -> Result<RestoredStackAutomationPresentation, String> {
+    let resumed = GAME_STATE.with(|cell| {
+        let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
+        let resumed = resume_restored_stack_automation(&mut state);
+        cell.set(Some(state));
+        Ok::<_, String>(resumed)
+    })?;
+    let changed = !matches!(
+        resumed.presentation.outcome,
+        RestoredStackAutomationOutcome::Noop
+    );
+    if changed || reset_on_noop {
+        clear_ai_session_cache();
+        REPLAY_LOG.with(|cell| cell.set(None));
+        invalidate_ai_proposals();
+    }
+    Ok(resumed.presentation)
 }
 
 /// Resume a multiplayer host session from a persisted `GameState`.
@@ -2340,7 +2403,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
 /// Refuses when the engine is already in use — this is a fresh-instance
 /// entry point. Callers must clear any existing state first.
 #[wasm_bindgen]
-pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
+pub fn resume_multiplayer_host_state(json_str: &str) -> Result<JsValue, JsValue> {
     if MULTIPLAYER_MODE.with(|cell| cell.get()) {
         return Err(JsValue::from_str(
             "resume_multiplayer_host_state refused: multiplayer mode already set",
@@ -2370,20 +2433,15 @@ pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
 
     finalize_public_state(&mut state);
     bind_interaction_session(&mut state);
-    // Mirrors `server-core::GameSession::from_persisted`: a host that reloaded
-    // while a Resolve All latch was outstanding would otherwise resume into a
-    // state no seat can advance, with returning guests bound to a dead prompt.
-    recover_orphaned_resolve_all(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
-    clear_ai_session_cache();
-    // Multiplayer games are out of scope for v1 recording (see
-    // `crates/engine/src/types/replay.rs`); ensure no stale local-game
-    // recording from this worker's previous session lingers.
-    REPLAY_LOG.with(|cell| cell.set(None));
-    invalidate_ai_proposals();
-    Ok(())
+    // The fresh RNG state is installed before the engine evaluates the saved
+    // session, and no caller can observe the hosted snapshot until this
+    // returns its bounded engine presentation.
+    resume_loaded_stack_automation(true)
+        .map(|presentation| to_js(&presentation))
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
@@ -3088,19 +3146,35 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
     };
 
     match with_state_mut(|state| {
-        if !proposal.contract.permits(state, actor, &action) {
+        let is_stack_recheck_pass =
+            matches!(&action, GameAction::PassPriority) && !state.stack.is_empty();
+        if !is_stack_recheck_pass && !proposal.contract.permits(state, actor, &action) {
             return AiProposalSubmission::Stale {
                 reason: "decision_changed_or_action_outside_issued_bounds",
             };
         }
-        match apply_interaction_with_rejection(
-            state,
-            actor,
-            proposal.contract.semantic_owner,
-            action.clone(),
-        ) {
+        let applied = if is_stack_recheck_pass {
+            engine::game::engine::apply_verified_ai_priority_pass_with_rejection(
+                state,
+                actor,
+                &proposal.contract,
+                action.clone(),
+            )
+        } else {
+            apply_interaction_with_rejection(
+                state,
+                actor,
+                proposal.contract.semantic_owner,
+                action.clone(),
+            )
+        };
+        match applied {
             Ok(result) => {
-                record_replay_action(false, actor, action);
+                if is_stack_recheck_pass {
+                    record_verified_ai_priority_pass(actor, proposal.contract.semantic_owner);
+                } else {
+                    record_replay_action(false, actor, action);
+                }
                 invalidate_ai_proposals();
                 AiProposalSubmission::Applied {
                     result: Box::new(result),
@@ -3114,73 +3188,6 @@ pub fn submit_ai_action_proposal(token: &str, actor: u8, action: JsValue) -> JsV
             reason: "state_unavailable",
         }),
     }
-}
-
-/// Batch-resolve the stack by auto-passing priority for the requesting player
-/// and delegating to the AI for opponent decisions. Runs entirely inside WASM
-/// with no JS round-trips between resolutions — collapses the O(N) priority
-/// pass cycle into a single call.
-///
-/// `requester` is the human player seat (whose "Resolve All" click initiated
-/// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
-/// each AI opponent.
-///
-/// Returns a compact `BatchResolveResult` with the final `WaitingFor` and a
-/// count of items resolved. The Resolve All UI does not animate individual
-/// events, so the WASM boundary intentionally returns empty event/log arrays
-/// instead of serializing thousands of records for pathological stacks.
-///
-#[wasm_bindgen]
-pub fn resolve_all(
-    requester: u8,
-    ai_seats_json: &str,
-    max_resolutions: u32,
-) -> Result<JsValue, JsValue> {
-    if serde_json::from_str::<Vec<serde_json::Value>>(ai_seats_json).is_err() {
-        return Ok(rejected_action_outcome(ActionRejection::new(
-            ActionRejectionCode::InvalidAction,
-        )));
-    }
-
-    let requester = PlayerId(requester);
-
-    with_state_mut(|state| {
-        // Phase 2 consumes only the already-issued, unanimous consent run.
-        // AI consent is answered through ordinary engine candidates before this
-        // call; Resolve All must never ask an AI about a speculative future
-        // priority window. Keep the legacy payload parse as a wire-compatible
-        // boundary while the consent action owns the authoritative cap.
-        let _ = max_resolutions;
-        let mut result = match resolve_all_ready_prefix_with_rejection(state, requester) {
-            Ok(result) => result,
-            Err(rejection) => return Ok(rejected_action_outcome(rejection)),
-        };
-        // A Resolve All burst applies real actions directly via
-        // `apply_action_boundary_with_stack_limit` (bypassing `submit_action`,
-        // which is the only other place REPLAY_LOG is appended to) — without
-        // this, an exported replay would silently omit every action a player
-        // fast-forwarded through, and playback would desync from the game
-        // they actually played. `recorded_actions` is `#[serde(skip)]`, so
-        // draining it here has no effect on the JS-visible result shape.
-        if !result.recorded_actions.is_empty() {
-            REPLAY_LOG.with(|cell| {
-                let mut log = cell.take();
-                if let Some(log) = log.as_mut() {
-                    for (actor, action) in result.recorded_actions.drain(..) {
-                        log.push_action(actor, action);
-                    }
-                }
-                cell.set(log);
-            });
-            // Resolve All advances the live state without travelling through
-            // `submit_action`, so it must invalidate proposal capabilities at
-            // the same authority boundary.
-            invalidate_ai_proposals();
-        }
-        result.events.clear();
-        result.log_entries.clear();
-        Ok(action_outcome(Ok(result)))
-    })?
 }
 
 /// Apply a seat mutation to a seat state, using the TLS card database for deck
@@ -3321,7 +3328,6 @@ mod tests {
     use std::sync::Arc;
 
     use engine::game::deck_loading::create_object_from_card_face;
-    use engine::game::engine::ResolveAllFastForwardResult as BatchResolveResult;
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -3335,8 +3341,9 @@ mod tests {
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, NamedChoiceSource, NamedChoiceSourceBinding,
-        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
-        WaitingFor,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, ResolveAllConsentParticipant,
+        ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry, StackEntryKind,
+        StackResolutionBudget, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -4083,6 +4090,35 @@ mod tests {
     }
 
     #[test]
+    fn stack_pass_proposal_uses_the_verified_recheck_seam() {
+        let player = PlayerId(0);
+        let mut state = priority_state(player);
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
+        add_non_mana_recheck_action(&mut state, PlayerId(1));
+        let action = GameAction::PassPriority;
+        let token = install_issued_candidate(state, player, &action);
+
+        assert_eq!(
+            proposal_outcome(&token, player, &action)["status"],
+            "applied"
+        );
+        with_state(|state| {
+            assert_eq!(
+                state
+                    .stack_resolution_session
+                    .as_ref()
+                    .map(|session| session.policy),
+                Some(engine::types::game_state::StackResolutionPolicy::RecheckNoMeaningfulPriorityAction),
+                "the WASM proposal boundary must not downgrade a verified stack pass"
+            );
+        })
+        .expect("test state must remain installed");
+        clear_game_state();
+    }
+
+    #[test]
     fn public_proposal_issuer_mints_a_submitable_priority_capability() {
         let player = PlayerId(0);
         clear_game_state();
@@ -4577,79 +4613,234 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_all_exported_path_routes_controlled_priority_to_requester() {
+    fn legacy_ready_state_json() -> String {
         let mut state = GameState::new_two_player(7);
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(1),
-        };
-        state.active_player = PlayerId(1);
-        state.turn_decision_controller = Some(PlayerId(0));
+        const EPOCH: u64 = 70_200;
+        state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
         state.priority_player = PlayerId(0);
-        state.stack.push_back(no_op_stack_entry(1, PlayerId(1)));
-        apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::BeginResolveAll { max_resolutions: 0 },
-        )
-        .expect("the controlled priority holder begins Resolve All consent");
-        let epoch = match state.waiting_for {
-            WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
-            ref other => {
-                panic!("Resolve All must prompt the remaining representative, got {other:?}")
-            }
-        };
-        apply(
-            &mut state,
-            PlayerId(0),
-            GameAction::RespondResolveAllConsent {
-                epoch,
-                decision: engine::types::actions::ResolveAllConsentDecision::Grant,
+        state
+            .stack
+            .push_back(no_op_stack_entry(70_200, PlayerId(1)));
+        state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+            epoch: EPOCH,
+            max_resolutions: StackResolutionBudget::default(),
+            priority_snapshot: ResolveAllPrioritySnapshot {
+                waiting_player: PlayerId(0),
+                priority_player: PlayerId(0),
+                priority_pass_count: 0,
+                priority_passes: Default::default(),
             },
-        )
-        .expect("the controlled representative grants Resolve All consent");
+            participants: vec![
+                ResolveAllConsentParticipant {
+                    representative: PlayerId(0),
+                    authorized_submitter: PlayerId(0),
+                    granted: true,
+                },
+                ResolveAllConsentParticipant {
+                    representative: PlayerId(1),
+                    authorized_submitter: PlayerId(1),
+                    granted: true,
+                },
+            ],
+            // `None` and the empty live preference map identify the real
+            // persisted Ready representation, not a contemporary consent run.
+            auto_pass_baseline: None,
+        });
         assert!(matches!(
             state.waiting_for,
-            WaitingFor::ResolveAllReady { epoch: ready_epoch } if ready_epoch == epoch
+            WaitingFor::ResolveAllReady { epoch } if epoch == EPOCH
         ));
-        GAME_STATE.with(|cell| cell.set(Some(state)));
+        assert!(state.auto_pass.is_empty());
+        assert!(state
+            .resolve_all_consent_run
+            .as_ref()
+            .is_some_and(|run| run.auto_pass_baseline.is_none()));
+        serde_json::to_string(&state).expect("legacy Ready state serializes")
+    }
 
-        with_state_mut(|state| {
-            apply(
-                state,
-                PlayerId(0),
-                GameAction::BeginResolveAll { max_resolutions: 0 },
-            )
-            .expect("turn controller may begin the consent run");
-            let WaitingFor::ResolveAllConsent { epoch, .. } = &state.waiting_for else {
-                panic!("controlled priority should queue Resolve All consent");
-            };
-            apply(
-                state,
-                PlayerId(0),
-                GameAction::RespondResolveAllConsent {
-                    epoch: *epoch,
-                    decision: ResolveAllConsentDecision::Grant,
-                },
-            )
-            .expect("frozen turn controller may grant for the queued representative");
-        })
-        .expect("test state remains installed");
+    fn seed_replay_recording() {
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: FormatConfig::standard(),
+                match_config: MatchConfig::default(),
+                player_count: 2,
+                first_player: Some(0),
+                seed: 7,
+                deck_data: None,
+            })));
+        });
+        assert!(has_replay_recording());
+    }
 
-        let value = resolve_all(0, "[]", 0).unwrap();
-        let outcome: serde_json::Value = serde_wasm_bindgen::from_value(value).unwrap();
-        let result: BatchResolveResult = serde_json::from_value(
-            outcome
-                .get("result")
-                .cloned()
-                .expect("ready Resolve All returns an applied outcome"),
-        )
-        .unwrap();
+    fn add_non_mana_recheck_action(state: &mut GameState, controller: PlayerId) {
+        let object_id = create_object(
+            state,
+            CardId(70_100),
+            controller,
+            "Wasm Recheck Action".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state
+            .objects
+            .get_mut(&object_id)
+            .expect("created battlefield object");
+        object.card_types.core_types.push(CoreType::Artifact);
+        Arc::make_mut(&mut object.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+    }
 
-        assert_eq!(result.items_resolved, 1);
-        let restored: GameState = serde_wasm_bindgen::from_value(get_game_state()).unwrap();
-        assert!(restored.stack.is_empty());
+    #[test]
+    fn restore_is_decode_only_until_explicit_stack_automation_resume() {
         clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = legacy_ready_state_json();
+
+        restore_game_state(&json).expect("generic restore installs the snapshot");
+        with_state(|state| {
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ResolveAllReady { .. }
+            ));
+            assert_eq!(state.stack.len(), 1, "restore must not resolve an entry");
+        })
+        .expect("restored state remains installed");
+
+        let presentation: RestoredStackAutomationPresentation = serde_wasm_bindgen::from_value(
+            resume_restored_game_state().expect("explicit resume enters the engine seam"),
+        )
+        .expect("explicit resume presentation deserializes");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        with_state(|state| assert!(state.stack.is_empty()))
+            .expect("resumed state remains installed");
+        clear_game_state();
+    }
+
+    #[test]
+    fn explicit_resume_is_one_shot_and_revokes_proposals_on_progress() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = legacy_ready_state_json();
+        restore_game_state(&json).expect("generic restore installs the snapshot");
+
+        let cached_before = with_state(ai_session_for).expect("restored state seeds the AI cache");
+        seed_replay_recording();
+
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+
+        let first = resume_loaded_stack_automation(false).expect("resume progresses once");
+        assert_eq!(first.outcome, RestoredStackAutomationOutcome::Progressed);
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "a progressed resume revokes proposal authority exactly once"
+        );
+        assert!(
+            !has_replay_recording(),
+            "a progressed resume drops the abandoned replay recording"
+        );
+        let cached_after = with_state(ai_session_for).expect("resumed state rebuilds the AI cache");
+        assert!(
+            !Arc::ptr_eq(&cached_before, &cached_after),
+            "the resumed state must not retain its pre-resume AI session"
+        );
+
+        let second = resume_loaded_stack_automation(false).expect("second resume is harmless");
+        assert_eq!(second.outcome, RestoredStackAutomationOutcome::Noop);
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "a no-op local resume must not reset authority again"
+        );
+        clear_game_state();
+    }
+
+    #[test]
+    fn multiplayer_host_resume_returns_post_automation_presentation() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = legacy_ready_state_json();
+
+        let presentation: RestoredStackAutomationPresentation = serde_wasm_bindgen::from_value(
+            resume_multiplayer_host_state(&json).expect("host resume succeeds"),
+        )
+        .expect("host resume presentation deserializes");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(is_multiplayer_mode());
+        with_state(|state| assert!(state.stack.is_empty()))
+            .expect("post-resume host state remains installed");
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn multiplayer_host_noop_resume_resets_each_live_authority_store_once() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let stale_state = GameState::new_two_player(17);
+        let cached_before = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&stale_state);
+            cell.set(cache);
+            session
+        });
+        seed_replay_recording();
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+
+        let ordinary = serde_json::to_string(&GameState::new_two_player(23))
+            .expect("ordinary host state serializes");
+        let presentation: RestoredStackAutomationPresentation = serde_wasm_bindgen::from_value(
+            resume_multiplayer_host_state(&ordinary).expect("ordinary host resume succeeds"),
+        )
+        .expect("host no-op presentation deserializes");
+
+        assert_eq!(presentation.outcome, RestoredStackAutomationOutcome::Noop);
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "a host identity change revokes proposals exactly once even without automation"
+        );
+        assert!(!has_replay_recording());
+        let cached_after = with_state(ai_session_for).expect("host state rebuilds the AI cache");
+        assert!(
+            !Arc::ptr_eq(&cached_before, &cached_after),
+            "a no-op host resume must not inherit a previous session cache"
+        );
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 
     #[test]
@@ -5895,24 +6086,24 @@ mod deck_list_seat_validation_tests {
     /// Three seats — `player`, `opponent` and one `ai_decks` entry — all
     /// carrying the SAME grant-dependent pair, so a seat the loop skips is a
     /// seat that reds.
-    fn three_seat_list(draft_set_code: Option<&str>) -> DeckList {
+    fn three_seat_list(draft_set_codes: &[&str]) -> DeckList {
         DeckList {
             player: grant_dependent_seat(),
             opponent: grant_dependent_seat(),
             ai_decks: vec![grant_dependent_seat()],
-            draft_set_code: draft_set_code.map(str::to_string),
+            draft_set_codes: draft_set_codes.iter().map(|c| (*c).to_string()).collect(),
             ..Default::default()
         }
     }
 
-    /// REVERT-PROBE for this row: pass `deck_list.draft_set_code.as_deref()` in
+    /// REVERT-PROBE for this row: pass `&deck_list.draft_set_codes` in
     /// the `player`/`opponent` loop of `validate_deck_list_seats` but leave the
-    /// `ai_decks` loop on `None` — the realistic partial-implementation defect.
+    /// `ai_decks` loop on `&[]` — the realistic partial-implementation defect.
     /// The first two seats are then accepted and `ai_decks[0]` is refused, so
     /// the returned value is `Some(["AI player 2 deck: Invalid partner
     /// pairing: …"])` instead of `None`.
     #[test]
-    fn every_seat_gets_the_draft_set_code_not_just_the_first_two() {
+    fn every_seat_gets_the_draft_set_codes_not_just_the_first_two() {
         let db = test_db();
 
         // NEGATIVE CONTROL FIRST, and it is the reach guard: without the set
@@ -5923,7 +6114,7 @@ mod deck_list_seat_validation_tests {
         // short-circuit-at-first-refusal shape.
         let refused = validate_deck_list_seats(
             &db,
-            &three_seat_list(None),
+            &three_seat_list(&[]),
             GameFormat::CommanderDraft,
             None,
             4,
@@ -5944,7 +6135,7 @@ mod deck_list_seat_validation_tests {
         assert_eq!(
             validate_deck_list_seats(
                 &db,
-                &three_seat_list(Some("CMM")),
+                &three_seat_list(&["CMM"]),
                 GameFormat::CommanderDraft,
                 None,
                 4,
@@ -5964,7 +6155,7 @@ mod deck_list_seat_validation_tests {
     fn a_fixed_deck_format_skips_seat_validation_entirely() {
         let db = test_db();
         assert_eq!(
-            validate_deck_list_seats(&db, &three_seat_list(None), GameFormat::Momir, None, 4),
+            validate_deck_list_seats(&db, &three_seat_list(&[]), GameFormat::Momir, None, 4),
             None,
         );
     }

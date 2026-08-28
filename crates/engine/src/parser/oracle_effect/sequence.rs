@@ -12613,18 +12613,23 @@ mod tests {
         };
         assert_eq!(counter_type, CounterType::Plus1Plus1);
         let expected_qty = QuantityExpr::Ref {
-            qty: QuantityRef::Aggregate {
-                function: AggregateFunction::Sum,
-                property: ObjectProperty::Power,
-                filter: TargetFilter::And {
-                    filters: vec![
-                        TargetFilter::Typed(
-                            TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
-                        ),
-                        TargetFilter::ExiledBySource,
-                    ],
-                },
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    crate::types::ability::CardTypeSetSource::Objects {
+                        filter: TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::Typed(
+                                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                                ),
+                                TargetFilter::ExiledBySource,
+                            ],
+                        },
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
         };
         assert_eq!(count, expected_qty);
     }

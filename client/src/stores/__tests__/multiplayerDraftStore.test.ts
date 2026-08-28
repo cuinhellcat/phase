@@ -23,6 +23,7 @@ import {
   type DraftIntergameCommand,
 } from "../../services/intergameCommandLedger";
 import { useAppNotificationStore } from "../../stores/appToastStore";
+import { useGameStore } from "../../stores/gameStore";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ const mockHostAdapter = {
   submitPick: vi.fn(async () => mockView("Drafting")),
   submitPickWithDraftEffect: vi.fn(async () => mockView("Drafting")),
   submitDeck: vi.fn(async () => mockView("Deckbuilding")),
+  updateWorkspace: vi.fn(async () => {}),
   getHostView: vi.fn(async () => mockView("Lobby")),
   kickPlayer: vi.fn(),
   requestPause: vi.fn(),
@@ -63,6 +65,7 @@ const mockGuestAdapter = {
   submitPick: vi.fn(async () => {}),
   submitPickWithDraftEffect: vi.fn(async () => {}),
   submitDeck: vi.fn(async () => {}),
+  updateWorkspace: vi.fn(async () => {}),
   submitAuthorized: vi.fn(),
   acknowledgeAuthorized: vi.fn(),
   dispose: vi.fn(async () => {}),
@@ -71,6 +74,49 @@ const mockGuestAdapter = {
   draftCode: null,
   currentView: null,
 };
+
+const wasmMatchAdapterMock = vi.hoisted(() => {
+  let boundConcede: (() => void) | undefined;
+  const adapter = {
+    supportsMatchConcede: undefined as true | undefined,
+    sendMatchConcede: undefined as (() => void) | undefined,
+    bindMatchConcede: vi.fn((run: () => void) => {
+      boundConcede = run;
+      adapter.supportsMatchConcede = true;
+      adapter.sendMatchConcede = () => boundConcede?.();
+    }),
+    initialize: vi.fn(async () => {}),
+    initializeGame: vi.fn(async () => ({ log_entries: [] })),
+    getSnapshot: vi.fn(async () => ({
+      seq: 1,
+      state: { waiting_for: { type: "Priority", data: {} } },
+      legalResult: {
+        actions: [],
+        autoPassRecommended: false,
+        endContinuousEffectOffers: [],
+        manaPaymentShortcutActions: [],
+        spellCosts: {},
+        legalActionsByObject: {},
+      },
+    })),
+    dispose: vi.fn(),
+  };
+  return { adapter, WasmAdapter: vi.fn(function () { return adapter; }), reset: () => {
+    boundConcede = undefined;
+    adapter.supportsMatchConcede = undefined;
+    adapter.sendMatchConcede = undefined;
+    adapter.bindMatchConcede.mockClear();
+    adapter.initialize.mockClear();
+    adapter.initializeGame.mockClear();
+    adapter.getSnapshot.mockClear();
+    adapter.dispose.mockClear();
+  } };
+});
+
+const matchLoopMock = vi.hoisted(() => ({
+  controller: { start: vi.fn(), stop: vi.fn(), dispose: vi.fn() },
+  create: vi.fn(),
+}));
 
 vi.mock("../../adapter/draftPodHostAdapter", () => ({
   DraftPodHostAdapter: vi.fn().mockImplementation(function () {
@@ -82,6 +128,17 @@ vi.mock("../../adapter/draftPodGuestAdapter", () => ({
   DraftPodGuestAdapter: vi.fn().mockImplementation(function () {
     return { ...mockGuestAdapter };
   }),
+}));
+
+vi.mock("../../adapter/wasm-adapter", () => ({
+  WasmAdapter: wasmMatchAdapterMock.WasmAdapter,
+}));
+
+vi.mock("../../game/controllers/gameLoopController", () => ({
+  createGameLoopController: (...args: unknown[]) => {
+    matchLoopMock.create(...args);
+    return matchLoopMock.controller;
+  },
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -109,9 +166,17 @@ function mockView(status: string): DraftPlayerView {
       type_filter_options: [],
       color_filter_options: [],
       color_counts: { white: 0, blue: 0, black: 0, red: 0, green: 0 },
+      workspace_capabilities: { rarity_group_order: null },
+      workspace_row_classification: {
+        creature_instance_ids: [],
+        noncreature_instance_ids: [],
+      },
     },
     seats: [],
     cards_per_pack: 14,
+    pack_sizes: [14, 14, 14],
+    pack_set_codes: ["TST", "TST", "TST"],
+    pack_pick_steps: [14, 14, 14],
     pick_steps_per_pack: 14,
     pack_count: 3,
     min_deck_size: 40,
@@ -127,15 +192,35 @@ function mockView(status: string): DraftPlayerView {
   };
 }
 
+function card(instanceId: string, name = instanceId): DraftPlayerView["pool"][number] {
+  return {
+    instance_id: instanceId,
+    name,
+    set_code: "TST",
+    collector_number: instanceId,
+    rarity: "common",
+    colors: [],
+    cmc: 1,
+    type_line: "Card",
+  };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe("multiplayerDraftStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockHostAdapter.updateWorkspace.mockResolvedValue(undefined);
+    mockGuestAdapter.updateWorkspace.mockResolvedValue(undefined);
     capturedHostEventHandler = null;
     capturedGuestEventHandler = null;
     useMultiplayerDraftStore.getState().reset();
     useAppNotificationStore.setState({ notification: null, expiresAt: 0 });
+    wasmMatchAdapterMock.reset();
+    matchLoopMock.create.mockClear();
+    matchLoopMock.controller.start.mockClear();
+    matchLoopMock.controller.stop.mockClear();
+    matchLoopMock.controller.dispose.mockClear();
   });
 
   afterEach(async () => {
@@ -156,7 +241,7 @@ describe("multiplayerDraftStore", () => {
   describe("hostDraft", () => {
     it("hands a completed host session off before joining and gates its late events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -174,7 +259,7 @@ describe("multiplayerDraftStore", () => {
 
     it("waits for a cancelled recovery's same-ID host cleanup before starting its replacement", async () => {
       const config = {
-        poolInput: { type: "Set" as const, data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier" as const,
         podSize: 8,
         hostDisplayName: "Host",
@@ -205,7 +290,7 @@ describe("multiplayerDraftStore", () => {
       }));
 
       const first = useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -227,7 +312,7 @@ describe("multiplayerDraftStore", () => {
       }));
       const controller = new AbortController();
       const hosting = useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -248,7 +333,7 @@ describe("multiplayerDraftStore", () => {
     it("releases an initialized host when its owning route later aborts", async () => {
       const controller = new AbortController();
       await expect(useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -266,7 +351,7 @@ describe("multiplayerDraftStore", () => {
 
     it("sets role to host and phase to connecting", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -281,7 +366,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates roomCode on roomCreated event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -296,7 +381,7 @@ describe("multiplayerDraftStore", () => {
 
     it("updates view on draftStarted event", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -310,11 +395,12 @@ describe("multiplayerDraftStore", () => {
       const state = useMultiplayerDraftStore.getState();
       expect(state.view).toBe(view);
       expect(state.phase).toBe("drafting");
+      expect(state.workspaceState).not.toBeNull();
     });
 
     it("tracks lobby state from lobbyUpdate events", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -337,7 +423,7 @@ describe("multiplayerDraftStore", () => {
 
     it("projects restored MatchInProgress views into match phase", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -353,7 +439,34 @@ describe("multiplayerDraftStore", () => {
       expect(state.view).toBe(view);
     });
 
-    it("pairingsGenerated advances currentRound, leaves nextPairingRound to viewUpdated, and the phase change retires the error", async () => {
+    it("installs_restored_workspace_with_the_following_view_atomically", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const view = { ...mockView("Drafting"), pool: [card("copy-a", "Shared")] };
+      capturedHostEventHandler!({
+        type: "workspaceRestored",
+        workspaceState: {
+          schemaVersion: 1,
+          placements: { "copy-a": { zone: "sideboard", row: 0, column: 2, order: 0 } },
+          virtualBasics: [],
+        },
+      });
+      expect(useMultiplayerDraftStore.getState().view).toBeNull();
+
+      capturedHostEventHandler!({ type: "viewUpdated", view });
+
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["copy-a"]?.zone).toBe("sideboard");
+      expect(useMultiplayerDraftStore.getState().view).toBe(view);
+      expect(mockHostAdapter.updateWorkspace).not.toHaveBeenCalled();
+    });
+
+    it("publishes_one_canonical_snapshot_after_a_null_restore", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
@@ -362,52 +475,18 @@ describe("multiplayerDraftStore", () => {
         tournamentFormat: "Swiss",
         podPolicy: "Competitive",
       });
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: { ...mockView("Drafting"), pool: [card("new")] } });
 
-      // The host's real round boundary, in the order the adapter emits it: the
-      // round-2 view lands on the round-complete screen, the failed attempt
-      // raises the banner, and the retry's `roundAdvanced` opens the pairing
-      // window before pairing generation commits round 3.
-      const view = {
-        ...mockView("RoundComplete"),
-        current_round: 2,
-        next_pairing_round: 3,
-      };
-      capturedHostEventHandler!({ type: "viewUpdated", view });
-      // Reach-guard: prove the error is live before the boundary, so a null
-      // afterwards cannot mean "it was never set".
-      capturedHostEventHandler!({
-        type: "error",
-        message: "Failed to advance round",
-      });
-      expect(useMultiplayerDraftStore.getState().error).toBe(
-        "Failed to advance round",
-      );
-      // The retry. `roundAdvanced` is what moves the phase off `roundComplete`,
-      // and that transition is what retires the banner — one step before
-      // `pairingsGenerated`, and for guests as well as the host.
-      capturedHostEventHandler!({ type: "roundAdvanced" });
-      capturedHostEventHandler!({ type: "pairingsGenerated", round: 3, pairings: [] });
-
-      const state = useMultiplayerDraftStore.getState();
-      // Reach-guards: both events were demonstrably delivered, so a wrong
-      // `nextPairingRound` cannot be confused with "no event reached the store".
-      expect(state.view).toBe(view);
-      expect(state.phase).toBe("matchInProgress");
-      expect(state.currentRound).toBe(3);
-      // `pairingsGenerated` writes only the round it owns. The `3 / 3` relation
-      // is the deliberate window, not an accident: anyone later adding an
-      // inlined `nextPairingRound: event.round + 1` to that handler — the
-      // TypeScript re-derivation this work exists to abolish — yields 4 here.
-      expect(state.nextPairingRound).toBe(3);
-      // REVERT-FAILING: remove the `clearErrorOnPhaseChange` wrap and this goes
-      // red with "Failed to advance round" — the retry that WORKED would still
-      // show the failed attempt's banner.
-      expect(state.error).toBeNull();
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+        placements: { new: expect.objectContaining({ zone: "deck" }) },
+      }));
     });
 
     it("handles host-seat Bo3 prompt messages", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Traditional",
         podSize: 8,
         hostDisplayName: "Host",
@@ -447,7 +526,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active bot match results back to the pod host", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -486,7 +565,7 @@ describe("multiplayerDraftStore", () => {
 
     it("reports active match concessions as opponent wins", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -756,7 +835,29 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("shared actions", () => {
-    it("submits a draft-effect pick through the host adapter", async () => {
+    it.each([
+      {
+        label: "without virtual lands",
+        virtualBasics: [],
+        placements: {
+          spell: { zone: "deck" as const, row: 0, column: 0, order: 0 },
+        },
+        expected: ["Spell"],
+      },
+      {
+        label: "with only deck-zone virtual lands",
+        virtualBasics: [
+          { instanceId: "plains", name: "Plains" },
+          { instanceId: "island", name: "Island" },
+        ],
+        placements: {
+          spell: { zone: "deck" as const, row: 0, column: 0, order: 0 },
+          plains: { zone: "deck" as const, row: 0, column: 0, order: 1 },
+          island: { zone: "sideboard" as const, row: 0, column: 0, order: 0 },
+        },
+        expected: ["Spell", "Plains"],
+      },
+    ])("submits the projected host deck $label", async ({ virtualBasics, placements, expected }) => {
       await useMultiplayerDraftStore.getState().hostDraft({
         poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
@@ -765,27 +866,108 @@ describe("multiplayerDraftStore", () => {
         tournamentFormat: "Swiss",
         podPolicy: "Competitive",
       });
+      const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+      capturedHostEventHandler!({
+        type: "workspaceRestored",
+        workspaceState: { schemaVersion: 1, placements, virtualBasics },
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+      mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
 
-      await useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
+      await useMultiplayerDraftStore.getState().submitDeck();
+
+      expect(mockHostAdapter.submitDeck).toHaveBeenCalledWith(expected, []);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        submittedDeck: expected,
+        submittedPartition: { mainDeck: expected },
+      });
+    });
+
+    it("submits only deck-zone virtual lands through the guest adapter", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({
+        kind: "new",
+        roomCode: "ABCDE",
+        displayName: "Alice",
+      });
+      const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+      capturedGuestEventHandler!({
+        type: "workspaceRestored",
+        workspaceState: {
+          schemaVersion: 1,
+          placements: {
+            spell: { zone: "deck", row: 0, column: 0, order: 0 },
+            plains: { zone: "deck", row: 0, column: 0, order: 1 },
+            island: { zone: "sideboard", row: 0, column: 0, order: 0 },
+          },
+          virtualBasics: [
+            { instanceId: "plains", name: "Plains" },
+            { instanceId: "island", name: "Island" },
+          ],
+        },
+      });
+      capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+
+      await useMultiplayerDraftStore.getState().submitDeck();
+
+      expect(mockGuestAdapter.submitDeck).toHaveBeenCalledWith(["Spell", "Plains"], []);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({
+        submittedDeck: ["Spell", "Plains"],
+        submittedPartition: {
+          mainDeck: ["Spell", "Plains"],
+          sideboard: ["Island"],
+        },
+      });
+    });
+
+    it("submits a draft-effect pick through the host adapter", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      const deckbuildingView = { ...mockView("Deckbuilding"), pool: [] };
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+      mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
+
+      const before = { ...mockView("Drafting"), pool: [] };
+      const after = { ...mockView("Drafting"), pool: [card("card-1"), card("card-2")] };
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: before });
+      mockHostAdapter.updateWorkspace.mockClear();
+      mockHostAdapter.submitPickWithDraftEffect.mockResolvedValueOnce(after);
+
+      const outcome = await useMultiplayerDraftStore.getState().submitPickWithDraftEffect(
         "cogwork-1",
         ["card-1", "card-2"],
+        "sideboard",
       );
 
       expect(mockHostAdapter.submitPickWithDraftEffect).toHaveBeenCalledWith(
         "cogwork-1",
         ["card-1", "card-2"],
       );
+      expect(outcome).toEqual({ status: "acknowledged" });
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["card-1"]?.zone).toBe("sideboard");
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
 
     it("forwards the commander designation through the host adapter", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
         tournamentFormat: "Swiss",
         podPolicy: "Competitive",
       });
+      const deckbuildingView = { ...mockView("Deckbuilding"), pool: [] };
+      capturedHostEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+      mockHostAdapter.submitDeck.mockResolvedValueOnce(deckbuildingView);
 
       // CR 903.3. The designation is deliberately NOT derivable from anything
       // else this test sets — the deck is empty here — so a body that dropped
@@ -800,7 +982,7 @@ describe("multiplayerDraftStore", () => {
 
     it("selectCard and confirmPick work together", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -811,18 +993,15 @@ describe("multiplayerDraftStore", () => {
       useMultiplayerDraftStore.getState().selectCard("card-123");
       expect(useMultiplayerDraftStore.getState().selectedCard).toBe("card-123");
 
-      // NOT "card-123": that is what `selectCard` above set, and passing it back
-      // in would let the UNWIDENED body (`if (!selectedCard) return;
-      // await submitPick([selectedCard]);`) satisfy every assertion here. A
-      // different id is what makes this a revert-probe rather than a tautology.
-      await useMultiplayerDraftStore.getState().confirmPick(["card-456"]);
-      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-456"]);
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({ ...mockView("Drafting"), pool: [card("card-123")] });
+      await useMultiplayerDraftStore.getState().confirmPick();
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
     it("autoPickCard submits from the visible pack without manual selection", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -830,7 +1009,8 @@ describe("multiplayerDraftStore", () => {
         podPolicy: "Competitive",
       });
 
-      useMultiplayerDraftStore.setState({
+      capturedHostEventHandler!({
+        type: "viewUpdated",
         view: {
           ...mockView("Drafting"),
           current_pack: [
@@ -850,39 +1030,177 @@ describe("multiplayerDraftStore", () => {
           required_pick_count: 1,
         },
       });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [card("card-123", "Lightning Bolt")],
+      });
 
-      await useMultiplayerDraftStore.getState().autoPickCard();
+      await useMultiplayerDraftStore.getState().autoPickCard({
+        "card-123": { column: 3, row: 1 },
+      });
 
       expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["card-123"]);
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["card-123"])
+        .toMatchObject({ zone: "deck", column: 3, row: 1 });
     });
 
-    it("addToDeck and removeFromDeck manage mainDeck", () => {
-      const { addToDeck, removeFromDeck } = useMultiplayerDraftStore.getState();
+    it("applies_each_multi-card_auto-pick_placement_hint_to_its_own_card", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "CommanderDraft",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
 
-      addToDeck("Lightning Bolt");
-      addToDeck("Mountain");
-      addToDeck("Lightning Bolt");
+      const first = card("auto-first", "First");
+      const second = card("auto-second", "Second");
+      capturedHostEventHandler!({
+        type: "viewUpdated",
+        view: {
+          ...mockView("Drafting"),
+          kind: "CommanderDraft",
+          current_pack: [first, second],
+          required_pick_count: 2,
+        },
+      });
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        kind: "CommanderDraft",
+        pool: [first, second],
+      });
 
-      expect(useMultiplayerDraftStore.getState().mainDeck).toEqual([
-        "Lightning Bolt",
-        "Mountain",
-        "Lightning Bolt",
-      ]);
+      await useMultiplayerDraftStore.getState().autoPickCard({
+        "auto-first": { column: 0, row: 0 },
+        "auto-second": { column: 4, row: 1 },
+      });
 
-      removeFromDeck("Lightning Bolt");
-      expect(useMultiplayerDraftStore.getState().mainDeck).toEqual([
-        "Mountain",
-        "Lightning Bolt",
-      ]);
+      const placements = useMultiplayerDraftStore.getState().workspaceState?.placements;
+      expect(placements?.["auto-first"]).toMatchObject({ zone: "deck", column: 0, row: 0 });
+      expect(placements?.["auto-second"]).toMatchObject({ zone: "deck", column: 4, row: 1 });
     });
 
-    it("setLandCount clamps to zero", () => {
-      useMultiplayerDraftStore.getState().setLandCount("Plains", 5);
-      expect(useMultiplayerDraftStore.getState().landCounts).toEqual({ Plains: 5 });
+    it("waits_for_guest_acknowledgement_before_committing_the_pick", async () => {
+      await useMultiplayerDraftStore.getState().joinDraft({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
+      capturedGuestEventHandler!({ type: "workspaceRestored", workspaceState: null });
+      capturedGuestEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockGuestAdapter.updateWorkspace.mockClear();
 
-      useMultiplayerDraftStore.getState().setLandCount("Plains", -2);
-      expect(useMultiplayerDraftStore.getState().landCounts).toEqual({ Plains: 0 });
+      const outcome = useMultiplayerDraftStore.getState().submitPick("guest-card", "sideboard", { column: 3, row: 1 });
+      await Promise.resolve();
+      expect(useMultiplayerDraftStore.getState().pickInteractionLocked).toBe(true);
+      expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
+
+      capturedGuestEventHandler!({
+        type: "pickAcknowledged",
+        view: { ...mockView("Drafting"), pool: [card("guest-card")] },
+      });
+
+      await expect(outcome).resolves.toEqual({ status: "acknowledged" });
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["guest-card"]).toEqual(
+        expect.objectContaining({ zone: "sideboard", column: 3, row: 1 }),
+      );
+      expect(mockGuestAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
     });
+
+    it("rejects_a_pick_acknowledgement_with_an_unrelated_extra_addition", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Drafting") });
+      mockHostAdapter.updateWorkspace.mockClear();
+      mockHostAdapter.submitPick.mockResolvedValueOnce({
+        ...mockView("Drafting"),
+        pool: [card("requested"), card("unrelated")],
+      });
+
+      await expect(useMultiplayerDraftStore.getState().submitPick("requested"))
+        .resolves.toEqual({ status: "rejected", reason: "unacknowledged" });
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith(["requested"]);
+      expect(mockHostAdapter.updateWorkspace).not.toHaveBeenCalled();
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements).toEqual({});
+    });
+
+    it("publishes_each_virtual_basic_addition_and_removal_once", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: mockView("Deckbuilding") });
+      mockHostAdapter.updateWorkspace.mockClear();
+
+      useMultiplayerDraftStore.getState().addBasicLand("Island");
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(1);
+      expect(useMultiplayerDraftStore.getState().workspaceState?.virtualBasics).toHaveLength(1);
+      useMultiplayerDraftStore.getState().removeBasicLand("Island");
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(2);
+      expect(useMultiplayerDraftStore.getState().workspaceState?.virtualBasics).toEqual([]);
+    });
+
+    it("keeps_local_workspace_after_sync_failure_and_clears_error_on_retry", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: { ...mockView("Deckbuilding"), pool: [card("move-me")] } });
+      mockHostAdapter.updateWorkspace.mockClear();
+      mockHostAdapter.updateWorkspace.mockRejectedValueOnce(new Error("offline"));
+
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("move-me", {
+        zone: "sideboard", row: 0, column: 0, order: 0,
+      });
+      await vi.waitFor(() => expect(useMultiplayerDraftStore.getState().workspaceSyncError).toBe("offline"));
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["move-me"]?.zone).toBe("sideboard");
+
+      await useMultiplayerDraftStore.getState().retryWorkspaceSync();
+      expect(useMultiplayerDraftStore.getState().workspaceSyncError).toBeNull();
+      expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(2);
+    });
+
+    it("ignores_a_stale_failed_publication_after_a_newer_snapshot_succeeds", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+      capturedHostEventHandler!({ type: "viewUpdated", view: { ...mockView("Deckbuilding"), pool: [card("move-me")] } });
+      mockHostAdapter.updateWorkspace.mockClear();
+      let rejectOld!: (error: Error) => void;
+      mockHostAdapter.updateWorkspace
+        .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectOld = reject; }))
+        .mockResolvedValueOnce(undefined);
+
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("move-me", {
+        zone: "sideboard", row: 0, column: 0, order: 0,
+      });
+      useMultiplayerDraftStore.getState().setWorkspacePlacement("move-me", {
+        zone: "deck", row: 0, column: 0, order: 0,
+      });
+      await vi.waitFor(() => expect(mockHostAdapter.updateWorkspace).toHaveBeenCalledTimes(2));
+      rejectOld(new Error("stale failure"));
+      await Promise.resolve();
+
+      expect(useMultiplayerDraftStore.getState().workspaceSyncError).toBeNull();
+      expect(useMultiplayerDraftStore.getState().workspaceState?.placements["move-me"]?.zone).toBe("deck");
+    });
+
   });
 
   describe("authorized intergame actions", () => {
@@ -978,10 +1296,44 @@ describe("multiplayerDraftStore", () => {
     });
   });
 
+  describe("bot-match concede", () => {
+    it("binds the pod match concession through startMatch and concedes the local game seat", async () => {
+      const dispatch = vi.fn(async () => []);
+      useGameStore.setState({ dispatch });
+      useMultiplayerDraftStore.setState({
+        matchPairing: {
+          type: "Bot",
+          matchId: "bot-match-1",
+          round: 1,
+          localSeat: 0,
+          botSeat: 4,
+          botName: "Chandra",
+          deckPayload: {
+            player: { main_deck: [], sideboard: [], commander: [] },
+            opponent: { main_deck: [], sideboard: [], commander: [] },
+            ai_decks: [],
+          },
+          matchConfig: { match_type: "Bo1" },
+          binding: {
+            podId: "draft-1", matchId: "bot-match-1", round: 1,
+            sessionKey: "session-1", lease: "lease-1", nonce: "nonce-1",
+            revision: 0, matchAuthoritySeat: 0,
+          },
+        },
+      });
+
+      await expect(useMultiplayerDraftStore.getState().startMatch()).resolves.toBe("draft-match-bot-match-1");
+
+      expect(wasmMatchAdapterMock.adapter.supportsMatchConcede).toBe(true);
+      wasmMatchAdapterMock.adapter.sendMatchConcede?.();
+      expect(dispatch).toHaveBeenCalledWith({ type: "Concede", data: { player_id: 0 } });
+    });
+  });
+
   describe("leave", () => {
     it("resets state to initial", async () => {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -1023,7 +1375,7 @@ describe("multiplayerDraftStore", () => {
 
     async function hostInMatch(): Promise<void> {
       await useMultiplayerDraftStore.getState().hostDraft({
-        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
         kind: "Traditional",
         podSize: 8,
         hostDisplayName: "Host",

@@ -15,7 +15,7 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::game_object::GameObject;
-use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+use super::printed_cards::{apply_back_face_to_object, swap_object_faces};
 
 /// CR 109.1 + CR 601.2a + CR 405.1: A spell is an object on the stack from
 /// announcement, even while this engine retains its origin-zone field until
@@ -187,6 +187,12 @@ pub(crate) fn apply_zone_exit_cleanup(
     // discard pipeline re-stamps it after the move-to-graveyard completes.
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.discarded_turn = None;
+        // CR 400.7 + CR 601.2i: A cast occurrence belongs to the spell object
+        // represented on the stack, never to the new object after it leaves.
+        if from == Zone::Stack && to != Zone::Stack {
+            obj.cast_occurrence = None;
+            obj.prepared_copy_source = None;
+        }
     }
     // CR 400.7 + CR 403.4: Activation-use history belongs to the old
     // object. `ObjectId` is storage identity here, so clear per-object counts
@@ -265,6 +271,12 @@ pub(crate) fn apply_zone_exit_cleanup(
     // their `excluded_zones`; every other object follows the CR 122.2 default.
     let preserve_counters = counters_persist_on_move(state, object_id, to);
 
+    // CR 722.3c: the prepare-face copy remains in exile only while its linked
+    // permanent remains on the battlefield with the prepared designation.
+    if from == Zone::Battlefield {
+        crate::game::effects::prepare::remove_linked_prepared_copy_if_idle(state, object_id);
+    }
+
     if let Some(obj_mut) = state.objects.get_mut(&object_id) {
         // CR 400.7 + CR 614.1a: Rod of Absorption's stack-exile rider is a
         // transient marker on the spell object. The stack resolver snapshots it
@@ -288,25 +300,28 @@ pub(crate) fn apply_zone_exit_cleanup(
 
         // CR 712.8a + CR 400.7: Transformed permanents revert to front face on any
         // zone exit (transform DFCs are only valid in transformed state on the battlefield).
-        if obj_mut.transformed {
-            if let Some(back_face) = obj_mut.back_face.clone() {
-                let current_back = snapshot_object_face(obj_mut);
-                apply_back_face_to_object(obj_mut, back_face);
-                obj_mut.back_face = Some(current_back);
-                obj_mut.transformed = false;
-            }
+        if obj_mut.transformed && obj_mut.back_face.is_some() {
+            swap_object_faces(obj_mut);
+            obj_mut.transformed = false;
+        }
+
+        // CR 601.2b + CR 400.7 (#7565): the cast conversation ends with any
+        // move that is not onto the stack (resolve, counter, discard, bounce,
+        // battlefield entry) — a later cast must offer the face choice afresh.
+        if to != Zone::Stack {
+            obj_mut.cast_face_committed = false;
         }
 
         // CR 712.8a + CR 400.7: MDFC objects showing their back face revert to
         // front face in any zone other than the stack or battlefield (back face is
         // valid on the stack while the spell is being cast, and on the battlefield).
-        if obj_mut.modal_back_face && to != Zone::Stack && to != Zone::Battlefield {
-            if let Some(back_face) = obj_mut.back_face.clone() {
-                let current_back = snapshot_object_face(obj_mut);
-                apply_back_face_to_object(obj_mut, back_face);
-                obj_mut.back_face = Some(current_back);
-                obj_mut.modal_back_face = false;
-            }
+        if obj_mut.modal_back_face
+            && to != Zone::Stack
+            && to != Zone::Battlefield
+            && obj_mut.back_face.is_some()
+        {
+            swap_object_faces(obj_mut);
+            obj_mut.modal_back_face = false;
         }
 
         // CR 708.9: A face-down permanent leaving the battlefield, or a
@@ -928,13 +943,26 @@ pub fn apply_resolved_zone_change(
         );
     }
 
-    let destination_position = destination_position_after_removal(
+    let mut destination_position = destination_position_after_removal(
         state,
         command.object.object_id,
         command.from,
         command.to,
         command.owner,
     );
+    let linked_idle_copy = (command.from == Zone::Battlefield)
+        .then(|| {
+            crate::game::effects::prepare::linked_prepared_copy_if_idle_id(
+                state,
+                command.object.object_id,
+            )
+        })
+        .flatten();
+    if command.to == Zone::Exile && linked_idle_copy.is_some() {
+        destination_position = destination_position
+            .checked_sub(1)
+            .expect("the linked prepared copy occupies the replay exile container");
+    }
     if destination_position != command.destination_position {
         return Err(
             ResolvedZoneChangeReplayInvariantError::DestinationPositionMismatch {
@@ -944,6 +972,13 @@ pub fn apply_resolved_zone_change(
         );
     }
 
+    if command.from == Zone::Battlefield {
+        crate::game::effects::prepare::replay_remove_linked_prepared_copy_if_idle(
+            state,
+            command.object.object_id,
+            command.cause,
+        );
+    }
     remove_from_zone(state, command.object.object_id, command.from, command.owner);
     add_to_zone(state, command.object.object_id, command.to, command.owner);
 
@@ -952,6 +987,12 @@ pub fn apply_resolved_zone_change(
         .get_mut(&command.object.object_id)
         .expect("validated zone command object remains live");
     object.zone = command.to;
+    // CR 400.7 + CR 601.2i: replay bypasses `apply_zone_exit_cleanup`, so it
+    // must reproduce the live Stack-exit carrier clear from the recorded move.
+    if command.from == Zone::Stack && command.to != Zone::Stack {
+        object.cast_occurrence = None;
+        object.prepared_copy_source = None;
+    }
     if command.to == Zone::Battlefield {
         object.reset_for_battlefield_entry(
             turn_number,
@@ -3801,6 +3842,7 @@ mod tests {
             };
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -3868,6 +3910,7 @@ mod tests {
             };
             obj.base_card_types = obj.card_types.clone();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Summon: Esper Maduin".to_string(),
                 power: None,
                 toughness: None,
@@ -4315,6 +4358,7 @@ mod tests {
             obj.base_toughness = Some(1);
             // Store back face data (original MDFC back face).
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),
@@ -4425,6 +4469,124 @@ mod tests {
         assert_eq!(
             replayed.objects[&id].cast_from_zone, None,
             "the replayed transition must clear the stamp exactly like the live one"
+        );
+    }
+
+    #[test]
+    fn cast_occurrence_is_cleared_on_stack_to_battlefield_and_nonbattlefield_moves() {
+        let occurrence = crate::types::game_state::CastOccurrence {
+            caster: PlayerId(0),
+            turn_journal_index: 3,
+        };
+
+        for destination in [Zone::Battlefield, Zone::Graveyard] {
+            let mut live = setup();
+            let id = create_object(
+                &mut live,
+                CardId(6865),
+                PlayerId(0),
+                "Stamped Spell".to_string(),
+                Zone::Stack,
+            );
+            {
+                let object = live.objects.get_mut(&id).unwrap();
+                object.cast_occurrence = Some(occurrence);
+                object.prepared_copy_source = Some(ObjectId(777));
+            }
+            let mut replayed = live.clone();
+            let record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+                id,
+                Some(Zone::Stack),
+                destination,
+            );
+            let command = resolve_and_apply_zone_change(
+                &mut live,
+                id,
+                Zone::Stack,
+                destination,
+                PlayerId(0),
+                record,
+            )
+            .expect("live Stack exit resolves");
+            assert_eq!(live.objects[&id].cast_occurrence, None);
+            assert_eq!(live.objects[&id].prepared_copy_source, None);
+
+            apply_resolved_zone_change(&mut replayed, &command)
+                .expect("recorded Stack exit replays");
+            assert_eq!(replayed.objects[&id].cast_occurrence, None);
+            assert_eq!(replayed.objects[&id].prepared_copy_source, None);
+        }
+
+        let mut hostile = setup();
+        let id = create_object(
+            &mut hostile,
+            CardId(6866),
+            PlayerId(0),
+            "Not a Stack Exit".to_string(),
+            Zone::Hand,
+        );
+        hostile.objects.get_mut(&id).unwrap().cast_occurrence = Some(occurrence);
+        move_to_zone(&mut hostile, id, Zone::Exile, &mut Vec::new());
+        assert_eq!(
+            hostile.objects[&id].cast_occurrence,
+            Some(occurrence),
+            "only a Stack exit owns cast-occurrence cleanup"
+        );
+    }
+
+    #[test]
+    fn battlefield_exit_replay_ceases_the_linked_prepared_copy_like_live() {
+        let mut live = setup();
+        let source = create_object(
+            &mut live,
+            CardId(6867),
+            PlayerId(0),
+            "Prepared Source".to_string(),
+            Zone::Battlefield,
+        );
+        live.objects.get_mut(&source).unwrap().prepared =
+            Some(crate::game::game_object::PreparedState);
+        let copy = create_object(
+            &mut live,
+            CardId(6868),
+            PlayerId(0),
+            "Linked Prepared Copy".to_string(),
+            Zone::Exile,
+        );
+        live.objects.get_mut(&copy).unwrap().prepared_copy_source = Some(source);
+        let mut replayed = live.clone();
+        let replay_journal_before = replayed.resolved_rules_journal.clone();
+
+        move_to_zone(&mut live, source, Zone::Exile, &mut Vec::new());
+        let command = live
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.command.as_ref())
+            .find_map(|command| match command {
+                crate::types::resolved_commands::ResolvedRulesCommand::ZoneChange(command)
+                    if command.object.object_id == source =>
+                {
+                    Some(command.as_ref().clone())
+                }
+                _ => None,
+            })
+            .expect("the live battlefield exit records its zone command");
+
+        assert!(!live.objects.contains_key(&copy));
+        assert!(!live.exile.contains(&copy));
+        assert_eq!(live.objects[&source].zone, Zone::Exile);
+        assert_eq!(live.exile[command.destination_position], source);
+
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("the recorded exit replays from the pre-cleanup state");
+        assert!(!replayed.objects.contains_key(&copy));
+        assert!(!replayed.exile.contains(&copy));
+        assert_eq!(replayed.objects[&source].zone, Zone::Exile);
+        assert_eq!(replayed.exile, live.exile);
+        assert_eq!(
+            replayed.resolved_rules_journal, replay_journal_before,
+            "applying a recorded transition must not allocate or journal fresh replay authority"
         );
     }
 
@@ -4550,6 +4712,7 @@ mod tests {
         {
             let obj = state.objects.get_mut(&id).unwrap();
             obj.back_face = Some(BackFaceData {
+                is_swap_snapshot: false,
                 name: "Back Face".to_string(),
                 power: Some(6),
                 toughness: Some(6),

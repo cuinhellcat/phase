@@ -2862,8 +2862,9 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // (an `ObjectCount` filter can carry `FilterProp::InZone { zone }`).
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
-        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-        | QuantityRef::Aggregate { filter, .. } => target_filter_reads_zone(filter, zone),
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. } => {
+            target_filter_reads_zone(filter, zone)
+        }
         // CR 613.4a: A distinct-characteristic count reads `zone` only when its
         // population is sourced from that zone's cards (Tarmogoyf: card types
         // among cards in all graveyards; Subgoyf: different subtypes among the
@@ -2874,6 +2875,9 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_zone(source, zone)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            characteristic_source_reads_zone(aggregate.source(), zone)
         }
         // Everything else reads player-level state, single-object state, battle-
         // field-only population, history records, choices, or tracked sets — none
@@ -2916,7 +2920,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -3147,7 +3150,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::EnteredThisTurn { filter }
@@ -3192,6 +3194,9 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctSubtypes { source, .. }
         | QuantityRef::DistinctColorsAmong { source } => {
             characteristic_source_reads_life_total(source)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            characteristic_source_reads_life_total(aggregate.source())
         }
 
         // CR 601.2h: `ManaSpentToCast` carries no direct `TargetFilter`, but its
@@ -3246,7 +3251,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
-        | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
@@ -3508,6 +3512,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -5357,6 +5362,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn has_active_copy_layer_effects(state: &GameState) -> bool {
     !gather_active_effects_for_layer(state, Layer::Copy).is_empty()
 }
@@ -17276,6 +17282,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17304,6 +17311,7 @@ mod tests {
         let exiled = make_exiled_card(&mut state, PlayerId(0));
         let perms = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
         perms.push(CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::UntilNextTurnOf {
                 player: PlayerScope::Controller,
             },
@@ -17320,6 +17328,7 @@ mod tests {
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         });
         perms.push(CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
@@ -17360,6 +17369,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17501,6 +17511,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextStepOf {
                     step: Phase::Upkeep,
                     player: PlayerScope::Controller,
@@ -17651,6 +17662,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17672,6 +17684,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilNextTurnOf {
                     player: PlayerScope::Controller,
                 },
@@ -17712,6 +17725,7 @@ mod tests {
             .unwrap()
             .casting_permissions
             .push(CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,

@@ -808,6 +808,20 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    // CR 701.47c: "the amassed Army" / "the Army you amassed" — resolves to
+    // the Army creature the current amass instruction chose, threaded via
+    // `ability.amassed_army_object` (stamped by the sub-ability chain walker
+    // in `game/effects/mod.rs` from the `Amass` effect's own resolution).
+    // Mirrors the `CostPaidObject` ladder immediately above: a resolution-local
+    // referent read out of ability state, not the targeting pipeline.
+    if matches!(target_filter, TargetFilter::AmassedArmy) {
+        return ability
+            .amassed_army_object
+            .as_ref()
+            .into_iter()
+            .map(|snap| TargetRef::Object(snap.object_id))
+            .collect();
+    }
     // CR 701.20e: "it" / "that card" after a look-at or reveal instruction.
     if matches!(target_filter, TargetFilter::LastRevealed) {
         return state

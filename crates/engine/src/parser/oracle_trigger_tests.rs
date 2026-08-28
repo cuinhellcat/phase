@@ -7,20 +7,21 @@ use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
 use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
-    AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
-    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
-    CountScope, DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageModification,
-    DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect, EffectScope,
-    FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice, ObjectScope,
-    PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SiblingCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource, CastingPermission,
+    ChosenAttribute, Comparator, ContinuousModification, ControllerRef, CopyChooseScope,
+    CopyRetargetPermission, CountScope, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
+    EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
+    ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PropertyAggregate, PtStat,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::WaitingFor;
 use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 
@@ -67,11 +68,17 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
     assert_eq!(
         *amount,
         QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetAggregate {
-                function: AggregateFunction::Sum,
-                property: crate::types::ability::ObjectProperty::ManaValue,
-                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::ManaValue,
+                    crate::types::ability::CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None
+                    }
+                )
+                .expect("statically valid property aggregate")
+            ),
         }
     );
     assert!(
@@ -100,14 +107,22 @@ fn combustible_gearhulk_damage_uses_milled_chain_set() {
     let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
         panic!("expected DealDamage, got {:?}", damage.effect);
     };
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("expected property aggregate, got {amount:?}");
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(
+        aggregate.property(),
+        crate::types::ability::ObjectProperty::ManaValue
+    );
     assert!(matches!(
-        amount,
-        QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetAggregate {
-                function: AggregateFunction::Sum,
-                property: crate::types::ability::ObjectProperty::ManaValue,
-                source: crate::types::ability::TrackedAnaphorSource::ChainSet,
-            }
+        aggregate.source(),
+        crate::types::ability::CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None
         }
     ));
     assert!(matches!(target, TargetFilter::ScopedPlayer));
@@ -1160,6 +1175,169 @@ fn trigger_conjunctive_battlefield_condition_does_not_corrupt_roll_die_effect() 
         },
         "the conjunctive condition's residual \"and you control...\" text must not \
          leak into the effect body and corrupt the RollDie parse"
+    );
+}
+
+/// CR 603.4 + CR 113.6b + CR 706.3a: Name Sticker Goblin's exact Oracle
+/// wording has a source-bound contraction, a named/controller-scoped cap, an
+/// origin exclusion, and ASCII-hyphen result ranges. Keep this as one complete
+/// structural assertion so a partial parse cannot look like card support.
+#[test]
+fn name_sticker_goblin_parses_complete_trigger_and_die_table() {
+    const ORACLE: &str = "When this creature enters from anywhere other than a graveyard or exile, if it's on the battlefield and you control 9 or fewer creatures named \"Name Sticker\" Goblin, roll a 20-sided die.\n1-6 | Add {R}{R}{R}{R}.\n7-14 | Add {R}{R}{R}{R}{R}.\n15-20 | Add {R}{R}{R}{R}{R}{R}.";
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "\"Name Sticker\" Goblin",
+        &[],
+        &["Creature".to_string()],
+        &["Goblin".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Name Sticker Goblin trigger");
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    // The list-form negated origin is represented by the rich clause path;
+    // scalar discriminators must stay clear so they cannot erase the exclusion.
+    assert_eq!(trigger.origin, None);
+    assert_eq!(trigger.destination, None);
+    assert_eq!(trigger.valid_card, None);
+    assert_eq!(trigger.zone_change_clauses.len(), 1);
+    let clause = &trigger.zone_change_clauses[0];
+    assert_eq!(
+        clause.origin,
+        crate::types::ability::OriginConstraint::OneOf(vec![
+            Zone::Library,
+            Zone::Hand,
+            Zone::Battlefield,
+            Zone::Stack,
+            Zone::Command,
+        ])
+    );
+    assert_eq!(clause.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        clause.destination_constraint,
+        crate::types::ability::OriginConstraint::Any
+    );
+    assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
+
+    let TriggerCondition::And { conditions } = trigger
+        .condition
+        .as_ref()
+        .expect("intervening-if must remain attached to the trigger")
+    else {
+        panic!(
+            "expected source-zone and count conjunction: {:?}",
+            trigger.condition
+        );
+    };
+    assert!(conditions.contains(&TriggerCondition::SourceInZone {
+        zone: Zone::Battlefield,
+    }));
+    assert!(conditions.iter().any(|condition| matches!(
+        condition,
+        TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Fixed { value: 9 },
+        } if filter.controller == Some(ControllerRef::You)
+            && filter.type_filters == vec![TypeFilter::Creature]
+            && filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Named { name } if name == "\"name sticker\" goblin"
+            ))
+    )));
+
+    let Effect::RollDie { sides, results, .. } = trigger
+        .execute
+        .as_deref()
+        .expect("die roll execute ability")
+        .effect
+        .as_ref()
+    else {
+        panic!("expected RollDie, got {:?}", trigger.execute);
+    };
+    assert_eq!(*sides, 20);
+    assert_eq!(
+        results
+            .iter()
+            .map(|branch| (branch.min, branch.max))
+            .collect::<Vec<_>>(),
+        vec![(1, 6), (7, 14), (15, 20)]
+    );
+    for (branch, expected_red) in results.iter().zip([4usize, 5, 6]) {
+        assert!(
+            matches!(
+                branch.effect.effect.as_ref(),
+                Effect::Mana {
+                    produced: ManaProduction::Fixed { colors, .. },
+                    ..
+                } if colors.len() == expected_red
+                    && colors.iter().all(|color| *color == crate::types::mana::ManaColor::Red)
+            ),
+            "expected {expected_red} red mana, got {:?}",
+            branch.effect
+        );
+    }
+}
+
+#[test]
+fn source_zone_contraction_is_context_gated() {
+    assert_eq!(
+        source_zone_contraction_tail("it's on the battlefield and you control a creature", true),
+        Some(" on the battlefield and you control a creature")
+    );
+    assert_eq!(
+        source_zone_contraction_tail("it’s in your graveyard, return it", true),
+        Some(" in your graveyard, return it")
+    );
+    assert_eq!(
+        source_zone_contraction_tail("it on the battlefield", true),
+        None
+    );
+    assert_eq!(source_zone_contraction_tail("it's a Goblin", true), None);
+    assert_eq!(
+        source_zone_contraction_tail("it's on the battlefield", false),
+        None,
+        "event-object trigger contexts must not be retargeted to the source"
+    );
+}
+
+/// CR 603.6a + CR 113.6b: the source-zone shorthand must not attach to the
+/// permanent carrying a non-self ETB trigger. The full parser path is used
+/// here (rather than the helper alone) so the simple-pattern dispatch cannot
+/// regress into retargeting an entering event object to the trigger source.
+#[test]
+fn nonself_etb_source_zone_shorthand_is_not_misbound_to_source() {
+    let def = parse_trigger_line(
+        "Whenever another creature enters, if it's on the battlefield, draw a card.",
+        "Witnessing Enchantment",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert!(matches!(
+        def.valid_card.as_ref(),
+        Some(TargetFilter::Typed(filter))
+            if filter.type_filters.contains(&TypeFilter::Creature)
+                && filter.properties.iter().any(|property| matches!(property, FilterProp::Another))
+    ));
+    assert!(matches!(
+        def.execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    assert_ne!(
+        def.condition,
+        Some(TriggerCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        }),
+        "the entering event object is not the trigger source"
     );
 }
 
@@ -6492,15 +6670,13 @@ fn parse_betor_kin_to_all_trigger_structure() {
             assert_eq!(*rhs, QuantityExpr::Fixed { value: 10 });
             match lhs {
                 QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::Aggregate {
-                            function,
-                            property,
-                            filter,
-                        },
+                    qty: QuantityRef::PropertyAggregate(aggregate),
                 } => {
-                    assert_eq!(*function, AggregateFunction::Sum);
-                    assert_eq!(*property, ObjectProperty::Toughness);
+                    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+                    assert_eq!(aggregate.property(), ObjectProperty::Toughness);
+                    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+                        panic!("expected object source, got {:?}", aggregate.source());
+                    };
                     match filter {
                         TargetFilter::Typed(t) => {
                             assert_eq!(t.controller, Some(ControllerRef::You));
@@ -6540,12 +6716,9 @@ fn parse_betor_kin_to_all_trigger_structure() {
                     matches!(
                         lhs,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::Aggregate {
-                                function: AggregateFunction::Sum,
-                                property: ObjectProperty::Toughness,
-                                ..
-                            },
-                        }
+                            qty: QuantityRef::PropertyAggregate(aggregate),
+                        } if aggregate.function() == AggregateFunction::Sum
+                            && aggregate.property() == ObjectProperty::Toughness
                     ),
                     "untap sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
                 );
@@ -6581,12 +6754,9 @@ fn parse_betor_kin_to_all_trigger_structure() {
                     matches!(
                         lhs,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::Aggregate {
-                                function: AggregateFunction::Sum,
-                                property: ObjectProperty::Toughness,
-                                ..
-                            },
-                        }
+                            qty: QuantityRef::PropertyAggregate(aggregate),
+                        } if aggregate.function() == AggregateFunction::Sum
+                            && aggregate.property() == ObjectProperty::Toughness
                     ),
                     "lose-life sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
                 );
@@ -8011,20 +8181,25 @@ fn trigger_skyclave_apparition_leaves_battlefield_uses_linked_exile_owner_scope(
         } => {
             assert_eq!(name, "Illusion");
             let expected = QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate {
-                    function: crate::types::ability::AggregateFunction::Sum,
-                    property: crate::types::ability::ObjectProperty::ManaValue,
-                    filter: TargetFilter::And {
-                        filters: vec![
-                            TargetFilter::ExiledBySource,
-                            TargetFilter::Typed(TypedFilter::default().properties(vec![
-                                FilterProp::Owned {
-                                    controller: ControllerRef::You,
-                                },
-                            ])),
-                        ],
-                    },
-                },
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        crate::types::ability::AggregateFunction::Sum,
+                        crate::types::ability::ObjectProperty::ManaValue,
+                        crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::And {
+                                filters: vec![
+                                    TargetFilter::ExiledBySource,
+                                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                        FilterProp::Owned {
+                                            controller: ControllerRef::You,
+                                        },
+                                    ])),
+                                ],
+                            },
+                        },
+                    )
+                    .expect("statically valid property aggregate"),
+                ),
             };
             assert_eq!(power, &PtValue::Quantity(expected.clone()));
             assert_eq!(toughness, &PtValue::Quantity(expected));
@@ -9640,6 +9815,75 @@ fn dreadhorde_invasion_upkeep_lose_life_and_amass() {
         }
         other => panic!("expected Amass{{Zombie, 1}}, got {other:?}"),
     }
+}
+
+/// CR 701.47a + CR 701.47c + CR 301.5a (Goblin Plate Mail, HOB): "When this
+/// Equipment enters, amass Goblins 1, then attach this Equipment to the
+/// amassed Army." Amass is the `execute` head; the attach rides as its
+/// `SequentialSibling` sub_ability with `attachment: SelfRef` (the default —
+/// "this Equipment") and `target: AmassedArmy` — the CR 701.47c binding to
+/// the EXACT Army object amass just touched, not a re-scan of the
+/// battlefield for "an Army you control". Zero `Effect::Unimplemented` nodes.
+#[test]
+fn goblin_plate_mail_amass_then_attach_to_amassed_army() {
+    let def = parse_trigger_line(
+        "When this Equipment enters, amass Goblins 1, then attach this Equipment to the amassed \
+         Army.",
+        "Goblin Plate Mail",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+    let execute = def.execute.expect("execute");
+    match *execute.effect {
+        Effect::Amass {
+            ref subtype,
+            ref count,
+        } => {
+            assert_eq!(subtype, "Goblin");
+            assert!(
+                matches!(count, QuantityExpr::Fixed { value: 1 }),
+                "expected Amass count 1, got {count:?}"
+            );
+        }
+        ref other => panic!("expected Amass{{Goblin, 1}} head, got {other:?}"),
+    }
+
+    let sub = execute
+        .sub_ability
+        .expect("attach conjunct must survive as a sub_ability");
+    assert_eq!(
+        sub.sub_link,
+        SubAbilityLink::ContinuationStep,
+        "\"amass X, then attach ~\" is a within-sentence continuation (comma/\"then\" joined), \
+         the same shape as Squadron Hawk's \"...then shuffle\""
+    );
+    match *sub.effect {
+        Effect::Attach {
+            ref attachment,
+            ref target,
+        } => {
+            assert_eq!(
+                *attachment,
+                TargetFilter::SelfRef,
+                "attach \"this Equipment\" to the amassed Army — attachment is the source"
+            );
+            assert_eq!(
+                *target,
+                TargetFilter::AmassedArmy,
+                "must bind to the EXACT Army amass just touched, not a battlefield re-scan"
+            );
+        }
+        ref other => panic!("expected Attach{{SelfRef, AmassedArmy}}, got {other:?}"),
+    }
+
+    // No parse gap: neither clause fell back to `Effect::Unimplemented`.
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. })
+            && !matches!(*sub.effect, Effect::Unimplemented { .. }),
+        "expected zero Unimplemented nodes"
+    );
 }
 
 /// CR 603.4 + CR 122.1: "at the beginning of your end step, if there are
@@ -16354,26 +16598,101 @@ fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
     }
 }
 
-/// CR 118.12 + CR 603.12: the generic reflexive optional-cost splitter only
-/// supports straight-line resolution costs. Disjunctive `OneOf` costs require a
-/// branch-choice payment flow, so they must not be exported as a supported
-/// optional `PayCost` until that flow exists.
+/// CR 118.12 + CR 603.12: Phase 1 admits only direct disjunctive resolution
+/// costs. Sacrifice-bearing alternatives remain strict until the replacement-
+/// aware payment continuation exists.
 #[test]
-fn reflexive_optional_disjunctive_cost_remains_parser_gap() {
-    let def = parse_trigger_line(
-        "Whenever you discard a card, you may pay {1} or discard a card. When you do, draw a card.",
-        "Disjunctive Reflexive Test",
+fn anthropede_and_isu_unlock_without_sacrifice_leak() {
+    fn root_cost(def: &TriggerDefinition) -> (&Vec<AbilityCost>, &AbilityDefinition) {
+        let execute = def.execute.as_ref().expect("execute");
+        let Effect::PayCost {
+            payer: TargetFilter::Controller,
+            cost: AbilityCost::OneOf { costs },
+            ..
+        } = execute.effect.as_ref()
+        else {
+            panic!(
+                "expected optional root PayCost(OneOf), got {:?}",
+                execute.effect
+            );
+        };
+        assert!(execute.optional, "the printed may must remain optional");
+        (costs, execute)
+    }
+
+    fn mana_cost(cost: &AbilityCost) -> &ManaCost {
+        let AbilityCost::Mana { cost } = cost else {
+            panic!("expected Mana cost, got {cost:?}");
+        };
+        cost
+    }
+
+    let anthropede = parse_trigger_line(
+        "When this creature enters, you may discard a card or pay {2}. When you do, destroy target Room.",
+        "Anthropede",
     );
-    let execute = def.execute.as_ref().expect("execute");
-    assert!(
-        !matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
-        "OneOf resolution costs must not be surfaced through the straight-line PayCost prompt"
+    let (costs, execute) = root_cost(&anthropede);
+    assert_eq!(costs.len(), 2);
+    assert!(matches!(costs[0], AbilityCost::Discard { .. }));
+    assert!(matches!(costs[1], AbilityCost::Mana { .. }));
+    assert_eq!(mana_cost(&costs[1]), &ManaCost::generic(2));
+    assert_eq!(
+        execute
+            .sub_ability
+            .as_ref()
+            .expect("When-you-do tail")
+            .condition,
+        Some(AbilityCondition::WhenYouDo)
     );
-    assert!(
-        matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
-        "unsupported reflexive optional costs should remain honest parser gaps, got {:?}",
-        execute.effect
-    );
+
+    for text in [
+        "Whenever another snow permanent you control enters, you may pay {G}, {W}, or {U}. If you do, put a +1/+1 counter on Isu.",
+        "Whenever another snow permanent you control enters, you may pay {G}, {W} or {U}. If you do, put a +1/+1 counter on Isu.",
+    ] {
+        let isu = parse_trigger_line(text, "Isu the Abominable");
+        let (costs, execute) = root_cost(&isu);
+        assert_eq!(costs.len(), 3);
+        assert!(costs.iter().all(|cost| matches!(cost, AbilityCost::Mana { .. })));
+        assert_eq!(
+            costs.iter().map(mana_cost).cloned().collect::<Vec<_>>(),
+            vec![
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                },
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                },
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 0,
+                },
+            ],
+            "Isu must preserve the printed {{G}}/{{W}}/{{U}} branch order"
+        );
+        assert_eq!(
+            execute.sub_ability.as_ref().expect("If-you-do tail").condition,
+            Some(AbilityCondition::effect_performed())
+        );
+    }
+
+    for (name, text) in [
+        (
+            "K'un-Lun Warrior",
+            "When this creature enters, you may sacrifice an artifact or discard a card. If you do, draw a card.",
+        ),
+        (
+            "Bullseye, Death Dealer",
+            "When Bullseye enters, you may sacrifice an artifact or discard a nonland card. When you do, Bullseye deals 2 damage to any target.",
+        ),
+    ] {
+        let strict = parse_trigger_line(text, name);
+        assert!(matches!(
+            strict.execute.as_deref().map(|ability| ability.effect.as_ref()),
+            Some(Effect::Unimplemented { name, .. }) if name == "reflexive optional payment"
+        ), "sacrifice alternative must remain the exact Phase-1 strict gap for {name}");
+    }
 }
 
 /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind
@@ -26202,18 +26521,19 @@ fn trigger_intervening_if_selvala_power_greater_than_each_other() {
     );
     // RHS: Max(power) across creatures excluding the triggering object.
     let QuantityExpr::Ref {
-        qty:
-            QuantityRef::Aggregate {
-                function,
-                property,
-                filter,
-            },
+        qty: QuantityRef::PropertyAggregate(aggregate),
     } = rhs
     else {
         panic!("expected Aggregate Max Power rhs, got {rhs:?}");
     };
-    assert_eq!(*function, AggregateFunction::Max);
-    assert_eq!(*property, crate::types::ability::ObjectProperty::Power);
+    assert_eq!(aggregate.function(), AggregateFunction::Max);
+    assert_eq!(
+        aggregate.property(),
+        crate::types::ability::ObjectProperty::Power
+    );
+    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+        panic!("expected object source, got {:?}", aggregate.source());
+    };
     let TargetFilter::Typed(tf) = filter else {
         panic!("expected Typed creature filter, got {filter:?}");
     };
@@ -26261,6 +26581,65 @@ fn substitute_another_rewrites_shared_quality_count_filter() {
     };
     assert!(tf.properties.contains(&FilterProp::OtherThanTriggerObject));
     assert!(!tf.properties.contains(&FilterProp::Another));
+}
+
+#[test]
+fn substitute_another_rewrites_turn_journal_filters_directly_and_in_unions() {
+    let journal = || CardTypeSetSource::TurnJournal {
+        journal: crate::types::ability::TurnJournalKind::SpellsCast,
+        scope: CountScope::Controller,
+        filter: Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Another]),
+        )),
+    };
+    let direct = PropertyAggregate::new(
+        AggregateFunction::Sum,
+        crate::types::ability::ObjectProperty::ManaValue,
+        journal(),
+    )
+    .unwrap();
+    let nested = PropertyAggregate::new(
+        AggregateFunction::Sum,
+        crate::types::ability::ObjectProperty::ManaValue,
+        CardTypeSetSource::any_of(vec![
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::Any,
+            },
+            CardTypeSetSource::any_of(vec![journal(), CardTypeSetSource::ExiledBySource]).unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+
+    for aggregate in [direct, nested] {
+        let rewritten = substitute_another_in_expr(&QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        });
+        let QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } = rewritten
+        else {
+            panic!("expected property aggregate");
+        };
+        let mut journal_count = 0;
+        assert!(aggregate.source().try_for_each_member(
+            crate::types::ability::UNION_DEPTH_BUDGET,
+            &mut |leaf| {
+                if let CardTypeSetSource::TurnJournal {
+                    filter: Some(TargetFilter::Typed(filter)),
+                    ..
+                } = leaf
+                {
+                    journal_count += 1;
+                    assert!(filter
+                        .properties
+                        .contains(&FilterProp::OtherThanTriggerObject));
+                    assert!(!filter.properties.contains(&FilterProp::Another));
+                }
+            },
+        ));
+        assert_eq!(journal_count, 1);
+    }
 }
 
 /// Issue #444 — Odric, Lunarch Marshal. The full trigger parses to a

@@ -22,15 +22,138 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
         panic!("expected LoseLife, got {:?}", def.effect);
     };
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("expected property aggregate, got {amount:?}");
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
     assert!(matches!(
-        amount,
-        QuantityExpr::Ref {
-            qty: QuantityRef::TrackedSetAggregate {
-                function: AggregateFunction::Sum,
-                property: ObjectProperty::ManaValue,
-                source,
+        aggregate.source(),
+        CardTypeSetSource::TrackedSet { set, .. } if *set == expected
+    ));
+}
+
+fn nested_batch_aggregate() -> PropertyAggregate {
+    PropertyAggregate::new(
+        AggregateFunction::Sum,
+        ObjectProperty::ManaValue,
+        CardTypeSetSource::any_of(vec![
+            CardTypeSetSource::Objects {
+                filter: TargetFilter::Any,
+            },
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::TriggeringBatch,
+                    caused_by: None,
+                },
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                },
+            ])
+            .expect("nested union"),
+        ])
+        .expect("outer union"),
+    )
+    .expect("valid mana-value aggregate")
+}
+
+#[test]
+fn nested_triggering_batch_aggregate_is_rebound_through_the_source_visitor() {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(nested_batch_aggregate()),
+            },
+            target: None,
+        },
+    );
+
+    rebind_tracked_aggregate_to_chain_set(&mut def);
+
+    let Effect::LoseLife { amount, .. } = def.effect.as_ref() else {
+        panic!("expected life loss");
+    };
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("expected property aggregate");
+    };
+    let mut batch = 0;
+    let mut chain = 0;
+    let mut objects = 0;
+    let mut graveyard = 0;
+    let mut leaves = 0;
+    assert!(aggregate.source().try_for_each_member(
+        crate::types::ability::UNION_DEPTH_BUDGET,
+        &mut |leaf| {
+            leaves += 1;
+            match leaf {
+                CardTypeSetSource::TrackedSet { set, .. } => match set {
+                    TrackedAnaphorSource::TriggeringBatch => batch += 1,
+                    TrackedAnaphorSource::ChainSet => chain += 1,
+                },
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Any,
+                } => objects += 1,
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Graveyard,
+                    scope: CountScope::Controller,
+                } => graveyard += 1,
+                _ => {}
             }
-        } if *source == expected
+        },
+    ));
+    assert_eq!((batch, chain, objects, graveyard, leaves), (0, 1, 1, 1, 3));
+}
+
+#[test]
+fn nested_triggering_batch_in_non_trigger_chain_is_demoted_honestly() {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(nested_batch_aggregate()),
+            },
+            target: None,
+        },
+    );
+
+    demote_unbindable_batch_aggregate(&mut def, "their total mana value");
+
+    assert!(matches!(def.effect.as_ref(), Effect::Unimplemented { .. }));
+
+    let source = CardTypeSetSource::any_of(vec![
+        CardTypeSetSource::Objects {
+            filter: TargetFilter::Any,
+        },
+        CardTypeSetSource::Zone {
+            zone: ZoneRef::Graveyard,
+            scope: CountScope::Controller,
+        },
+    ])
+    .expect("non-batch source union");
+    let aggregate =
+        PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::ManaValue, source)
+            .expect("valid non-batch aggregate");
+    let mut control = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            },
+            target: None,
+        },
+    );
+    demote_unbindable_batch_aggregate(&mut control, "their total mana value");
+    assert!(!matches!(
+        control.effect.as_ref(),
+        Effect::Unimplemented { .. }
     ));
 }
 
@@ -350,11 +473,9 @@ fn cosmic_cube_aggregate_quantity_returns_trailing_suffix() {
     assert!(
         matches!(
             qty,
-            QuantityRef::Aggregate {
-                function: AggregateFunction::Max,
-                property: ObjectProperty::Power,
-                ..
-            }
+            QuantityRef::PropertyAggregate(ref aggregate)
+                if aggregate.function() == AggregateFunction::Max
+                    && aggregate.property() == ObjectProperty::Power
         ),
         "expected Max-power aggregate, got {qty:?}"
     );
@@ -375,14 +496,10 @@ fn cosmic_cube_constraint_parses_dynamic_mana_value_ceiling() {
             comparator: Comparator::LE,
             value:
                 QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::Aggregate {
-                            function: AggregateFunction::Max,
-                            property: ObjectProperty::Power,
-                            ..
-                        },
+                    qty: QuantityRef::PropertyAggregate(aggregate),
                 },
-        }) => {}
+        }) if aggregate.function() == AggregateFunction::Max
+            && aggregate.property() == ObjectProperty::Power => {}
         other => panic!("expected dynamic ManaValue{{LE, Max-power aggregate}}, got {other:?}"),
     }
 }
@@ -429,6 +546,111 @@ fn beseech_suffix_constraint_unchanged_after_refactor() {
     );
 }
 
+/// CR 120.2a + CR 608.2h (issue #5923): Kotis, the Fangkeeper's combat-damage
+/// trigger — "exile the top X cards of their library, where X is the amount
+/// of damage dealt. You may cast any number of spells with mana value X or
+/// less from among them without paying their mana costs." Before the
+/// `parse_event_context_refs` fix, the "the amount of damage dealt"
+/// paraphrase was not recognized by the "the damage dealt" bare-phrase arm
+/// (`oracle_nom/quantity.rs`), so the where-X binding was left unresolved and
+/// the totality guard in `lower.rs` collapsed BOTH the `ExileTop` step and its
+/// `CastFromZone` sub-ability to `Effect::unimplemented("where_x_binding",
+/// ..)`. Revert-fail: with the bug present this test's positive-shape
+/// assertions fail (both effects were `Unimplemented`, not `ExileTop` /
+/// `CastFromZone`) and the no-Unimplemented sweep below also fails.
+#[test]
+fn kotis_the_fangkeeper_full_trigger_binds_damage_dealt_where_x() {
+    let parsed = parse_oracle_text(
+        "Indestructible\nWhenever Kotis deals combat damage to a player, exile the top X cards of their library, where X is the amount of damage dealt. You may cast any number of spells with mana value X or less from among them without paying their mana costs.",
+        "Kotis, the Fangkeeper",
+        &["Indestructible".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Zombie".to_string(), "Warrior".to_string()],
+    );
+
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Kotis's combat-damage trigger must produce an executable ability");
+
+    // Outer effect: exile the top X cards of the damaged player's library,
+    // where X is bound to the triggering event's damage amount.
+    let Effect::ExileTop {
+        ref player,
+        ref count,
+        ..
+    } = *execute.effect
+    else {
+        panic!("expected ExileTop, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *player,
+        TargetFilter::TriggeringPlayer,
+        "Oracle-text grammar: \"their library\" in a DamageDone trigger binds to the \
+         damaged player (\"deals combat damage to a player\"), not to Kotis's controller \
+         — a pronoun-antecedent reading, not a specific CR citation (CR 608.2c governs \
+         the ORDER effects apply their instructions, not pronoun antecedents)"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        },
+        "CR 608.2h: \"where X is the amount of damage dealt\" must bind X to the \
+         triggering event's damage amount, not fall back to an unbound sentinel"
+    );
+
+    // Sub-ability: cast any number of the exiled spells with mana value X or
+    // less, without paying their mana costs.
+    let sub_ability = execute
+        .sub_ability
+        .as_deref()
+        .expect("the \"you may cast\" sentence must attach as a sub-ability");
+    let Effect::CastFromZone {
+        ref target,
+        without_paying_mana_cost,
+        ref constraint,
+        ..
+    } = *sub_ability.effect
+    else {
+        panic!("expected CastFromZone, got {:?}", sub_ability.effect);
+    };
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+    assert!(without_paying_mana_cost);
+    assert_eq!(
+        *constraint,
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+        }),
+        "the free-cast offer must be capped at mana value X (the same dynamic \
+         damage-dealt amount), not left unconstrained or Fixed"
+    );
+
+    // No clause of the trigger may have fallen back to Unimplemented.
+    fn effect_has_unimplemented(effect: &Effect) -> bool {
+        matches!(effect, Effect::Unimplemented { .. })
+    }
+    fn ability_has_unimplemented(ability: &AbilityDefinition) -> bool {
+        effect_has_unimplemented(&ability.effect)
+            || ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_has_unimplemented)
+            || ability
+                .else_ability
+                .as_deref()
+                .is_some_and(ability_has_unimplemented)
+    }
+    assert!(
+        !ability_has_unimplemented(execute),
+        "Kotis's trigger must have zero Unimplemented nodes: {execute:#?}"
+    );
+}
+
 /// A1 (full line): Cosmic Cube's whole attack trigger lowers to a
 /// `CastFromZone` whose `constraint` carries the dynamic ceiling. Revert-fail:
 /// today the constraint serializes as `null` (verified in card-data.json).
@@ -458,13 +680,9 @@ fn cosmic_cube_full_trigger_carries_dynamic_constraint() {
             comparator: Comparator::LE,
             value:
                 QuantityExpr::Ref {
-                    qty:
-                        QuantityRef::Aggregate {
-                            property: ObjectProperty::Power,
-                            ..
-                        },
+                    qty: QuantityRef::PropertyAggregate(aggregate),
                 },
-        }) => {}
+        }) if aggregate.property() == ObjectProperty::Power => {}
         other => panic!(
             "Cosmic Cube CastFromZone constraint must be the dynamic MV ceiling, got {other:?}"
         ),
@@ -4415,7 +4633,7 @@ fn where_x_binds_siblings_in_same_sentence() {
     match &*def.effect {
             Effect::LoseLife { amount, .. } => match amount {
                 QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate { .. },
+                    qty: QuantityRef::PropertyAggregate(_),
                 } => {}
                 other => panic!(
                     "expected LoseLife amount to be Aggregate (propagated from sibling where-X), got {other:?}"
@@ -4428,7 +4646,7 @@ fn where_x_binds_siblings_in_same_sentence() {
     match &*sub.effect {
         Effect::GainLife { amount, .. } => match amount {
             QuantityExpr::Ref {
-                qty: QuantityRef::Aggregate { .. },
+                qty: QuantityRef::PropertyAggregate(_),
             } => {}
             other => panic!("expected GainLife Aggregate, got {other:?}"),
         },
@@ -31142,18 +31360,16 @@ fn crackling_doom_sacrifice_preserves_greatest_power_filter() {
     assert_eq!(*superlative.1, PtValueScope::Current);
     assert_eq!(*superlative.2, Comparator::EQ);
     let QuantityExpr::Ref {
-        qty:
-            QuantityRef::Aggregate {
-                function,
-                property,
-                filter,
-            },
+        qty: QuantityRef::PropertyAggregate(aggregate),
     } = superlative.3
     else {
         panic!("expected aggregate quantity, got {:?}", superlative.3);
     };
-    assert_eq!(*function, AggregateFunction::Max);
-    assert_eq!(*property, ObjectProperty::Power);
+    assert_eq!(aggregate.function(), AggregateFunction::Max);
+    assert_eq!(aggregate.property(), ObjectProperty::Power);
+    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+        panic!("expected object population, got {:?}", aggregate.source());
+    };
     let TargetFilter::Typed(TypedFilter {
         type_filters,
         controller,
@@ -41015,11 +41231,16 @@ fn wretched_banquet_least_power_condition() {
             assert_eq!(
                 rhs,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::Aggregate {
-                        function: AggregateFunction::Min,
-                        property: ObjectProperty::Power,
-                        filter: TargetFilter::Typed(TypedFilter::creature()),
-                    }
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Min,
+                            ObjectProperty::Power,
+                            crate::types::ability::CardTypeSetSource::Objects {
+                                filter: TargetFilter::Typed(TypedFilter::creature())
+                            }
+                        )
+                        .expect("statically valid property aggregate")
+                    )
                 }
             );
         }
@@ -47781,6 +48002,11 @@ fn attach_just_moved_gilgamesh_any_number_equipment_reflexive_attach() {
         attach.optional,
         "\"you may attach\" makes the attach step optional"
     );
+    assert_eq!(
+        attach.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "Gilgamesh says 'a Samurai', not 'target Samurai', so the host is chosen while resolving"
+    );
 }
 
 /// Quest for the Holy Relic / Stonehewer Giant pattern:
@@ -50230,19 +50456,21 @@ fn ensnared_by_the_mara_damage_amount_is_tracked_set_aggregate() {
             damage.effect
         );
     };
-    assert!(
-        matches!(
-            amount,
-            QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetAggregate {
-                    function: AggregateFunction::Sum,
-                    property: ObjectProperty::ManaValue,
-                    source: crate::types::ability::TrackedAnaphorSource::ChainSet,
-                }
-            }
-        ),
-        "branch 1 damage amount must be TrackedSetAggregate(Sum, ManaValue, ChainSet), got {amount:?}"
-    );
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PropertyAggregate(aggregate),
+    } = amount
+    else {
+        panic!("branch 1 damage amount must be a property aggregate, got {amount:?}");
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::ManaValue);
+    assert!(matches!(
+        aggregate.source(),
+        crate::types::ability::CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None
+        }
+    ));
 
     // The verbatim Oracle aggregate phrase must never be stored as a
     // resolvable `QuantityRef::Variable` name (the prohibited
@@ -54594,6 +54822,7 @@ fn assert_uneven_land_search_shape(
             qty: QuantityRef::ControlledByEachPlayer {
                 filter: TargetFilter::Typed(lands),
                 aggregate: AggregateFunction::Max,
+                relation: PlayerRelation::All,
             },
         } if lands == &TypedFilter::land()
     ));
