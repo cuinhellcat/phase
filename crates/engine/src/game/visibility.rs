@@ -7925,6 +7925,7 @@ mod tests {
                 Zone::Battlefield,
             )));
             obj.casting_permissions = vec![CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost: crate::types::mana::ManaCost::zero(),
                 cost_provenance: ExileGrantCostProvenance::Alternative,
                 cast_transformed: false,

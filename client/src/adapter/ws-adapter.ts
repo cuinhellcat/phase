@@ -202,6 +202,8 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 48 — CastingPermission.ExileWithAltCost gained source_id, the granting
+ *      permanent that bounds an UntilHostLeavesPlay duration.
  * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
  * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -334,7 +336,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 47;
+export const PROTOCOL_VERSION = 48;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

@@ -27551,6 +27551,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         .abilities
         .push(carrier(Effect::GrantCastingPermission {
             permission: CastingPermission::ExileWithAltCost {
+                source_id: None,
                 cost: crate::types::mana::ManaCost::default(),
                 cost_provenance: Default::default(),
                 cast_transformed: false,

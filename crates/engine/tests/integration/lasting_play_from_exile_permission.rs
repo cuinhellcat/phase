@@ -30,7 +30,22 @@
 //!     installs are a `false` arm (`:2099`); every other variant is `false`
 //!     outright (`:2118-2127`). No duration this fix can install moves it.
 //!
-//! Fix: route that assignment through `with_clause_duration`.
+//! Fix (first half): route that assignment through `with_clause_duration`.
+//!
+//! SECOND DEFECT, same class, found by playtest and by review: recording the
+//! duration is not enough, because nothing ever ENFORCED it.
+//! `layers::prune_host_left_effects` retains only
+//! `state.transient_continuous_effects`, and `CastingPermission::ExileWithAltCost`
+//! carried no granting-source identity to prune against — so a permission
+//! stamped `Duration::UntilHostLeavesPlay` outlived its host indefinitely,
+//! turning a prompt bug into a rules-incorrect standing permission.
+//!
+//! Fix (second half): `ExileWithAltCost` gains `source_id`, stamped in
+//! `record_lingering_permissions` and `grant_permission::resolve` exactly where
+//! the `PlayFromExile` land companion already stamped its own; and
+//! `layers::prune_host_left_casting_permissions` revokes both halves from the
+//! battlefield-exit lifecycle in `zones::apply_zone_exit_cleanup`, beside the
+//! existing `prune_host_left_effects` call.
 //!
 //! Two members of the repaired set are covered, reached by different routes: a
 //! top-of-library impulse with the "that card" anaphor (Gwen Stacy) and a
@@ -106,6 +121,32 @@ fn can_cast(runner: &GameRunner, id: ObjectId) -> bool {
         .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id))
 }
 
+/// CR 305.1: a land is PLAYED, never cast, so the land companion of a
+/// `mode: Play` grant surfaces as `GameAction::PlayLand` — a different action
+/// than `can_cast` above inspects.
+fn can_play_land(runner: &GameRunner, id: ObjectId) -> bool {
+    legal_actions(runner.state())
+        .iter()
+        .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+/// Verbatim Oracle text (`client/public/card-data.json`, key `murder`), reduced
+/// to its single clause: the test needs a production removal path, not Murder.
+const DESTROY_TARGET_CREATURE: &str = "Destroy target creature.";
+
+/// Remove `victim` from the battlefield by casting and resolving a removal
+/// spell, so the battlefield-exit lifecycle in `zones::apply_zone_exit_cleanup`
+/// actually runs. CR 701.8a: to destroy a permanent is to "move it from the
+/// battlefield to its owner's graveyard", done here during the removal spell's
+/// own resolution; CR 701.8b lists the only other route as the state-based
+/// actions for lethal or deathtouch damage, neither of which is in play. A direct
+/// `zones::move_to_zone` would skip the lifecycle and make the assertions below
+/// vacuous.
+fn destroy_via_removal_spell(runner: &mut GameRunner, removal: ObjectId, victim: ObjectId) {
+    runner.cast(removal).target_object(victim).commit();
+    runner.advance_until_stack_empty();
+}
+
 /// The durations recorded on `id`'s casting permissions, in grant order.
 fn recorded_permission_durations(runner: &GameRunner, id: ObjectId) -> Vec<Option<Duration>> {
     runner.state().objects[&id]
@@ -154,11 +195,10 @@ fn settle_declining_optionals(runner: &mut GameRunner) -> bool {
 /// really resolved, so a green run is not a vacuous no-op.
 ///
 /// NOT PROVEN HERE: that the recorded `UntilHostLeavesPlay` is ever *enforced*.
-/// `layers::prune_host_left_effects` prunes only
-/// `state.transient_continuous_effects`, and `CastingPermission::ExileWithAltCost`
-/// carries no granting-source id to prune against — so the permission currently
-/// outlives its host. That is a separate defect from this parse fix and is
-/// reported rather than fixed here.
+/// That is the subject of `host_departure_revokes_the_lasting_cast_permission`
+/// and `host_departure_revokes_the_lasting_land_play_companion` below; this
+/// test stops while the host is still on the battlefield on purpose, so a
+/// failure here localizes to the parse fix and not to the lifecycle.
 #[test]
 fn lasting_play_permission_is_not_a_declinable_resolution_offer() {
     let mut scenario = GameScenario::new();
@@ -391,4 +431,152 @@ fn the_rest_of_those_exiled_cards_survives_the_removed_optionality() {
             chapter + 1
         );
     }
+}
+
+/// CR 611.2a + CR 400.7: the stated lifetime is not decoration — when the named
+/// permanent leaves the battlefield the permission ENDS. Gwen Stacy's grant
+/// lasts "for as long as you control this creature"; the parser maps that
+/// wording to `Duration::UntilHostLeavesPlay` (pinned by
+/// `parser::oracle_nom::duration::test_for_as_long_as_you_control_maps_to_until_host_leaves`).
+///
+/// SCOPE: that mapping is narrower than the printed wording, and this test is
+/// scoped to the mapping, not to CR 611.2b. "For as long as you CONTROL ~" also
+/// ends when control changes with the permanent still on the battlefield — the
+/// exact case CR 611.2b works through in its Master Thief example. Neither the
+/// mapping nor this prune covers it; a control-change exit is a pre-existing
+/// gap in the parser's duration choice, untouched here.
+///
+/// DISCRIMINATING ASSERTIONS: `!can_cast(exiled)` and the now-empty permission
+/// list, both taken AFTER Gwen dies. Before this fix the exiled card stayed
+/// castable forever: `layers::prune_host_left_effects` retains only
+/// `state.transient_continuous_effects`, and `ExileWithAltCost` carried no
+/// granting-source id to prune against. Reverting either half of the fix — the
+/// `source_id` stamp in `record_lingering_permissions` or the
+/// `prune_host_left_casting_permissions` call in `zones` — restores the
+/// permission and fails this test.
+///
+/// Positive reach-guards, all three needed for a green run to mean anything:
+/// the card reached exile, it WAS castable while Gwen lived, and Gwen actually
+/// reached the graveyard through the removal spell.
+#[test]
+fn host_departure_revokes_the_lasting_cast_permission() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let impulse_card = scenario
+        .add_spell_to_library_top(P0, "Library Top Card", false)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let gwen = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gwen Stacy", 2, 2, GWEN_STACY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Removal", true, DESTROY_TARGET_CREATURE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(gwen).commit();
+    settle_declining_optionals(&mut runner);
+
+    // Reach-guard 1 + 2: the grant exists and is live while the host is out.
+    assert_eq!(
+        zone_of(&runner, impulse_card),
+        Zone::Exile,
+        "reach-guard: Gwen Stacy's enters trigger must exile the top card"
+    );
+    assert!(
+        can_cast(&runner, impulse_card),
+        "reach-guard: the exiled card must be castable WHILE Gwen is on the battlefield — \
+         otherwise the post-death assertion below proves nothing"
+    );
+
+    destroy_via_removal_spell(&mut runner, removal, gwen);
+
+    // Reach-guard 3: the host really left through the production path.
+    assert_eq!(
+        zone_of(&runner, gwen),
+        Zone::Graveyard,
+        "reach-guard: the removal spell must actually kill Gwen Stacy"
+    );
+
+    assert!(
+        !can_cast(&runner, impulse_card),
+        "CR 611.2a: 'for as long as you control this creature' ends when that creature \
+         leaves the battlefield — the exiled card must no longer be castable. \
+         gwen={gwen:?} exiled={impulse_card:?} left_over={:#?}",
+        runner.state().objects[&impulse_card].casting_permissions
+    );
+    assert_eq!(
+        recorded_permission_durations(&runner, impulse_card),
+        Vec::<Option<Duration>>::new(),
+        "CR 611.2a + CR 400.7: both halves of the grant are revoked by the departing host, \
+         leaving no casting permission behind"
+    );
+}
+
+/// CR 305.1: the same grant's LAND half. "You may play that card" authorizes a
+/// land through `GameAction::PlayLand`, a different action than the spell half,
+/// carried by a separate `CastingPermission::PlayFromExile` companion. Revoking
+/// only one half would leave a land playable from exile after its granting
+/// permanent died.
+///
+/// DISCRIMINATING ASSERTION: `!can_play_land(exiled)` after Gwen dies, guarded
+/// by the same assertion returning true before she does.
+#[test]
+fn host_departure_revokes_the_lasting_land_play_companion() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let top_land = scenario.add_card_to_library_top(P0, "Library Top Land");
+    let gwen = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gwen Stacy", 2, 2, GWEN_STACY)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let removal = scenario
+        .add_spell_to_hand_from_oracle(P0, "Removal", true, DESTROY_TARGET_CREATURE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    // The library-top card is a bare object; make it a land in BOTH the live and
+    // the base type sets so the layer rebuild cannot revert it (the scenario
+    // builders have no library-top land constructor).
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&top_land)
+            .expect("library top card present");
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    runner.cast(gwen).commit();
+    settle_declining_optionals(&mut runner);
+
+    assert_eq!(
+        zone_of(&runner, top_land),
+        Zone::Exile,
+        "reach-guard: Gwen Stacy's enters trigger must exile the top card"
+    );
+    assert!(
+        can_play_land(&runner, top_land),
+        "reach-guard: CR 305.1 — the exiled land must be playable WHILE Gwen is on the \
+         battlefield, or the post-death assertion below proves nothing"
+    );
+
+    destroy_via_removal_spell(&mut runner, removal, gwen);
+
+    assert_eq!(
+        zone_of(&runner, gwen),
+        Zone::Graveyard,
+        "reach-guard: the removal spell must actually kill Gwen Stacy"
+    );
+    assert!(
+        !can_play_land(&runner, top_land),
+        "CR 305.1 + CR 611.2a: the land companion of the grant ends with its host, so no \
+         PlayLand action may remain"
+    );
 }

@@ -334,10 +334,17 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                     },
                 ..
             } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }
-            // / UntilNextStepOf { step: Upkeep }: these are pruned by their own
-            // systems (zone-exit cleanup, condition re-evaluation, untap step,
-            // and `prune_upkeep_step_casting_permissions` at the Upkeep phase).
+            // UntilHostLeavesPlay / UntilNextStepOf { step: Untap } /
+            // UntilNextStepOf { step: Upkeep }: pruned by their own systems
+            // (`prune_host_left_casting_permissions` on the granting permanent's
+            // battlefield exit, the untap step, and
+            // `prune_upkeep_step_casting_permissions` at the Upkeep phase).
+            // CR 611.2b `ForAsLongAs`: NOT pruned by anything. No code path
+            // evaluates a `StaticCondition` against a casting permission — the
+            // condition re-evaluation in this file operates on
+            // `state.transient_continuous_effects` only. Retaining here is
+            // therefore the status quo, not an expiry decision; a
+            // `ForAsLongAs` casting permission currently never expires.
             // Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
             // CR 702.88a: Rebound's upkeep recast offer carries
@@ -765,6 +772,79 @@ pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {
         .retain(|e| !(e.duration == Duration::UntilHostLeavesPlay && e.source_id == departed_id));
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty.mark_full();
+    }
+}
+
+/// CR 611.2a + CR 400.7: revoke every casting permission whose lifetime was
+/// bound to `departed_id` remaining on the battlefield.
+///
+/// `prune_host_left_effects` above retains only `transient_continuous_effects`.
+/// A `Duration::UntilHostLeavesPlay` casting permission is not stored there —
+/// it lives on the exiled object as a `GameObject::casting_permissions` entry —
+/// so it needs its own pass at the same lifecycle point. Without one, "you may
+/// play that card for as long as [this permanent] remains on the battlefield"
+/// (Gwen Stacy, Victor Mancha) survives its host indefinitely.
+///
+/// Both halves of one `Effect::CastFromZone` grant are revoked together: the
+/// cast half (`ExileWithAltCost`) and the CR 305.1 land-play companion
+/// (`PlayFromExile`) that `cast_from_zone::record_lingering_permissions` emits
+/// alongside it. Pruning only one half would leave a land playable from exile
+/// after its granting permanent died, or the reverse.
+///
+/// A grant carrying `source_id: None` is retained: its host is unknown, so
+/// there is nothing to compare against `departed_id`. That covers the standing
+/// durationless grants (Suspend, Discover, Cascade, Airbending — pruned instead
+/// by `zones::apply_zone_exit_cleanup` when the card leaves exile) and, as a
+/// stated limit, any `UntilHostLeavesPlay` grant deserialized from a snapshot
+/// written before this field existed.
+///
+/// Two further limits, both outside this pass and neither introduced by it:
+///
+///   * A `CastFromZone` carrying an `alt_ability_cost` becomes
+///     `ExileWithAltAbilityCost` instead (`cast_from_zone.rs`), a shape with no
+///     duration slot at all, so its stated lifetime is dropped at grant time and
+///     never reaches this function. `ExileWithAltAbilityCost` is the NON-MANA
+///     alternative-cost form, so the class is narrower than the wording alone:
+///     one printed card pairs a non-mana alternative cost with a stated
+///     lifetime (Hama, the Bloodbender). A mana alternative cost on the same
+///     wording (The Windy City, "by paying {2}") stays `ExileWithAltCost` and
+///     keeps its duration slot.
+///   * CR 611.2b "for as long as you CONTROL ~" also ends on a control change
+///     with the permanent still on the battlefield — the case CR 611.2b works
+///     through in its Master Thief example. The parser maps that wording to
+///     `Duration::UntilHostLeavesPlay`, which is a battlefield-exit test, so a
+///     control change ends nothing. That is the parser's duration choice, not
+///     this pass's.
+pub fn prune_host_left_casting_permissions(state: &mut GameState, departed_id: ObjectId) {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.casting_permissions.retain(|p| match p {
+            // CR 305.1 + CR 611.2a: the land-play companion.
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilHostLeavesPlay,
+                source_id,
+                ..
+            } => *source_id != Some(departed_id),
+            // CR 601.3 + CR 611.2a: the cast half.
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilHostLeavesPlay),
+                source_id,
+                ..
+            } => *source_id != Some(departed_id),
+            // Every other shape ends on a different boundary and is pruned by
+            // its own pass: the turn/step-scoped durations by the
+            // `prune_*_casting_permissions` helpers above, the standing
+            // exile-resident grants by `zones::apply_zone_exit_cleanup`,
+            // and `Plotted`/`Foretold` never at all (CR 702.170d, CR 702.143a:
+            // both are explicitly castable on a later turn).
+            CastingPermission::PlayFromExile { .. }
+            | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::AdventureCreature
+            | CastingPermission::ExileWithEnergyCost
+            | CastingPermission::ExileWithAltAbilityCost { .. }
+            | CastingPermission::WarpExile { .. }
+            | CastingPermission::Plotted { .. }
+            | CastingPermission::Foretold { .. } => true,
+        });
     }
 }
 
@@ -17292,6 +17372,103 @@ mod tests {
         assert!(
             state.objects[&exiled].casting_permissions.is_empty(),
             "UntilEndOfTurn PlayFromExile should expire at cleanup"
+        );
+    }
+
+    /// Build an `ExileWithAltCost` with only the two fields this prune reads.
+    fn alt_cost_permission(
+        duration: Option<Duration>,
+        source_id: Option<ObjectId>,
+    ) -> CastingPermission {
+        CastingPermission::ExileWithAltCost {
+            cost: crate::types::mana::ManaCost::zero(),
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: None,
+            resolution_cleanup: None,
+            duration,
+            source_id,
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        }
+    }
+
+    /// CR 611.2a + CR 400.7: the departing host revokes the permissions IT
+    /// granted — and only those.
+    ///
+    /// The three retained entries are the over-pruning guard. Without them a
+    /// prune that ignored `source_id` entirely, or one that treated `None` as a
+    /// match, would still pass the two positive assertions.
+    #[test]
+    fn host_left_prune_revokes_only_the_departing_hosts_permissions() {
+        let mut state = setup();
+        let host = ObjectId(9_001);
+        let other_host = ObjectId(9_002);
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+
+        let play_from_exile = |duration, source_id| CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::LandLookCompanion,
+            duration,
+            granted_to: PlayerId(0),
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        };
+
+        let permissions = &mut state.objects.get_mut(&exiled).unwrap().casting_permissions;
+        // Revoked: both halves of the departing host's own grant.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(host),
+        ));
+        permissions.push(play_from_exile(Duration::UntilHostLeavesPlay, Some(host)));
+        // Retained: another permanent's grant with the same duration.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            Some(other_host),
+        ));
+        // Retained, and a stated limit: a grant deserialized before `source_id`
+        // existed has no host to compare against.
+        permissions.push(alt_cost_permission(
+            Some(Duration::UntilHostLeavesPlay),
+            None,
+        ));
+        // Retained: a standing exile-resident grant (Suspend, Discover) carries
+        // no duration and is pruned by `zones::apply_zone_exit_cleanup` instead.
+        permissions.push(alt_cost_permission(None, Some(host)));
+
+        prune_host_left_casting_permissions(&mut state, host);
+
+        let remaining = &state.objects[&exiled].casting_permissions;
+        assert_eq!(
+            remaining.len(),
+            3,
+            "exactly the two host-bound grants issued by `host` are revoked"
+        );
+        assert_eq!(
+            remaining[0],
+            alt_cost_permission(Some(Duration::UntilHostLeavesPlay), Some(other_host)),
+            "another permanent's grant with the same duration must survive"
+        );
+        assert_eq!(
+            remaining[1],
+            alt_cost_permission(Some(Duration::UntilHostLeavesPlay), None),
+            "a grant with no recorded host must survive — there is nothing to match"
+        );
+        assert_eq!(
+            remaining[2],
+            alt_cost_permission(None, Some(host)),
+            "a durationless standing grant is not this pass's business"
         );
     }
 

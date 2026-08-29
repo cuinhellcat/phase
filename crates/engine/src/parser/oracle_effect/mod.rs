@@ -5482,6 +5482,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         granted_to: None,
                         resolution_cleanup: None,
                         duration: None,
+                        // CR 611.2a: no duration, so no host to bind to.
+                        source_id: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
                         enters_with_modifications: Vec::new(),

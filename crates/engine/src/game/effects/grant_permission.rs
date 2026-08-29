@@ -176,6 +176,20 @@ pub fn resolve(
                 *single_use_group = tracked_set_group;
             }
         }
+        // CR 611.2a + CR 400.7: stamp the granting permanent onto the CAST
+        // half of the grant, mirroring the `PlayFromExile` arm above.
+        // Deliberately its own `if let` rather than a field added to the
+        // `granted_to` match below: that match fires only on a parser-emitted
+        // `None` placeholder, so a grant whose grantee was already bound
+        // (Jeleva class) would silently keep an unbindable host identity and
+        // outlive its source. `prune_host_left_casting_permissions` reads this.
+        if let CastingPermission::ExileWithAltCost {
+            source_id: source_id @ None,
+            ..
+        } = &mut granted
+        {
+            *source_id = Some(ability.source_id);
+        }
         prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and

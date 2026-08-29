@@ -95,6 +95,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  37 — CastingPermission::ExileWithAltCost gained `source_id`, the granting
+ *       permanent whose battlefield presence bounds an existing
+ *       `UntilHostLeavesPlay` duration. Additive behind a serde default and not
+ *       mirrored in adapter/types.ts, so this is neither a parse break like 32
+ *       nor a silent capability loss like 26. Bumped on precedent instead: it
+ *       is the same additive ObjectId on GameState as entry 34's
+ *       `prepared_copy_source`, which carries identical serde attributes.
  *  36 — Resolution-time optional fixed sacrifice payments add a typed
  *       replacement-resumable continuation to GameState.
  *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -205,7 +212,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 36 as const;
+export const WIRE_PROTOCOL_VERSION = 37 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

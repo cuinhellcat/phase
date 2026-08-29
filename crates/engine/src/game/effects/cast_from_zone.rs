@@ -1479,6 +1479,12 @@ fn record_lingering_permissions(
                         matches!(current_zone, Some(Zone::Graveyard | Zone::Hand))
                             .then_some(Duration::UntilEndOfTurn)
                     }),
+                    // CR 611.2a + CR 400.7: record WHICH permanent's presence
+                    // bounds the duration above. The land-play companion built
+                    // below already carries `source_id`; without the same
+                    // identity here the cast half of one `CastFromZone` would
+                    // outlive its host while the land half expired.
+                    source_id: Some(ability.source_id),
                     graveyard_replacement: graveyard_replacement.clone(),
                     enters_with_counter: enters_with_counter.clone(),
                     enters_with_modifications: enters_with_modifications.clone(),

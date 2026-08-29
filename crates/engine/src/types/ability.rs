@@ -3675,6 +3675,21 @@ pub enum CastingPermission {
         /// declines or fails to cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
+        /// CR 611.2a + CR 400.7: Identity of the permanent whose continued
+        /// presence bounds `duration`. Filled by `record_lingering_permissions`
+        /// from the granting ability's source; `None` for every grant whose
+        /// lifetime is not host-bound (Airbending, Suspend, Discover, Cascade,
+        /// Rebound's `UntilEndOfTurn` offer). Parallel to
+        /// `PlayFromExile::source_id`, which the land-play companion of this
+        /// same grant already carries, so the cast and land halves of one
+        /// `CastFromZone` are revoked by the same battlefield-exit pass
+        /// (`layers::prune_host_left_casting_permissions`).
+        ///
+        /// Without it a `Duration::UntilHostLeavesPlay` grant is unenforceable:
+        /// the battlefield-exit lifecycle knows the departed object's id and
+        /// has no way to ask which permissions that object issued.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
         /// CR 614.1a + CR 608.2n: Torrential Gearhulk / Kylox's Voltstrider
         /// class — a `CastFromZone` grant whose sub-ability is "if that spell
         /// would be put into a graveyard, [exile it / put it on the bottom of
@@ -31904,6 +31919,70 @@ mod tests {
         assert_eq!(deserialized.duration, Some(Duration::UntilHostLeavesPlay));
     }
 
+    /// CR 611.2a + Regel 17: both serialized forms of the host-bound cast
+    /// permission — the pre-`source_id` snapshot and the current one.
+    ///
+    /// The old form is the honest limit, not an upgrade: a snapshot written
+    /// before the field existed records no host, so it deserializes to `None`
+    /// and `layers::prune_host_left_casting_permissions` keeps it. There is no
+    /// value a normalizer could invent — the granting permanent is simply not
+    /// in the data. The assertion below pins that, so the limit cannot be
+    /// forgotten and cannot silently change into a wrong guess.
+    #[test]
+    fn exile_with_alt_cost_source_id_reads_both_serialized_forms() {
+        let with_host = CastingPermission::ExileWithAltCost {
+            cost: crate::types::mana::ManaCost::zero(),
+            cost_provenance: ExileGrantCostProvenance::NormalCost,
+            cast_transformed: false,
+            constraint: None,
+            granted_to: Some(PlayerId(0)),
+            resolution_cleanup: None,
+            duration: Some(Duration::UntilHostLeavesPlay),
+            source_id: Some(ObjectId(7)),
+            graveyard_replacement: None,
+            enters_with_counter: None,
+            enters_with_modifications: Vec::new(),
+            mana_spend_permission: None,
+        };
+        let json = serde_json::to_string(&with_host).unwrap();
+        assert!(
+            json.contains("\"source_id\":7"),
+            "the current form carries the granting permanent on the wire: {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CastingPermission>(&json).unwrap(),
+            with_host,
+            "current form round-trips"
+        );
+
+        // The pre-`source_id` form: byte-identical to what a v36 peer wrote.
+        let legacy = json.replace(",\"source_id\":7", "");
+        assert!(
+            !legacy.contains("source_id"),
+            "probe removed the field: {legacy}"
+        );
+        let restored: CastingPermission = serde_json::from_str(&legacy)
+            .expect("a snapshot written before the field must still load");
+        match restored {
+            CastingPermission::ExileWithAltCost {
+                source_id,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    source_id, None,
+                    "no host is recorded, so none may be invented"
+                );
+                assert_eq!(
+                    duration,
+                    Some(Duration::UntilHostLeavesPlay),
+                    "the stated lifetime survives the older form"
+                );
+            }
+            other => panic!("expected ExileWithAltCost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parent_target_serde_roundtrip() {
         let filter = TargetFilter::ParentTarget;
@@ -32083,6 +32162,7 @@ mod tests {
     #[test]
     fn exile_with_alt_cost_reads_legacy_exile_on_resolve_bool() {
         let modern = CastingPermission::ExileWithAltCost {
+            source_id: None,
             cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
             cost: ManaCost::zero(),
             cast_transformed: false,
