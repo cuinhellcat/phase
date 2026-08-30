@@ -20,7 +20,8 @@
 //!     `condition` is re-checked (Cloud's during-your-turn + equipped gate).
 //!   - CR 109.5: "your" on a static refers to the object's controller.
 //!   - CR 301.5a: "equipped" / SourceIsEquipped.
-//!   - CR 611.2a: UntilHostLeavesPlay (Tishana's loses-abilities duration).
+//!   - CR 611.2b + CR 702.26f: WhileHostOnBattlefield (Tishana's
+//!     loses-abilities duration — presence-bound, ends on a phase-out).
 
 use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
@@ -134,12 +135,13 @@ fn cloud_emits_during_turn_equipped_condition() {
 }
 
 /// Tishana: the `Counter` rider now carries an explicit
-/// `duration: UntilHostLeavesPlay` (surfaces the "for as long as this creature
-/// remains on the battlefield" clause into the AST).
+/// `duration: WhileHostOnBattlefield` (surfaces the "for as long as this
+/// creature remains on the battlefield" clause into the AST — the
+/// presence-bound state reading, CR 611.2b + CR 702.26f).
 /// REVERT-PROBE: drop the rider `duration` field → the field-add / serde marker
-/// disappears; a non-UntilHostLeavesPlay value fails this assert.
+/// disappears; a non-WhileHostOnBattlefield value fails this assert.
 #[test]
-fn tishana_rider_carries_until_host_leaves_play() {
+fn tishana_rider_carries_while_host_on_battlefield() {
     let parsed = parse_oracle_text(
         TISHANA,
         "Tishana's Tidebinder",
@@ -156,8 +158,8 @@ fn tishana_rider_carries_until_host_leaves_play() {
     match rider {
         CounterSourceRider::LosesAbilities { duration, .. } => assert_eq!(
             **duration,
-            Duration::UntilHostLeavesPlay,
-            "the loses-abilities rider must carry UntilHostLeavesPlay"
+            Duration::WhileHostOnBattlefield,
+            "the loses-abilities rider must carry WhileHostOnBattlefield"
         ),
         other => panic!("expected a LosesAbilities rider, got {other:?}"),
     }

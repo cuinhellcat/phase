@@ -1043,6 +1043,7 @@ mod smaug_noncombat_damage_treasure;
 mod snow_mana_production;
 mod sothera_supervoid_edict_reanimate;
 mod sovereign_okinec_ahau;
+mod sower_phase_out_ends_presence_bound_steal;
 mod spark_double_as_enters;
 mod spear_of_bashenga_attacks_monarch_5249;
 mod special_action_x_runtime;

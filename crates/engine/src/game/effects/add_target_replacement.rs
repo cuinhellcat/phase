@@ -58,7 +58,13 @@ pub(crate) fn expiry_from_duration(
         // different objects — Old Fat Spider Can't See Me chapter II binds to the
         // Saga while hosting its shield on the targeted creature, so the identity
         // mapping would strand an immortal shield when the Saga leaves first.
-        Some(Duration::UntilHostLeavesPlay) => ReplacementDurationExpiry::GateControlled,
+        // CR 611.2b: the control-bound host reading takes the same
+        // gate-controlled route. The gate re-reads the source each layer pass,
+        // so it observes a control change as well as a battlefield exit; a
+        // `RestrictionExpiry` stamp could express neither.
+        Some(Duration::UntilHostLeavesPlay)
+        | Some(Duration::WhileControllingHost)
+        | Some(Duration::WhileHostOnBattlefield) => ReplacementDurationExpiry::GateControlled,
         // CR 611.2b conditional windows are gated by
         // `stamp_for_as_long_as_controlled_gate` / `ReplacementCondition`, not by
         // an expiry stamp.
@@ -237,8 +243,7 @@ fn concretize_parent_copy_target(
 /// can't become untapped for as long as you control ~.").
 ///
 /// The clause shell peels "for as long as you control ~" onto the ability frame
-/// as `Duration::UntilHostLeavesPlay` (the parser's canonical mapping for
-/// host-control lifetimes). For a replacement installed on a DIFFERENT object
+/// as `Duration::WhileControllingHost`. For a replacement installed on a DIFFERENT object
 /// (the chosen creature) that mapping is insufficient on its own — nothing
 /// prunes an `UntilHostLeavesPlay` object-installed replacement, and it must end
 /// on a control SWAP of the originating source, not just when it leaves play.
@@ -250,33 +255,14 @@ fn concretize_parent_copy_target(
 /// `execute`, no pre-existing condition) carrying this exact duration is
 /// translated, so unrelated `AddTargetReplacement` installs are untouched.
 ///
-/// ACKNOWLEDGED CR 611.2b GAP — presence sub-class is over-gated (NOT fixed
-/// here): `parse_for_as_long_as_condition` (parser/oracle_nom/duration.rs)
-/// collapses BOTH "for as long as you control [subject]" (control-bound: ends
-/// on leave-play OR a control swap of the source — Spider-Woman) AND "[subject]
-/// remains on the battlefield" (presence-bound: per CR 611.2b ends ONLY on
-/// leave-play, NOT on a source control change) into the same
-/// `Duration::UntilHostLeavesPlay`. `ResolvedAbility` carries only `duration`,
-/// so the original phrasing is lost by the time this stamp runs — the two
-/// sub-classes are indistinguishable here. A hypothetical "[creature] can't
-/// become untapped for as long as ~ remains on the battlefield" would therefore
-/// currently receive the `ControllerControlsSource` gate, whose
-/// `controller == installer` re-check would make it lapse EARLY on a source
-/// control swap — rules-wrong for the presence sub-class.
-///
-/// This is left as a documented strict-failure gap rather than silently
-/// distinguished: making the two phrasings carry distinct durations (so the
-/// stamp could tell them apart) was rejected because "remains on the
-/// battlefield" → `UntilHostLeavesPlay` is relied on by several shipped card
-/// classes (Saga goaded tokens, Stern Mentor-style "loses all abilities",
-/// gain-control + lose-abilities, +1/+1 grants) that depend on the
-/// leave-play prune path (layers.rs); re-routing the presence arm to a
-/// presence-bound `ForAsLongAs { IsPresent }` would change the prune semantics
-/// for all of them. No real card currently combines the presence phrasing with
-/// a bare untap-prevention rider, so this gate stays keyed on
-/// `UntilHostLeavesPlay` (correct for Spider-Woman / Secret Agent) and the
-/// presence sub-class waits here until either a distinguishing signal is
-/// threaded through `ResolvedAbility` or a card forces the distinction.
+/// The two "for as long as" host wordings are no longer collapsed: the control
+/// reading is `Duration::WhileControllingHost`, the presence reading stays
+/// `Duration::UntilHostLeavesPlay`, so this stamp CAN tell them apart. It still
+/// matches both, deliberately — see the inline comment in the function body.
+/// Narrowing it to the control reading would change shipped behaviour for a
+/// presence-bound untap prevention with no card asking for it, and whether such
+/// a rider should survive a control change is a question about untap
+/// preventions rather than about this split.
 fn stamp_for_as_long_as_controlled_gate(
     replacement: &mut ReplacementDefinition,
     ability: &ResolvedAbility,
@@ -284,7 +270,25 @@ fn stamp_for_as_long_as_controlled_gate(
     let is_bare_untap_prevention = replacement.event == ReplacementEvent::Untap
         && replacement.execute.is_none()
         && replacement.condition.is_none();
-    if is_bare_untap_prevention && matches!(ability.duration, Some(Duration::UntilHostLeavesPlay)) {
+    // CR 611.2b: `WhileControllingHost` is the wording this stamp was written
+    // for ("for as long as you control ~"). The presence readings stay in the
+    // pattern so a wording that reached the gate before either split keeps the
+    // exact gate afterwards. Measured over the parse, no card reaches either
+    // presence arm here today — the printed presence-bound untap locks
+    // (Somnophore's class) lower to a `GenericEffect` transient, not to this
+    // replacement path — so both presence arms are parity against the parser
+    // routing changing, not live behavior. Whether a presence-bound untap
+    // prevention should also survive a control change is a question about
+    // untap preventions, not about these splits, and narrowing it here would
+    // change shipped behavior with no card asking for it.
+    if is_bare_untap_prevention
+        && matches!(
+            ability.duration,
+            Some(Duration::WhileControllingHost)
+                | Some(Duration::UntilHostLeavesPlay)
+                | Some(Duration::WhileHostOnBattlefield)
+        )
+    {
         replacement.condition = Some(ReplacementCondition::ControllerControlsSource {
             source: ability.source_id,
             controller: ability.controller,

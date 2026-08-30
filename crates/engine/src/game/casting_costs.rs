@@ -24020,6 +24020,8 @@ its replicate cost was paid.)\nDraw a card.";
                 },
                 constraint: None,
                 granted_to: Some(PlayerId(0)),
+                duration: None,
+                source_id: None,
             });
 
         let ability = ResolvedAbility::new(

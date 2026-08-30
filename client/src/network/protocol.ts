@@ -95,13 +95,23 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  37 — CastingPermission::ExileWithAltCost gained `source_id`, the granting
- *       permanent whose battlefield presence bounds an existing
- *       `UntilHostLeavesPlay` duration. Additive behind a serde default and not
- *       mirrored in adapter/types.ts, so this is neither a parse break like 32
- *       nor a silent capability loss like 26. Bumped on precedent instead: it
- *       is the same additive ObjectId on GameState as entry 34's
- *       `prepared_copy_source`, which carries identical serde attributes.
+ *  37 — Casting permissions gained a typed lifetime. Two parts, with different
+ *       compatibility consequences:
+ *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
+ *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
+ *           `duration` it already carried. `source_id` is the granting
+ *           permanent whose presence bounds the stated lifetime. Additive
+ *           behind serde defaults, like entry 34's `prepared_copy_source`.
+ *       (b) `Duration` gained the `WhileControllingHost` ("for as long as
+ *           you control ~") and `WhileHostOnBattlefield` ("for as long as ~
+ *           remains on the battlefield") variants (CR 611.2b). Each new tag
+ *           is a PARSE BREAK in the v37 -> v36 direction, in the same shape
+ *           as the full-game bump at entry 46 (new tag emitted, old peer
+ *           cannot parse it; the break runs ONE way, unlike entry 32's
+ *           two-way break): a v36 peer deserializing a snapshot that contains
+ *           either new tag fails on an unknown variant. There is no serde
+ *           default that can rescue it, which is why the handshake must
+ *           refuse the pairing rather than degrade.
  *  36 — Resolution-time optional fixed sacrifice payments add a typed
  *       replacement-resumable continuation to GameState.
  *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were

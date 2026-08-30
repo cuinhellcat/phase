@@ -202,8 +202,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 48 — CastingPermission.ExileWithAltCost gained source_id, the granting
- *      permanent that bounds an UntilHostLeavesPlay duration.
+ * 48 — Casting permissions gained a typed lifetime: ExileWithAltAbilityCost
+ *      gained duration and source_id, ExileWithAltCost gained source_id beside
+ *      the duration it already had (additive, serde
+ *      defaults), and Duration gained the WhileControllingHost and
+ *      WhileHostOnBattlefield variants (CR 611.2b). Each new Duration tag is a
+ *      one-way parse break — a v47 peer cannot deserialize a snapshot
+ *      containing it — so the handshake refuses the pairing instead of
+ *      degrading.
  * 47 — Resolution-time optional fixed sacrifice payments add a typed
  *      replacement-resumable continuation to GameState.
  * 46 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were

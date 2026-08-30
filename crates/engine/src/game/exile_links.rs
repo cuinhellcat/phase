@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::types::ability::{CastingPermission, Duration, ResolvedAbility};
+use crate::types::ability::{Duration, ResolvedAbility};
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
 use crate::types::identifiers::ObjectId;
 
@@ -124,15 +124,17 @@ pub(crate) fn push_exiled_with_source_this_turn(
 // exiles another card, whether stored as a play permission or a transient effect.
 fn expire_until_source_exiles_another_card_durations(state: &mut GameState, source_id: ObjectId) {
     for (_, object) in state.objects.iter_mut() {
+        // CR 611.2a: read the lifetime through `CastingPermission::lifetime`,
+        // the single place that knows which variants carry one. The hand-written
+        // `PlayFromExile`-only pattern that stood here ended the duration on one
+        // variant while `layers::casting_permission_duration_is_enforceable`
+        // reported it enforceable for all of them — the same split between "who
+        // may hold this lifetime" and "who ends it" that this change removes for
+        // the turn-boundary seams.
         object.casting_permissions.retain(|permission| {
-            !matches!(
-                permission,
-                CastingPermission::PlayFromExile {
-                    duration: Duration::UntilSourceExilesAnotherCard,
-                    source_id: Some(permission_source),
-                    ..
-                } if *permission_source == source_id
-            )
+            let lifetime = permission.lifetime();
+            !(lifetime.duration == Some(&Duration::UntilSourceExilesAnotherCard)
+                && lifetime.source_id == Some(source_id))
         });
     }
 
@@ -243,13 +245,177 @@ fn contains_linked_exile_consumer_value(value: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaProduction, PlayerFilter, QuantityExpr,
-        QuantityRef, TargetFilter,
+        AbilityDefinition, AbilityKind, CastingPermission, Effect, ManaProduction, PlayerFilter,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
     use crate::types::statics::CastFrequency;
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// CR 607.2a + CR 611.2a: the source-linked duration ends on EVERY
+    /// permission variant that can carry it, not only `PlayFromExile`.
+    ///
+    /// This pass held the last hand-written per-variant list for a casting
+    /// permission lifetime. `layers::casting_permission_duration_is_enforceable`
+    /// answers `true` for `UntilSourceExilesAnotherCard` on any variant — it
+    /// takes a `&Duration` and cannot say otherwise — so the pattern here was
+    /// the one place that decided the answer differently. An `ExileWithAltCost`
+    /// carrying the duration was ended by nothing at all.
+    ///
+    /// No printed card produces the duration today (zero nodes over the parsed
+    /// corpus); the parser can, and both grant sites forward whatever it
+    /// produces, which is why the split is closed rather than named.
+    ///
+    /// All three lifetime-bearing variants are present, because
+    /// `CastingPermission::lifetime` answers for three: `ExileWithAltCost`,
+    /// `ExileWithAltAbilityCost` (the one this change gives a `duration` field
+    /// at all) and `PlayFromExile`.
+    ///
+    /// DISCRIMINATING: restoring the `PlayFromExile`-only pattern leaves both
+    /// alternative-cost permissions in place and reds their assertions. The
+    /// `PlayFromExile` half is the positive control that the old behaviour is
+    /// unchanged, and the foreign-source half proves the pass still keys on the
+    /// source that did the exiling.
+    #[test]
+    fn the_source_linked_duration_ends_on_every_permission_variant() {
+        use crate::game::zones::create_object;
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Linked Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unrelated Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut exiled = |name: &str, permission: CastingPermission| {
+            let id = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .casting_permissions
+                .push(permission);
+            id
+        };
+
+        let alt_cost = exiled(
+            "Alt-cost grant",
+            CastingPermission::ExileWithAltCost {
+                cost: crate::types::mana::ManaCost::zero(),
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: None,
+                duration: Some(Duration::UntilSourceExilesAnotherCard),
+                source_id: Some(source),
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            },
+        );
+        let play_grant = exiled(
+            "Play grant",
+            CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                duration: Duration::UntilSourceExilesAnotherCard,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: Some(source),
+                invalidation: None,
+                exiled_by_ability_controller: Some(PlayerId(0)),
+                mana_spend_permission: None,
+                card_filter: None,
+                single_use_group: None,
+                single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: EtbTapState::Unspecified,
+            },
+        );
+        let alt_ability_cost = exiled(
+            "Non-mana alt-cost grant",
+            CastingPermission::ExileWithAltAbilityCost {
+                cost: crate::types::ability::AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                duration: Some(Duration::UntilSourceExilesAnotherCard),
+                source_id: Some(source),
+            },
+        );
+        let foreign = exiled(
+            "Grant from another source",
+            CastingPermission::ExileWithAltCost {
+                cost: crate::types::mana::ManaCost::zero(),
+                cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                cast_transformed: false,
+                constraint: None,
+                granted_to: Some(PlayerId(0)),
+                resolution_cleanup: None,
+                duration: Some(Duration::UntilSourceExilesAnotherCard),
+                source_id: Some(other_source),
+                graveyard_replacement: None,
+                enters_with_counter: None,
+                enters_with_modifications: Vec::new(),
+                mana_spend_permission: None,
+            },
+        );
+
+        // Production entry: the pass runs from `push_exiled_with_source_this_turn`,
+        // the same call the exile pipeline makes when the source exiles its next
+        // card. Calling the prune directly would test the helper, not the path.
+        let next_card = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "The next card this source exiles".to_string(),
+            Zone::Exile,
+        );
+        push_exiled_with_source_this_turn(&mut state, next_card, source);
+
+        assert!(
+            state.objects[&alt_cost].casting_permissions.is_empty(),
+            "the non-mana-cost sibling carries the same duration and must end too; got {:?}",
+            state.objects[&alt_cost].casting_permissions
+        );
+        assert!(
+            state.objects[&alt_ability_cost]
+                .casting_permissions
+                .is_empty(),
+            "the non-mana alt-cost variant — the one this change gives a `duration` \
+             field at all — must end too; got {:?}",
+            state.objects[&alt_ability_cost].casting_permissions
+        );
+        assert!(
+            state.objects[&play_grant].casting_permissions.is_empty(),
+            "the PlayFromExile half must keep ending as it did before; got {:?}",
+            state.objects[&play_grant].casting_permissions
+        );
+        assert_eq!(
+            state.objects[&foreign].casting_permissions.len(),
+            1,
+            "a grant linked to a different source must survive"
+        );
+    }
 
     /// CR 702.167a/c: a `CraftMaterial` link must survive the craft source's
     /// battlefield exit (it self-exiles mid-activation and returns with the same

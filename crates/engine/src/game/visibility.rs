@@ -7804,6 +7804,8 @@ mod tests {
             },
             constraint: None,
             granted_to,
+            duration: None,
+            source_id: None,
         }];
         (state, card)
     }

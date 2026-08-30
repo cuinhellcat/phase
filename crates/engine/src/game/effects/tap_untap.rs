@@ -1549,6 +1549,110 @@ mod tests {
         );
     }
 
+    /// CR 611.2b presence sibling: Somnophore's untap lock states the
+    /// PRESENCE wording — "doesn't untap during its controller's untap step
+    /// for as long as Somnophore remains on the battlefield" — which lowers to
+    /// a `GenericEffect` transient carrying `WhileHostOnBattlefield` since the
+    /// second wording split. This is the PARITY pin for that split's shared
+    /// exit leg: the new variant must keep ending on the host's actual
+    /// battlefield exit exactly as the conflated variant did, or the split
+    /// strands every presence-bound untap lock forever.
+    ///
+    /// Revert-probe: dropping `WhileHostOnBattlefield` from
+    /// `Duration::ends_when_host_leaves_play`'s true arm leaves the transient
+    /// un-pruned at the exit — the final "untaps once Somnophore is gone"
+    /// assertion FAILS. The tapped assertions before it guard against the
+    /// vacuous opposite (no lock installed at all). The phase-out leg of the
+    /// same class is pinned by
+    /// `a_phased_out_host_ends_the_presence_effect_and_spares_the_event_deadline`.
+    #[test]
+    fn somnophore_untap_lock_keeps_its_gate_under_the_presence_wording() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::turns::execute_untap;
+
+        let mut state = GameState::new_two_player(42);
+        let somnophore = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Somnophore".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&somnophore)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let foe_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opposing Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&foe_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Flying\nWhenever Somnophore deals damage to a player, tap target \
+             creature that player controls. That creature doesn't untap during \
+             its controller's untap step for as long as Somnophore remains on \
+             the battlefield.",
+            "Somnophore",
+            &["Flying".to_string()],
+            &["Creature".to_string()],
+            &["Illusion".to_string()],
+        );
+        let execute = parsed
+            .triggers
+            .first()
+            .expect("Somnophore must parse a damage trigger")
+            .execute
+            .as_deref()
+            .expect("the trigger must carry an effect chain");
+
+        let resolved = build_resolved_from_def_with_targets(
+            execute,
+            somnophore,
+            PlayerId(0),
+            vec![TargetRef::Object(foe_creature)],
+        );
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "reach-guard: the trigger must tap the chosen creature"
+        );
+
+        // The lock holds through its controller's untap step while Somnophore
+        // is on the battlefield.
+        state.active_player = PlayerId(1);
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            state.objects[&foe_creature].tapped,
+            "the creature must stay tapped while Somnophore remains on the battlefield"
+        );
+
+        // CR 611.2b: once Somnophore leaves the battlefield, the stated
+        // lifetime is over and the next untap step unlocks the creature.
+        crate::game::zones::move_to_zone(&mut state, somnophore, Zone::Graveyard, &mut Vec::new());
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+        assert!(
+            !state.objects[&foe_creature].tapped,
+            "the lock must lapse once Somnophore has left the battlefield"
+        );
+    }
+
     /// CR 611.2b control-swap sibling: the duration ends on a control CHANGE of
     /// Spider-Woman, not only when it leaves play (the Master Thief reading).
     /// Reverting the `ControllerControlsSource` controller comparison to read the

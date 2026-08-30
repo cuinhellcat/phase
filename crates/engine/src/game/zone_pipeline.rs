@@ -171,8 +171,9 @@ pub struct EntryMods {
 /// struct that also rides in `DeliveryCtx`.
 #[derive(Default)]
 pub struct ExileLinkSpec {
-    /// `Some(Duration::UntilHostLeavesPlay)` installs a return-on-source-leave
-    /// link; other durations / `None` fall back to `tracking`.
+    /// A host-lifetime duration — `Some(d)` with `d.ends_when_host_leaves_play()`
+    /// — installs a return-on-source-leave link; other durations / `None` fall
+    /// back to `tracking`.
     pub duration: Option<Duration>,
     /// Resolved controller for a monarch-bounded link. `Some` is captured when
     /// the originating ability resolves; `None` means that duration cannot
@@ -1805,7 +1806,7 @@ pub(crate) fn apply_zone_delivery_tail(
     if to == Zone::Exile {
         if let Some(source_id) = cause.or(source_id) {
             let kind = match duration {
-                Some(Duration::UntilHostLeavesPlay) => {
+                Some(d) if d.ends_when_host_leaves_play() => {
                     Some(ExileLinkKind::UntilSourceLeaves { return_zone: from })
                 }
                 Some(Duration::UntilOpponentBecomesMonarch) => {

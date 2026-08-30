@@ -4038,11 +4038,14 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                // CR 611.2 + CR 611.2a: "that permanent loses all abilities for
-                // as long as this creature remains on the battlefield" rider.
+                // CR 611.2b + CR 702.26f: "that permanent loses all abilities
+                // for as long as this creature remains on the battlefield"
+                // rider (Tishana's Tidebinder) — the printed wording is the
+                // presence-bound state reading, so the rider's effect ends on
+                // a phase-out of this creature, not only on its exit.
                 *existing = Some(CounterSourceRider::LosesAbilities {
                     static_def: source_static,
-                    duration: Box::new(Duration::UntilHostLeavesPlay),
+                    duration: Box::new(Duration::WhileHostOnBattlefield),
                 });
             }
         }
@@ -9840,9 +9843,11 @@ mod tests {
         );
     }
 
-    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga remains.
+    /// CR 701.15b + CR 611.2b: Saga-scoped goad persists while the Saga
+    /// remains — the presence-bound state reading, so a phase-out of the Saga
+    /// ends it (CR 702.26f).
     #[test]
-    fn tokens_goaded_continuation_after_create_token_until_host_leaves_play() {
+    fn tokens_goaded_continuation_after_create_token_while_host_on_battlefield() {
         let token_effect = Effect::Token {
             name: "Warrior".to_string(),
             power: PtValue::Fixed(1),
@@ -9866,7 +9871,7 @@ mod tests {
                 &mut ParseContext::default(),
             ),
             Some(ContinuationAst::GoadLastCreated {
-                duration: Some(Duration::UntilHostLeavesPlay),
+                duration: Some(Duration::WhileHostOnBattlefield),
             })
         );
     }
@@ -9953,7 +9958,7 @@ mod tests {
                 end_cost: _,
             } => {
                 assert_eq!(*target, Some(TargetFilter::LastCreated));
-                assert_eq!(*duration, Some(Duration::UntilHostLeavesPlay));
+                assert_eq!(*duration, Some(Duration::WhileHostOnBattlefield));
                 assert!(static_abilities[0].modifications.iter().any(|m| matches!(
                     m,
                     ContinuousModification::AddStaticMode {
