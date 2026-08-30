@@ -334,17 +334,24 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                     },
                 ..
             } => true,
-            // UntilHostLeavesPlay / UntilNextStepOf { step: Untap } /
-            // UntilNextStepOf { step: Upkeep }: pruned by their own systems
-            // (`prune_host_left_casting_permissions` on the granting permanent's
-            // battlefield exit, the untap step, and
-            // `prune_upkeep_step_casting_permissions` at the Upkeep phase).
-            // CR 611.2b `ForAsLongAs`: NOT pruned by anything. No code path
-            // evaluates a `StaticCondition` against a casting permission — the
-            // condition re-evaluation in this file operates on
-            // `state.transient_continuous_effects` only. Retaining here is
-            // therefore the status quo, not an expiry decision; a
-            // `ForAsLongAs` casting permission currently never expires.
+            // Retained here, on three different grounds — only the first is
+            // an expiry decision:
+            //
+            //   * `UntilHostLeavesPlay` and `UntilNextStepOf { step: Upkeep }`
+            //     have their own passes (`prune_host_left_casting_permissions`
+            //     on the granting permanent's battlefield exit, and
+            //     `prune_upkeep_step_casting_permissions` at the Upkeep phase).
+            //   * `UntilNextStepOf { step: Untap }`: nothing prunes it.
+            //     `prune_controller_untap_step_effects` retains only
+            //     `state.transient_continuous_effects`. No printed card reaches
+            //     the shape either — a corpus scan for a play/cast permission
+            //     carrying an untap-step lifetime returns zero cards — so this
+            //     is a reachable-in-code, unreachable-in-play arm, not a
+            //     defect with a demonstrated consequence.
+            //   * CR 611.2b `ForAsLongAs`: likewise pruned by nothing, and this
+            //     one IS reachable. No code path evaluates a `StaticCondition`
+            //     against a casting permission; the condition re-evaluation in
+            //     this file operates on `transient_continuous_effects` only.
             // Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
             // CR 702.88a: Rebound's upkeep recast offer carries
