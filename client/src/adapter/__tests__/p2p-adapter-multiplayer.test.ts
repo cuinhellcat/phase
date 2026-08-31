@@ -3779,17 +3779,22 @@ describe("P2P wire-protocol version gate", () => {
 /**
  * #7924: the host's own screen must not depend on the guest fan-out.
  *
- * `broadcastStateUpdate` awaits `getViewerSnapshot(pid)` per guest and closes
- * on `commitTerminalIfComplete`, and every caller runs it inside a `try`. While
- * the host's `stateChanged` came after it, either of those rejecting froze the
- * host on a board its own engine had already advanced, and the acting guest was
- * told an applied action had failed.
+ * `broadcastStateUpdate` closes on `commitTerminalIfComplete`, fed by a host
+ * snapshot read; on the guest-message paths that fan-out runs inside a `try`.
+ * While the host's `stateChanged` came after it, that close rejecting froze
+ * the host on a board its own engine had already advanced, and the acting
+ * guest was told an applied action had failed. (`broadcastStateUpdateInner`'s
+ * own per-seat viewer reads stopped being a rejection source when the
+ * delivery contract isolated them; the terminal close still reads viewer
+ * snapshots for its recipient-bound statements. The eventual-delivery
+ * describe below owns the per-seat half.)
  *
  * Not the dead-channel case: `trySend` resolves `false` rather than rejecting
  * (`network/peer.ts:69-106`), so a broken link degrades the fan-out silently.
  *
  * These tests fail if the emission is moved back after the fan-out: the
- * scripted `getViewerSnapshot` rejection is what the ordering has to survive.
+ * scripted rejection of the fan-out's closing host read is what the ordering
+ * has to survive.
  */
 describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
   /**
@@ -3797,16 +3802,23 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
    * actually ran. Without it every assertion below is also the picture of a
    * completely healthy run, so an injection that silently stops being reached
    * would leave the test green and measuring nothing.
+   *
+   * Rejects the SECOND host snapshot read: the first belongs to
+   * `publishHostSnapshot`, the second feeds the terminal close — where the
+   * fan-out's remaining rejection sources sit now that
+   * `broadcastStateUpdateInner`'s own per-seat reads are isolated.
    */
-  function failNextFanOut(): { consumed: () => boolean } {
-    // The fan-out's first per-guest await, and one of its two real rejection
-    // sources — the other is the terminal commit that closes the fan-out.
+  function failTerminalCloseRead(): { consumed: () => boolean } {
     let reached = false;
-    (mockGetViewerSnapshot as unknown as {
+    const m = mockGetSnapshot as unknown as {
+      getMockImplementation: () => (() => Promise<unknown>) | undefined;
       mockImplementationOnce: (implementation: () => Promise<unknown>) => void;
-    }).mockImplementationOnce(async () => {
+    };
+    const original = m.getMockImplementation()!;
+    m.mockImplementationOnce(original);
+    m.mockImplementationOnce(async () => {
       reached = true;
-      throw new Error("viewer snapshot failed");
+      throw new Error("terminal close read failed");
     });
     return { consumed: () => reached };
   }
@@ -3835,7 +3847,7 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     const events: Array<{ type: string }> = [];
     adapter.onEvent((e) => events.push(e));
     mockSubmitAction.mockClear();
-    const injection = failNextFanOut();
+    const injection = failTerminalCloseRead();
 
     await guest.simulateData({
       type: "action",
@@ -3870,7 +3882,7 @@ describe("P2PHostAdapter — host emission precedes the guest fan-out", () => {
     const events: Array<{ type: string }> = [];
     adapter.onEvent((e) => events.push(e));
     mockSubmitInteraction.mockClear();
-    const injection = failNextFanOut();
+    const injection = failTerminalCloseRead();
 
     await guest.simulateData({
       type: "interaction",
@@ -4109,6 +4121,73 @@ describe("P2PHostAdapter — per-guest eventual state delivery", () => {
     expect(healedOne).toHaveLength(1);
     expect(healedOne[0].state?.filteredFor).toBe(1);
     expect(statesSentTo((await guestTwo.getSentMessages()).slice(beforeTwo))).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  // The game-ending broadcast is the one delivery a seat cannot afford to
+  // miss twice: the terminal fan-out is one-shot, and the guest refuses a
+  // `terminal_result` whose revision it never received. The sweep therefore
+  // re-commits the terminal statement AFTER the healing state frame; the
+  // ledger advances only once both frames are accepted.
+  it("re-commits the terminal result for the seat that missed the game-ending broadcast", async () => {
+    const { adapter, emitConnection } = makeHost(2, 5_000);
+    await adapter.initialize();
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+    await flushPromises();
+
+    const before = (await guest.getSentMessages()).length;
+    const gameOver = {
+      players: [],
+      objects: {},
+      waiting_for: { type: "GameOver", data: { winner: 0 } },
+    };
+    // Both host snapshot reads (publish + terminal close) see the final
+    // board, and so does every viewer read after the scripted rejection.
+    (mockGetState as unknown as { mockResolvedValue: (v: unknown) => void }).mockResolvedValue(gameOver);
+    (mockGetViewerSnapshot as unknown as {
+      mockImplementation: (implementation: (pid: number) => Promise<unknown>) => void;
+    }).mockImplementation(async (pid: number) => ({
+      state: { filteredFor: pid, players: [], waiting_for: { type: "GameOver", data: { winner: 0 } } },
+      actions: [],
+      autoPassRecommended: false,
+    }));
+    const injection = failNextViewerSnapshot();
+
+    await guest.simulateData({
+      type: "action",
+      senderPlayerId: 1,
+      action: { type: "PassPriority" },
+    });
+    await flushPromises();
+
+    expect(injection.consumed()).toBe(true);
+    // The one-shot terminal fan already fired, at a revision this seat never
+    // cached — unusable for that guest — and no state frame went out.
+    const immediate = (await guest.getSentMessages()).slice(before);
+    expect(immediate.filter((m) => (m as { type?: string }).type === "terminal_result")).toHaveLength(1);
+    expect(statesSentTo(immediate)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    const afterSweep = (await guest.getSentMessages()).slice(before);
+    const states = statesSentTo(afterSweep);
+    expect(states).toHaveLength(1);
+    const terminals = afterSweep.filter((m) => (m as { type?: string }).type === "terminal_result") as
+      Array<{ result?: { recipient?: number; revision?: number; finalStateCommitment?: string } }>;
+    expect(terminals).toHaveLength(2);
+    expect(terminals[1].result?.recipient).toBe(1);
+    expect(terminals[1].result?.revision).toBe(states[0].revision);
+    // The binding that decides acceptance on the guest: the fresh statement
+    // must commit to exactly the state the healing frame delivered.
+    expect(terminals[1].result?.finalStateCommitment).toBe(
+      await p2pFinalStateCommitment(states[0].state as unknown as GameState),
+    );
+    // The healing state frame precedes the fresh terminal statement (FIFO).
+    expect(afterSweep.indexOf(states[0] as never)).toBeLessThan(afterSweep.indexOf(terminals[1] as never));
     adapter.dispose();
   });
 });

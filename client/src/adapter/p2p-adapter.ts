@@ -2399,8 +2399,13 @@ export class P2PHostAdapter implements EngineAdapter {
    * CURRENT authoritative state as a plain `state_update`. The missed frame's
    * events and log entries are not replayed — the full state is the recovery;
    * animations and the seat's game log are not, and the log keeps that hole.
-   * Never rejects: a failure leaves the ledger entry stale and the next
-   * sweep retries, for as long as the seat stays connected.
+   * If the game has already closed, the seat also gets a freshly committed
+   * `terminal_result` AFTER the healing state frame: the one-shot terminal
+   * fan-out ran against the seat's stale revision, and `acceptTerminalResult`
+   * refuses a revision mismatch, so without this the seat would hold the
+   * final board but never a committed result. Never rejects: a failure
+   * leaves the ledger entry stale and the next sweep retries, for as long
+   * as the seat stays connected.
    */
   private async redeliverGuestState(pid: PlayerId): Promise<void> {
     if (this.disposed || !this.ownsAuthority()) return;
@@ -2417,7 +2422,17 @@ export class P2PHostAdapter implements EngineAdapter {
         events: [],
         ...legalActionsToWire(handoff.snapshot.legalResult),
       });
-      if (accepted) this.recordGuestDelivery(pid, handoff.revision);
+      if (!accepted) return;
+      if (this.terminalResult !== null) {
+        // Recipient-bound, like the reconnect path: `terminalResultForRecipient`
+        // verifies the terminal revision against this handoff and throws
+        // otherwise — the catch below turns that into a retry. The ledger
+        // advances only once BOTH frames are accepted, so a refused or failed
+        // terminal send re-nominates the seat on the next sweep.
+        const result = await this.terminalResultForRecipient(pid, handoff.snapshot.state, handoff.revision);
+        if (!(await this.send(session, { type: "terminal_result", result }))) return;
+      }
+      this.recordGuestDelivery(pid, handoff.revision);
     } catch (err) {
       console.warn(`[P2PHost] state redelivery for seat ${pid} failed; retrying on the next sweep:`, err);
     }
@@ -2426,11 +2441,12 @@ export class P2PHostAdapter implements EngineAdapter {
   /**
    * Emit the host's own `stateChanged` for an applied submission.
    *
-   * Call this BEFORE `broadcastStateUpdate`, never after (#7924). Every caller
-   * runs the fan-out inside a `try`, and the fan-out can still reject at its
-   * close: the host snapshot read feeding `commitTerminalIfComplete`
-   * (`broadcastStateUpdateInner` above — its per-guest viewer reads are caught
-   * per seat and settle into the delivery ledger instead). Emitting
+   * Call this BEFORE `broadcastStateUpdate`, never after (#7924). On the
+   * guest-message paths the fan-out runs inside a `try`, and it can still
+   * reject at its close: the host snapshot read feeding
+   * `commitTerminalIfComplete`, and that commit's own recipient-bound reads
+   * (`broadcastStateUpdateInner`'s per-seat viewer reads, by contrast, are
+   * caught per seat and settle into the delivery ledger). Emitting
    * afterwards therefore makes the host's own screen depend on work done on
    * every guest's behalf — the host freezes on a board its own engine has
    * already advanced.
@@ -2442,9 +2458,11 @@ export class P2PHostAdapter implements EngineAdapter {
    * matters for the per-viewer snapshot and the terminal commit.
    *
    * **This never rejects.** Running before the fan-out would otherwise turn a
-   * failed local read into a stalled delivery: the guests would wait out a
-   * redelivery sweep for an action the engine has already applied, and their
-   * watchdog cannot bridge that gap (`game/staleStateWatchdog.ts` — its check
+   * failed local read into a stalled delivery: the fan-out is the only step
+   * that advances the authoritative revision, so skipping it leaves even the
+   * redelivery sweep with nothing to nominate — the guests hear nothing until
+   * the next action — and their watchdog cannot bridge that gap
+   * (`game/staleStateWatchdog.ts` — its check
    * compares screen against the adapter cache, and an undelivered update
    * leaves both equally stale). Symmetry is the whole point of the ordering:
    * on THIS path neither side may starve the other, so a failure here is

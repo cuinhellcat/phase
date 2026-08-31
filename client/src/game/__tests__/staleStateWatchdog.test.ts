@@ -46,7 +46,8 @@ function loggedLineIncluding(fragment: string): boolean {
 // snapshot. They do NOT prove the original pod-draft incident (a rejected
 // delivery freezing the host on the mulligan overlay) end-to-end — that
 // failure needs a real P2P match; the delivery `.catch` sites and the
-// emit-before-AI-loop reorder in `p2p-adapter.ts` cover it by construction.
+// emit-before-fan-out/AI-loop reorder in `p2p-adapter.ts` cover it by
+// construction.
 
 function stateAt(turn: number, priorityPlayer: number): GameState {
   return {
