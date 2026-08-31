@@ -12,8 +12,9 @@
 //! that permanent (see rule 611.2b) end when that permanent phases out because
 //! they can no longer see it."
 //!
-//! Both tests are discriminating, in opposite directions (all three probes
-//! below measured as full `--lib` + `--test integration` pairs):
+//! Both tests are discriminating, in opposite directions (each of the three
+//! mutations in the first bullet measured as a full `--lib` +
+//! `--test integration` pair):
 //!   * Revert the parser split (map "remains on the battlefield" back onto
 //!     `UntilHostLeavesPlay`) or drop the `WhileHostOnBattlefield` filter leg
 //!     from `transient_effect_is_live` → the steal visibly survives the

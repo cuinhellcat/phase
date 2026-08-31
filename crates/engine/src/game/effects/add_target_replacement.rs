@@ -19,8 +19,11 @@ use crate::types::replacements::ReplacementEvent;
 pub(crate) enum ReplacementDurationExpiry {
     Unstated,
     Explicit(RestrictionExpiry),
-    /// The duration is enforced by a separate applicability gate rather than an
-    /// expiry prune (`UntilHostLeavesPlay` on the untap-prevention rider).
+    /// The duration is enforced by a separate applicability gate rather than
+    /// an expiry prune — the control gate on the bare untap-prevention rider
+    /// (`stamp_for_as_long_as_controlled_gate`); an install whose replacement
+    /// cannot carry that gate fails closed in
+    /// `replacement_with_ability_expiry`.
     GateControlled,
     Unsupported,
 }
@@ -290,8 +293,8 @@ fn concretize_parent_copy_target(
 /// ACKNOWLEDGED CR 611.2b GAP (unreachable today): a presence-bound or
 /// event-deadline untap rider routed here would receive the CONTROL gate and
 /// so end early on a control change of its source — over-gated for those
-/// sub-classes. The census (exactly one host-duration
-/// `AddTargetReplacement` node, Spider-Woman's control-bound rider) is what
+/// sub-classes. The census (exactly one `AddTargetReplacement` node under a
+/// host-bound ABILITY duration, Spider-Woman's control-bound rider) is what
 /// keeps this named rather than repaired.
 ///
 /// The duration axis is consumed from `expiry_from_duration` — the same

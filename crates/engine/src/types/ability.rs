@@ -4239,9 +4239,11 @@ pub enum CastingPermission {
         /// CR 611.2a + CR 400.7: Mirrors `ExileWithAltCost.source_id` — the
         /// identity of the permanent whose continued presence (and, for
         /// `Duration::WhileControllingHost`, continued control) bounds
-        /// `duration`. Stamped for every grant its builder emits; only
-        /// consulted for a host-bound `duration`, and `None` on grants
-        /// serialized before the field existed.
+        /// `duration`. Stamped for every grant its builder emits; the
+        /// battlefield-exit pass consults it only after
+        /// `ends_when_host_leaves_play` affirms the duration, other deadline
+        /// prunes (the exile-link pass) read it for their own durations, and
+        /// grants serialized before the field existed carry `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
     },
