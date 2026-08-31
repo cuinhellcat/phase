@@ -2465,9 +2465,13 @@ pub enum EventCounterReproductionCount {
 /// than as sibling `Option` fields on `Effect::Counter` (parameterize, don't
 /// proliferate).
 /// serde default for `CounterSourceRider::LosesAbilities::duration` — keeps
-/// card-data serialized before the field was added deserializing correctly
-/// (CR 611.2a: the loses-abilities effect lasts until the counter source leaves
-/// the battlefield).
+/// card-data serialized before the field was added deserializing correctly.
+/// Deliberately the OLD reading: before the field existed the resolver
+/// hard-coded the CR 702.26d event deadline (`UntilHostLeavesPlay`, running
+/// across a phase-out), so pre-field data keeps exactly the behavior it was
+/// serialized with. The CURRENT parser emits `WhileHostOnBattlefield`
+/// (see the doc on `LosesAbilities`), so freshly parsed data never takes this
+/// default.
 fn duration_until_host_leaves_play() -> Box<Duration> {
     Box::new(Duration::UntilHostLeavesPlay)
 }
@@ -2480,10 +2484,14 @@ pub enum CounterSourceRider {
     /// (Tishana's Tidebinder).
     ///
     /// CR 611.2a: `duration` is the continuous effect's lifetime — Tishana's
-    /// "for as long as this creature remains on the battlefield" is
-    /// `Duration::UntilHostLeavesPlay`. Surfaced as an explicit field (rather
-    /// than hard-coded in the resolver) so the "as long as" clause is visible
-    /// in the serialized AST and threaded to the transient continuous effect.
+    /// "for as long as this creature remains on the battlefield" is the
+    /// presence-bound state reading, `Duration::WhileHostOnBattlefield`
+    /// (emitted by `sequence.rs`'s rider assembly): per CR 611.2b +
+    /// CR 702.26f it also ends when Tishana phases out, not only when she
+    /// leaves the battlefield, and once lapsed it never restarts. Surfaced as
+    /// an explicit field (rather than hard-coded in the resolver) so the
+    /// "as long as" clause is visible in the serialized AST and threaded to
+    /// the transient continuous effect.
     LosesAbilities {
         static_def: Box<StaticDefinition>,
         // Boxed: `Duration` is a large enum, and this rider is embedded in the
@@ -4029,10 +4037,11 @@ pub enum CastingPermission {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
         /// CR 611.2a + CR 400.7: Identity of the permanent whose continued
-        /// presence bounds `duration`. Filled by `record_lingering_permissions`
-        /// from the granting ability's source; `None` for every grant whose
-        /// lifetime is not host-bound (Airbending, Suspend, Discover, Cascade,
-        /// Rebound's `UntilEndOfTurn` offer). Parallel to
+        /// presence bounds `duration`. `record_lingering_permissions` stamps
+        /// it for every grant it builds, host-bound or not; the battlefield-
+        /// exit pass consults it only after `ends_when_host_leaves_play`
+        /// affirms the duration, and grants serialized before the field
+        /// existed carry `None`. Parallel to
         /// `PlayFromExile::source_id`, which the land-play companion of this
         /// same grant already carries, so the cast and land halves of one
         /// `CastFromZone` are revoked by the same battlefield-exit pass
@@ -4230,7 +4239,9 @@ pub enum CastingPermission {
         /// CR 611.2a + CR 400.7: Mirrors `ExileWithAltCost.source_id` — the
         /// identity of the permanent whose continued presence (and, for
         /// `Duration::WhileControllingHost`, continued control) bounds
-        /// `duration`. `None` for every grant whose lifetime is not host-bound.
+        /// `duration`. Stamped for every grant its builder emits; only
+        /// consulted for a host-bound `duration`, and `None` on grants
+        /// serialized before the field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
     },

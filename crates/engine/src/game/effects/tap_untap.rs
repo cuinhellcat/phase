@@ -2232,4 +2232,181 @@ mod tests {
              filter must be selective, not a blanket drop"
         );
     }
+    /// CR 611.2a fail-closed at the install seam: a host-bound duration
+    /// (`WhileControllingHost` / `UntilHostLeavesPlay` /
+    /// `WhileHostOnBattlefield`) on an `AddTargetReplacement` whose
+    /// replacement the control gate cannot enforce — anything but the bare
+    /// untap-prevention rider — must REFUSE the install. Before the guard,
+    /// such a def landed with `expiry: None` and no condition — no lifetime
+    /// the engine can end correctly: in `pending_damage_replacements` (whose
+    /// prunes key on `expiry` only) it outlives its printed window, and on an
+    /// object it lands live-only and is wiped at the next CR 613.1 layer
+    /// reseed, far too early. Either way the printed duration is dropped.
+    ///
+    /// No parser path emits this shape today (full-corpus parse census: every
+    /// host-duration `AddTargetReplacement` is the bare untap rider), so this
+    /// drives the production resolver (`add_target_replacement::resolve`)
+    /// with a constructed ability — the guard exists precisely so parser
+    /// evolution cannot turn the dropped duration into an immortal effect.
+    ///
+    /// REVERT-PROBE (measured): restore `GateControlled => {}` (drop the
+    /// `host_gate_enforceable` check) → the run fails at the FIRST zero-count
+    /// assert, the object-target one; the floating and player arms sit behind
+    /// it on the same seam and are reasoned, not separately measured (their
+    /// pushes are unconditional once the seam returns `Some`). All three call
+    /// sites of `replacement_with_ability_expiry` are exercised. The positive
+    /// control (same duration, bare untap rider) guards against a vacuous
+    /// "refuses everything".
+    #[test]
+    fn host_duration_on_non_untap_replacement_fails_closed() {
+        use crate::types::ability::{Duration, Effect, ReplacementCondition, ResolvedAbility};
+
+        let host_durations = [
+            Duration::WhileControllingHost,
+            Duration::UntilHostLeavesPlay,
+            Duration::WhileHostOnBattlefield,
+        ];
+
+        for duration in host_durations {
+            let mut state = GameState::new_two_player(42);
+            let bear = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Bear".to_string(),
+                Zone::Battlefield,
+            );
+
+            // A `Moved` rider with NO parser-stamped expiry: exactly the shape
+            // that would install lifetime-less under the reverted arm.
+            let rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Moved,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard);
+            let mut install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(bear)],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &install,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                state.objects[&bear]
+                    .replacement_definitions
+                    .iter_all()
+                    .count(),
+                0,
+                "{duration:?}: an unenforceable host-bound duration must refuse the install"
+            );
+            assert!(
+                state.objects[&bear].base_replacement_definitions.is_empty(),
+                "{duration:?}: nothing may reach the base store either"
+            );
+
+            // Floating (`TargetFilter::None`) path — same seam, other call site.
+            let floating = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::DamageDone,
+            );
+            let mut float_install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(floating),
+                    target: TargetFilter::None,
+                },
+                vec![],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            float_install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &float_install,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(
+                state.pending_damage_replacements.is_empty(),
+                "{duration:?}: a floating rider with an unenforceable host-bound \
+                 duration must not reach pending_damage_replacements"
+            );
+
+            // Player-target path — the third call site of the same seam.
+            let player_rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::DamageDone,
+            );
+            let mut player_install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(player_rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            player_install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &player_install,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(
+                state.pending_damage_replacements.is_empty(),
+                "{duration:?}: a player-target rider with an unenforceable \
+                 host-bound duration must not reach pending_damage_replacements"
+            );
+        }
+
+        // Positive control: the bare untap-prevention rider under the SAME
+        // duration installs, carrying the control gate (not refused).
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let untap_rider = crate::types::ability::ReplacementDefinition::new(
+            crate::types::replacements::ReplacementEvent::Untap,
+        );
+        let mut install = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(untap_rider),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(bear)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+        install.duration = Some(Duration::WhileControllingHost);
+        crate::game::effects::add_target_replacement::resolve(
+            &mut state,
+            &install,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let defs: Vec<_> = state.objects[&bear]
+            .replacement_definitions
+            .iter_all()
+            .collect();
+        assert_eq!(defs.len(), 1, "the bare untap rider must still install");
+        assert!(
+            matches!(
+                defs[0].condition,
+                Some(ReplacementCondition::ControllerControlsSource { .. })
+            ),
+            "…and it must carry the control gate, proving the refusal above is \
+             the gate check, not a blanket drop"
+        );
+    }
 }

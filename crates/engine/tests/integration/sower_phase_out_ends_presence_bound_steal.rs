@@ -12,11 +12,15 @@
 //! that permanent (see rule 611.2b) end when that permanent phases out because
 //! they can no longer see it."
 //!
-//! Both tests are discriminating, in opposite directions:
+//! Both tests are discriminating, in opposite directions (all three probes
+//! below measured as full `--lib` + `--test integration` pairs):
 //!   * Revert the parser split (map "remains on the battlefield" back onto
-//!     `UntilHostLeavesPlay`) or drop the presence arm of
-//!     `prune_lapsed_host_bound_effects` → the steal survives the phase-out →
-//!     the first test fails.
+//!     `UntilHostLeavesPlay`) or drop the `WhileHostOnBattlefield` filter leg
+//!     from `transient_effect_is_live` → the steal visibly survives the
+//!     phase-out → the first test fails at its control assert. Drop only the
+//!     presence arm of `prune_lapsed_host_bound_effects` → the filter still
+//!     refuses the steal but the effect stays in the list → the first test
+//!     fails at its ENDED assert instead.
 //!   * Ask the phasing question of EVERY host-bound duration (the over-reach a
 //!     previous review round shipped and reverted) → Banisher Priest's exile
 //!     would end at the phase-out and the exiled creature return early → the

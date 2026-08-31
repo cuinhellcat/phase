@@ -944,8 +944,8 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
                 //
                 // Every other shape ends somewhere else, and each names where.
                 // Listed rather than swept into `_` so a new `Duration` variant
-                // is a compile error here too. Every match this PR adds over
-                // the enum is wildcard-free, this one included — one of them
+                // is a compile error here too. Every match this PR introduces
+                // over the enum is wildcard-free, this one included — one of them
                 // behind a wildcard would silently retain a new shape forever,
                 // which is why none of them has one.
                 Duration::UntilHostLeavesPlay

@@ -86,7 +86,27 @@ fn replacement_with_ability_expiry(
                 replacement = replacement.with_resolution_shield_expiry();
             }
             ReplacementDurationExpiry::Explicit(expiry) => replacement.expiry = Some(expiry),
-            ReplacementDurationExpiry::GateControlled => {}
+            // CR 611.2a: `GateControlled` promises that a runtime applicability
+            // gate enforces the host-bound duration — and that gate exists only
+            // for the bare untap-prevention rider
+            // (`stamp_for_as_long_as_controlled_gate`). Any other replacement
+            // shape would install with no lifetime the engine can end
+            // CORRECTLY: a floating or player-bound install sits in
+            // `pending_damage_replacements`, whose prunes key on `expiry` only,
+            // and outlives its printed window; an object install lands
+            // live-only (`install_to_base` is false for this shape) and is
+            // wiped at the next CR 613.1 layer reseed, far too early. Either
+            // way the printed duration is dropped. Fail closed exactly like
+            // `Unsupported` until a typed host lifetime exists for those
+            // shapes. `host_gate_enforceable` answers the form axis for both
+            // this guard and the stamp; the stamp consumes
+            // `expiry_from_duration` for the duration axis, so neither list
+            // exists twice.
+            ReplacementDurationExpiry::GateControlled => {
+                if !host_gate_enforceable(&replacement) {
+                    return None;
+                }
+            }
             // CR 611.2a: do not install a replacement whose stated duration the
             // engine cannot enforce. In particular, never replace it with the
             // end-of-turn fallback, which would shorten the printed window.
@@ -243,50 +263,51 @@ fn concretize_parent_copy_target(
 /// can't become untapped for as long as you control ~.").
 ///
 /// The clause shell peels "for as long as you control ~" onto the ability frame
-/// as `Duration::WhileControllingHost`. For a replacement installed on a DIFFERENT object
-/// (the chosen creature) that mapping is insufficient on its own — nothing
-/// prunes an `UntilHostLeavesPlay` object-installed replacement, and it must end
-/// on a control SWAP of the originating source, not just when it leaves play.
-/// Stamping the gate with the originating source (`ability.source_id`, e.g.
-/// Spider-Woman) and its controller (`ability.controller`) re-checks "you still
-/// control [the source]" on every untap, matching the Master Thief example.
+/// as `Duration::WhileControllingHost`. For a replacement installed on a
+/// DIFFERENT object (the chosen creature) that mapping is insufficient on its
+/// own — an object-installed replacement whose only lifetime statement sits on
+/// the ability frame has no pruner of its own, and the control reading must
+/// end on a control SWAP of the originating source, not just when it leaves
+/// play. Stamping the gate with the originating source (`ability.source_id`,
+/// e.g. Spider-Woman) and its controller (`ability.controller`) re-checks
+/// "you still control [the source]" on every untap, matching the Master Thief
+/// example.
 ///
 /// Tightly scoped: only a bare untap-prevention rider (event `Untap`, no
-/// `execute`, no pre-existing condition) carrying this exact duration is
+/// `execute`, no pre-existing condition) under a `GateControlled` duration is
 /// translated, so unrelated `AddTargetReplacement` installs are untouched.
 ///
-/// The two "for as long as" host wordings are no longer collapsed: the control
-/// reading is `Duration::WhileControllingHost`, the presence reading stays
-/// `Duration::UntilHostLeavesPlay`, so this stamp CAN tell them apart. It still
-/// matches both, deliberately — see the inline comment in the function body.
-/// Narrowing it to the control reading would change shipped behaviour for a
-/// presence-bound untap prevention with no card asking for it, and whether such
-/// a rider should survive a control change is a question about untap
-/// preventions rather than about this split.
+/// The three host wordings are no longer collapsed: the control reading is
+/// `Duration::WhileControllingHost`, the state presence reading is
+/// `Duration::WhileHostOnBattlefield`, and the event deadline is
+/// `Duration::UntilHostLeavesPlay` — so this stamp COULD tell them apart. It
+/// still matches all three, deliberately: no card reaches the two non-control
+/// readings here today (measured over the parse — the printed presence-bound
+/// untap locks, Somnophore's class, lower to a `GenericEffect` transient, not
+/// to this replacement path), so keeping them is parity against the parser
+/// routing changing, not live behavior.
+///
+/// ACKNOWLEDGED CR 611.2b GAP (unreachable today): a presence-bound or
+/// event-deadline untap rider routed here would receive the CONTROL gate and
+/// so end early on a control change of its source — over-gated for those
+/// sub-classes. The census (exactly one host-duration
+/// `AddTargetReplacement` node, Spider-Woman's control-bound rider) is what
+/// keeps this named rather than repaired.
+///
+/// The duration axis is consumed from `expiry_from_duration` — the same
+/// authority the install seam's `GateControlled` arm answers to — and the form
+/// axis from `host_gate_enforceable`, shared with that arm's fail-closed
+/// check. Neither the duration set nor the form predicate exists twice, so a
+/// future duration routed to `GateControlled` reaches this stamp and the
+/// fail-closed guard in the same breath.
 fn stamp_for_as_long_as_controlled_gate(
     replacement: &mut ReplacementDefinition,
     ability: &ResolvedAbility,
 ) {
-    let is_bare_untap_prevention = replacement.event == ReplacementEvent::Untap
-        && replacement.execute.is_none()
-        && replacement.condition.is_none();
-    // CR 611.2b: `WhileControllingHost` is the wording this stamp was written
-    // for ("for as long as you control ~"). The presence readings stay in the
-    // pattern so a wording that reached the gate before either split keeps the
-    // exact gate afterwards. Measured over the parse, no card reaches either
-    // presence arm here today — the printed presence-bound untap locks
-    // (Somnophore's class) lower to a `GenericEffect` transient, not to this
-    // replacement path — so both presence arms are parity against the parser
-    // routing changing, not live behavior. Whether a presence-bound untap
-    // prevention should also survive a control change is a question about
-    // untap preventions, not about these splits, and narrowing it here would
-    // change shipped behavior with no card asking for it.
-    if is_bare_untap_prevention
+    if host_gate_enforceable(replacement)
         && matches!(
-            ability.duration,
-            Some(Duration::WhileControllingHost)
-                | Some(Duration::UntilHostLeavesPlay)
-                | Some(Duration::WhileHostOnBattlefield)
+            expiry_from_duration(ability.duration.as_ref(), ability.controller),
+            ReplacementDurationExpiry::GateControlled
         )
     {
         replacement.condition = Some(ReplacementCondition::ControllerControlsSource {
@@ -294,6 +315,19 @@ fn stamp_for_as_long_as_controlled_gate(
             controller: ability.controller,
         });
     }
+}
+
+/// Whether `stamp_for_as_long_as_controlled_gate` can enforce a host-bound
+/// duration on this replacement's FORM: the bare untap-prevention rider (event
+/// `Untap`, no `execute`, no pre-existing condition). Shared by the stamp and
+/// by `replacement_with_ability_expiry`'s `GateControlled` fail-closed arm, so
+/// a shape the stamp skips can never be installed as if it were gated. The
+/// duration axis is deliberately NOT part of this predicate — it lives in
+/// `expiry_from_duration`, which both consumers also share.
+fn host_gate_enforceable(replacement: &ReplacementDefinition) -> bool {
+    replacement.event == ReplacementEvent::Untap
+        && replacement.execute.is_none()
+        && replacement.condition.is_none()
 }
 
 /// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
