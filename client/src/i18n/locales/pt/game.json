@@ -65,6 +65,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugLibrary": {
+    "openActions": "Abrir ações de depuração para {{name}}"
+  },
   "nextUp": {
     "label": "Próximo",
     "tooltip": "O turno deste jogador é o próximo."
@@ -1941,6 +1944,7 @@
     "title": "Conjure uma mágica de graça",
     "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
     "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "remainingAny": "qualquer quantidade",
     "castNamed": "Conjurar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
     "done": "Concluído",

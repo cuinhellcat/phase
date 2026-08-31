@@ -1683,22 +1683,285 @@ pub enum CastFromZoneDriver {
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
     /// upkeep is not blocked by the sorcery-speed gate (issue #1520).
     DuringResolution,
+    /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
+    /// cards the same resolution just produced ("… from among them") — the
+    /// controller casts up to `bounds.max_casts` of them, one at a time, while
+    /// the granting spell/ability is still resolving, and the window closes when
+    /// that resolution finishes. CR 608.2g is explicit that the currently
+    /// resolving object "continues to resolve, which may include casting other
+    /// spells this way" and that "no other spells can normally be cast … during
+    /// resolution": there is no later priority window in which to exercise this
+    /// permission, which is why the WotC rulings for every card in this class
+    /// say "you can't wait to cast them later in the turn" (Villainous Wealth,
+    /// Hazoret's Undying Fury, Kotis the Fangkeeper, Collected Conjuring,
+    /// Improvisation Capstone, Jace's Mindseeker).
+    ///
+    /// This PARAMETERIZES the during-resolution mechanism rather than
+    /// duplicating it: `DuringResolution` casts exactly the one resolved target,
+    /// while this variant casts a bounded selection from a batch and therefore
+    /// carries the two bounds the batch form needs (CR 608.2c printed cast
+    /// count, CR 202.3 running-total mana-value budget). Both are "cast as the granting
+    /// ability resolves"; neither is a lingering `CastingPermission`.
+    ///
+    /// A stated durational scope (CR 611.2a — Apex of Power's "Until end of
+    /// turn, you may cast spells from among them") is a DIFFERENT class: it
+    /// really does grant a permission exercised at a later priority window, so
+    /// `with_lingering_duration` degrades this variant back to
+    /// `LingeringPermission` when the parser stamps a duration on the grant —
+    /// but only when `bounds` are unbounded. A window that printed a cast cap or
+    /// a running-total budget has no faithful lingering form, so that degrade
+    /// REFUSES (`None`) and the clause becomes an honest gap instead.
+    ResolutionWindow { bounds: ResolutionCastWindow },
+}
+
+/// CR 608.2c + CR 202.3: The two bounds a resolution-scoped free-cast window
+/// (`CastFromZoneDriver::ResolutionWindow`) enforces on the batch it offers.
+///
+/// Both axes are `Option` because Oracle text states them independently:
+/// "you may cast ANY NUMBER of spells" leaves `max_casts` unbounded, "you may
+/// cast UP TO TWO sorcery spells" bounds it at 2, and a singular "you may cast
+/// AN instant or sorcery spell" bounds it at 1. `max_total_mv` is the CR 202.3
+/// cross-selection running total ("with TOTAL mana value 10 or less" — Primeval
+/// Spawn), which is a different axis from the PER-SPELL ceiling ("with mana
+/// value 5 or less" — Hazoret's Undying Fury); the per-spell ceiling stays on
+/// `Effect::CastFromZone::constraint`, where every other cast permission already
+/// carries it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResolutionCastWindow {
+    /// CR 608.2c: Maximum number of spells castable this way, as printed; `None`
+    /// is the "any number of spells" form (bounded in practice only by the batch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_casts: Option<u8>,
+    /// CR 202.3: Running-total mana-value budget shared across every spell cast
+    /// this way; `None` when the clause states no total cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_mv: Option<u32>,
+}
+
+impl ResolutionCastWindow {
+    /// The batch-wide bounds of a clause that prints NO cast cap and no
+    /// running-total budget ("you may cast any number of spells from among
+    /// them"). Every mechanism can represent this faithfully, because there is
+    /// nothing to represent.
+    pub const UNBOUNDED: Self = Self {
+        max_casts: None,
+        max_total_mv: None,
+    };
+
+    /// CR 608.2c + CR 202.3: `true` when the clause printed no batch-wide bound
+    /// at all. The single predicate `CastFromZoneDriver::for_batch_bounds` uses
+    /// to decide whether a countless mechanism may carry these bounds, so a new
+    /// bound axis added to this struct is a compile-time-visible change to that
+    /// decision rather than a silent widening.
+    pub fn is_unbounded(&self) -> bool {
+        let Self {
+            max_casts,
+            max_total_mv,
+        } = self;
+        max_casts.is_none() && max_total_mv.is_none()
+    }
+
+    /// CR 608.2c: `true` when the clause printed a cap of exactly one cast and
+    /// no other bound — the ONLY bound a single-card during-resolution
+    /// mechanism can enforce, because that mechanism casts exactly one card.
+    pub fn is_exactly_one_cast(&self) -> bool {
+        let Self {
+            max_casts,
+            max_total_mv,
+        } = self;
+        *max_casts == Some(1) && max_total_mv.is_none()
+    }
+
+    /// A human-readable rendering of the printed bounds, used as the description
+    /// of the honest gap node a refusing caller emits. Diagnostic only.
+    pub fn describe_bound(&self) -> String {
+        match (self.max_casts, self.max_total_mv) {
+            (Some(casts), Some(mv)) => {
+                format!("up to {casts} casts with total mana value {mv} or less")
+            }
+            (Some(casts), None) => format!("up to {casts} casts"),
+            (None, Some(mv)) => format!("total mana value {mv} or less"),
+            (None, None) => "no printed bound".to_string(),
+        }
+    }
+}
+
+/// CR 608.2g vs CR 611.2a: the casting MECHANISM a cast-from-zone lowering wants,
+/// stated independently of the batch-wide bounds it must then enforce.
+///
+/// This exists so that "which mechanism does this Oracle grammar describe?" and
+/// "can that mechanism actually enforce the bound the card prints?" are two
+/// separate decisions, joined at exactly one place
+/// ([`CastFromZoneDriver::for_batch_bounds`]). A call site names the mechanism
+/// its grammar implies and is then *told* whether that mechanism is legal for
+/// these bounds; it never gets to decide that for itself, and it cannot
+/// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CastMechanism {
+    /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
+    /// priority window. Chosen for paid batch casts (the free-cast window
+    /// primitive models no mana payment), CR 305.1 land plays (no
+    /// during-resolution mechanism exists), and any clause that states a
+    /// durational scope.
+    LingeringPermission,
+    /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
+    /// self-library-peek form ("look at the top four cards of your library. You
+    /// may cast a spell from among them …"), whose private-library selection
+    /// also owns the "put the rest on the bottom" cleanup.
+    SingleCardDuringResolution,
+    /// CR 608.2g: exactly one card, chosen from a PRIVATE zone the resolution
+    /// just revealed — the hand-bound `from among those cards` anaphor
+    /// (Silent-Blade Oni, Mindclaw Shaman, Mindleech Mass: "look at that
+    /// player's hand. You may cast a spell from among those cards …"). The cards
+    /// never leave that hand, so there is no exiled batch for a
+    /// resolution-scoped window to offer.
+    ///
+    /// Its `CastFromZoneDriver` value is the `LingeringPermission` default
+    /// because the router does not dispatch this form on the driver at all: it
+    /// reaches `open_private_zone_cast_selection` through the empty-target
+    /// private-zone tail in `game/effects/cast_from_zone.rs`, which opens
+    /// `WaitingFor::EffectZoneChoice { count: 1, min_count: 0, up_to: true }`.
+    /// THAT is what enforces the printed cap of one, which is why this is a
+    /// distinct mechanism from `LingeringPermission` and not an alias for it:
+    /// the two share a driver value but not a counting capability, and this enum
+    /// records the capability.
+    ResolutionTimePrivateZonePick,
+    /// CR 608.2g: a resolution-scoped free-cast window over the batch, bounded
+    /// by `ResolutionCastWindow`.
+    ResolutionWindow,
 }
 
 impl CastFromZoneDriver {
+    /// CR 608.2c + CR 202.3 + CR 608.2g: **the single authority pairing a
+    /// casting mechanism with the batch-wide bounds it must enforce.** Returns
+    /// `None` when no driver of `mechanism` can enforce `bounds` — the caller
+    /// MUST then refuse the clause (an honest `Effect::Unimplemented` gap), and
+    /// must NOT substitute a different mechanism, because every substitution
+    /// available here is strictly more permissive than the printed instruction.
+    ///
+    /// # Why this function exists
+    ///
+    /// A printed cast bound is only meaningful if the mechanism that ends up
+    /// running can count. The capacity table is a property of the *runtime*, not
+    /// of any one parser branch:
+    ///
+    /// | mechanism | bounds it can enforce | why |
+    /// |---|---|---|
+    /// | [`CastMechanism::LingeringPermission`] | unbounded only | `record_lingering_permissions` writes an INDEPENDENT `CastingPermission` per object (`game/effects/cast_from_zone.rs`). There is no grant-scoped ledger, so `N` of a batch of `M > N` cannot be enforced — the controller may cast all `M`. |
+    /// | [`CastMechanism::SingleCardDuringResolution`] | exactly one cast | `initiate_cast_during_resolution` puts exactly one card on the stack. It cannot reach `N > 1`, and it cannot honor an unbounded clause either. |
+    /// | [`CastMechanism::ResolutionTimePrivateZonePick`] | exactly one cast | `open_private_zone_cast_selection` opens `EffectZoneChoice { count: 1, up_to: true }`. Same one-card ceiling, enforced by the private-zone tail rather than by the driver. |
+    /// | [`CastMechanism::ResolutionWindow`] | any bounds | `Effect::FreeCastFromZones`' stop-early loop reads `ResolutionCastWindow` directly. |
+    ///
+    /// Every previous defect in this family was a call site that knew the bound
+    /// and then chose a mechanism that had nowhere to put it. Routing the choice
+    /// through one function makes the drop impossible to express: a call site
+    /// states its mechanism and receives either a driver that provably carries
+    /// the bound, or a refusal.
+    pub fn for_batch_bounds(
+        mechanism: CastMechanism,
+        bounds: ResolutionCastWindow,
+    ) -> Option<Self> {
+        match mechanism {
+            // CR 118.9: per-object permissions with no shared budget. Only a
+            // clause that prints no bound at all is represented faithfully.
+            CastMechanism::LingeringPermission => {
+                bounds.is_unbounded().then_some(Self::LingeringPermission)
+            }
+            // CR 608.2g: exactly one card reaches the stack, so this mechanism
+            // is honest for an exact single-card cap and for nothing else — not
+            // for `N > 1` (under-permissive), and not for an unbounded clause.
+            CastMechanism::SingleCardDuringResolution => bounds
+                .is_exactly_one_cast()
+                .then_some(Self::DuringResolution),
+            // CR 608.2g: the private-zone pick is likewise a one-card ceiling.
+            // Its DRIVER value is the `LingeringPermission` default (the router
+            // reaches this form through the empty-target private-zone tail, not
+            // through the driver), but its counting CAPABILITY is one — so it is
+            // matched separately here and must not be folded into the
+            // `LingeringPermission` arm above, which accepts only unbounded.
+            CastMechanism::ResolutionTimePrivateZonePick => bounds
+                .is_exactly_one_cast()
+                .then_some(Self::LingeringPermission),
+            // CR 608.2c + CR 202.3: the window is the one mechanism with count
+            // and running-total channels, so it carries every bound.
+            CastMechanism::ResolutionWindow => Some(Self::ResolutionWindow { bounds }),
+        }
+    }
+
+    /// Serde skip predicate — the `LingeringPermission` default is the common
     /// Serde skip predicate — the `LingeringPermission` default is the common
     /// case and is elided from serialized `Effect::CastFromZone` bodies.
     pub fn is_default(&self) -> bool {
         matches!(self, CastFromZoneDriver::LingeringPermission)
     }
 
-    /// CR 608.2g: true iff this effect casts the card as the granting ability
-    /// resolves (Suspend's last-counter cast), rather than granting a lingering
-    /// permission.
+    /// CR 608.2g: true iff this effect casts the SINGLE resolved target as the
+    /// granting ability resolves (Suspend's last-counter cast), rather than
+    /// granting a lingering permission.
+    ///
+    /// Deliberately false for `ResolutionWindow`: that variant is also a
+    /// during-resolution cast, but it drives the bounded multi-cast window
+    /// (`window_bounds`) instead of the single-target routes this predicate
+    /// gates, and every existing caller of this predicate assumes exactly one
+    /// resolved target.
     pub fn is_during_resolution(&self) -> bool {
         matches!(self, CastFromZoneDriver::DuringResolution)
     }
+
+    /// CR 608.2g + CR 608.2c + CR 202.3: The bounds of the resolution-scoped
+    /// free-cast window this driver opens, or `None` for the two single-card
+    /// mechanisms. The single authority the `cast_from_zone` router reads to
+    /// decide whether to convert the grant into an `Effect::FreeCastFromZones`
+    /// window over the batch.
+    pub fn window_bounds(&self) -> Option<ResolutionCastWindow> {
+        match self {
+            CastFromZoneDriver::ResolutionWindow { bounds } => Some(*bounds),
+            _ => None,
+        }
+    }
+
+    /// CR 611.2a: Reconcile this driver with a durational scope the parser
+    /// stamped on the grant AFTER the clause body was lowered (a leading
+    /// "Until end of turn, …" via `with_clause_duration`, or a stripped trailing
+    /// "… this turn"). A stated duration means the controller casts at a LATER
+    /// priority window, which is the defining property of a lingering
+    /// permission — so a resolution-scoped window degrades to one. The two
+    /// single-card mechanisms are unchanged here; the paid-cast downgrade has
+    /// its own narrower guard at the clause seam.
+    ///
+    /// `None` is a REFUSAL, and the fallible return type is the point: the
+    /// degrade is expressed as `for_batch_bounds(LingeringPermission, …)`, so a
+    /// window that printed a cast cap or a CR 202.3 running-total budget cannot
+    /// be silently downgraded into a per-object permission that has nowhere to
+    /// put it. Callers must turn `None` into an honest gap
+    /// (`CAST_BOUND_LOST_TO_DURATION_GAP`), never into a driver. This is the
+    /// reconciliation half of the same choke point `for_batch_bounds` is the
+    /// selection half of; making it `Option` is what forces every present and
+    /// future downgrade site to face the question at compile time.
+    pub fn with_lingering_duration(self) -> Option<Self> {
+        match self {
+            CastFromZoneDriver::ResolutionWindow { bounds } => {
+                Self::for_batch_bounds(CastMechanism::LingeringPermission, bounds)
+            }
+            // CR 608.2g: the two single-card mechanisms carry no batch bound to
+            // lose, so a stated duration leaves them untouched (the paid
+            // `DuringResolution` → lingering move for a chosen single target
+            // — Emry, Lurker in the Loch — has its own narrower guard at the
+            // trailing-duration seam, which runs before this call).
+            other => Some(other),
+        }
+    }
 }
+
+/// CR 608.2c + CR 611.2a: The parser gap name for a cast clause whose printed
+/// batch bound is lost when a stated duration forces the grant onto the
+/// per-object lingering mechanism. A single constant so the parser, the
+/// regression suite, and any later coverage audit all name the same gap, and so
+/// it stays distinguishable from `unrepresentable_cast_cap` (a bound the
+/// representation cannot express *at all*) — here the bound is perfectly
+/// representable and the *mechanism the duration selects* is what cannot hold
+/// it.
+pub const CAST_BOUND_LOST_TO_DURATION_GAP: &str = "duration_scoped_cast_bound";
 
 /// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
 /// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
@@ -4305,7 +4568,12 @@ pub enum ResolutionCastSuccessAction {
     /// recomputed from the controller's current graveyard/hand.
     FreeCastOfferRemaining {
         controller: PlayerId,
-        remaining_casts: u8,
+        /// CR 608.2c: Casts still available in the window, or `None` for the
+        /// unbounded "any number of spells" form — the same encoding as
+        /// `Effect::FreeCastFromZones::count`, carried unchanged through every
+        /// re-offer so an unbounded window never acquires an artificial cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_casts: Option<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remaining_mv_budget: Option<u32>,
         filter: TargetFilter,
@@ -6294,14 +6562,12 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
-    /// CR 603.2 + CR 120.1: Resolves to the object that *received* the damage
-    /// referenced by the current trigger event — the recipient counterpart to
-    /// [`TargetFilter::TriggeringSource`] and the `TargetFilter`-side analogue of
-    /// [`ObjectScope::EventTarget`]. This binds "that creature" / "that
-    /// permanent" in an intervening-`if` (CR 603.4) to the *specific* damaged
-    /// object carried by the `DamageDealt` event, not a generic type filter, so
-    /// "if that creature was dealt excess damage this turn" (Maarika, Brutal
-    /// Gladiator) checks only the creature this trigger's damage went to.
+    /// CR 603.2: Resolves to the object targeted or receiving the current
+    /// trigger event — the target counterpart to [`TargetFilter::TriggeringSource`]
+    /// and the `TargetFilter`-side analogue of [`ObjectScope::EventTarget`].
+    /// This binds "that creature" / "that permanent" in an intervening-`if`
+    /// (CR 603.4) to the event's *specific* object, not a generic type filter.
+    /// It covers damage recipients and objects that become targets.
     /// Resolved via `extract_target_object_from_event` against
     /// `state.current_trigger_event`; matches no object outside a trigger.
     /// DealDamage has a narrow CR 115.10a / CR 120.3 exception for "that
@@ -6756,14 +7022,12 @@ pub enum ObjectScope {
     /// resolution-local state carried by `ResolvedAbility.amassed_army_object`,
     /// not the generic demonstrative/effect-context slot.
     AmassedArmy,
-    /// CR 603.2 + CR 120.1: The object that **received** the damage referenced
-    /// by the current trigger event — the recipient counterpart to
-    /// [`ObjectScope::EventSource`]. This is "that creature" in "deals
-    /// noncombat damage to a creature equal to that creature's toughness":
-    /// the antecedent is the damaged object carried by the `DamageDealt` event,
-    /// not the ability source or a target. Resolved at both trigger detection
-    /// and resolution (CR 603.4 intervening-if) via
-    /// `extract_target_object_from_event`.
+    /// CR 603.2: The object targeted or receiving the current trigger event —
+    /// the target counterpart to [`ObjectScope::EventSource`]. This includes a
+    /// damage recipient and a permanent that becomes a spell or ability target;
+    /// the antecedent is the event's carried object, not the ability source or
+    /// a newly chosen target. Resolved at both trigger detection and resolution
+    /// (CR 603.4 intervening-if) via `extract_target_object_from_event`.
     EventTarget,
     /// CR 608.2c + CR 701.20b + CR 108.3 + CR 202.3: In an exactly-two-target
     /// symmetric reveal ("two target players each reveal the top card of their
@@ -9482,6 +9746,76 @@ pub(crate) enum ConditionContinuation {
     PendingCast,
 }
 
+impl StaticMode {
+    /// Engine limitation, not CR-mandated: does THIS static mode's ENFORCEMENT
+    /// POINT actually run `continuation`?
+    ///
+    /// This is the mode-side half of the [`ConditionContinuation`] contract. A
+    /// leaf that needs a continuation ([`StaticCondition::required_continuation`])
+    /// is satisfiable only where the enforcement point runs it; everywhere else
+    /// the layer pipeline can only ever return its degenerate `false`, so a
+    /// parser that attaches such a leaf reports a condition "supported" that no
+    /// player can ever satisfy.
+    ///
+    /// Dispatching on the CONTINUATION (two variants, each naming the one
+    /// runtime site that provides it) rather than on `StaticMode` (122 variants)
+    /// is deliberate: the fact being encoded is "which enforcement point runs
+    /// this round-trip", and each answer is verifiable by reading that one site.
+    /// A 122-arm match would instead demand a guess per mode, and a wrong guess
+    /// in either direction is a defect — `false` demotes working cards to
+    /// unsupported, `true` re-creates the false green. Adding a
+    /// `ConditionContinuation` variant IS a compile error here.
+    pub(crate) fn provides_continuation(&self, continuation: ConditionContinuation) -> bool {
+        match continuation {
+            // CR 118.12a + CR 508.1h-j / CR 509.1d-f: the payment is OFFERED
+            // exactly once — CR 509.1d "if any of the chosen creatures require
+            // paying costs to block, the defending player determines the total
+            // cost to block" (CR 508.1h is the attack-side twin) — and
+            // CR 118.12a + CR 508.1d / CR 509.1c make that offer the whole
+            // enforcement mechanism, since the player is never REQUIRED to pay.
+            // The engine runs it in one place: `combat::combat_tax_mode_matches`
+            // / `WaitingFor::CombatTaxPayment` at attack/block declaration, and
+            // that site inspects exactly these three modes. Any other mode —
+            // `CantBeBlocked` (Awesome Presence), `BlockRestriction`
+            // (Hipparion), `CantUntap`, `CantBeActivated`, … — has no prompt,
+            // so an `UnlessPay` gate on it is unsatisfiable by construction.
+            // Kept in sync with combat.rs by
+            // `combat::tests::combat_tax_mode_match_agrees_with_provides_continuation`.
+            ConditionContinuation::OptionalCostPayment => matches!(
+                self,
+                StaticMode::CantAttack | StaticMode::CantBlock | StaticMode::CantAttackOrBlock
+            ),
+            // CR 601.2f: `casting::collect_self_spell_cost_modifiers` reads
+            // `state.pending_cast` while a cast of the source object is in
+            // flight. CR 502.3's untap step is the one enforcement point that
+            // has been AUDITED to lack it (PR #8012 round 5): it is a turn-based
+            // action, so there is never a cast in flight. Every other mode is
+            // left un-gated on this axis rather than guessed at — a wrong
+            // `false` here would demote working cost-modifier cards
+            // (`ModifyCost`, `CastWithAlternativeCost`, …) to unsupported.
+            // Narrowing this arm requires the same per-mode audit combat.rs got.
+            ConditionContinuation::PendingCast => !matches!(self, StaticMode::CantUntap),
+        }
+    }
+
+    /// Engine limitation, not CR-mandated: can THIS static mode's enforcement
+    /// point bind a scoped-player designation anchor
+    /// ([`StaticCondition::has_unbindable_designation_anchor`])?
+    ///
+    /// Separate axis from [`Self::provides_continuation`]: a designation anchor
+    /// needs a RECIPIENT (or a triggering event) to resolve "that player"
+    /// against, which recipient-bearing evaluators
+    /// (`game::layers::evaluate_condition_with_recipient`) supply and the plain
+    /// `evaluate_condition` does not. CR 502.3's untap step is the one
+    /// enforcement point audited to lack it (PR #8012 rounds 3-4); every other
+    /// mode is left un-gated rather than guessed at, for the same reason as
+    /// above. Widening this needs a per-mode audit of which evaluator each
+    /// enforcement point calls.
+    pub(crate) fn binds_scoped_player_anchor(&self) -> bool {
+        !matches!(self, StaticMode::CantUntap)
+    }
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -10006,7 +10340,7 @@ impl StaticCondition {
     /// latent false green in every gate that consults this.
     ///
     /// Boolean combinators return `None`; the tree-level view
-    /// ([`Self::requires_out_of_layer_continuation`]) walks them.
+    /// ([`Self::requires_unavailable_continuation`]) walks them.
     pub(crate) fn required_continuation(&self) -> Option<ConditionContinuation> {
         match self {
             // CR 118.12a: resolved by `WaitingFor::CombatTaxPayment` at
@@ -10088,18 +10422,56 @@ impl StaticCondition {
         }
     }
 
-    /// True when this condition, or a Boolean sub-condition of it at ANY
-    /// nesting depth, has a leaf whose truth is decided by an out-of-layer
-    /// [`ConditionContinuation`].
+    /// True when this condition, or a Boolean sub-condition of it at ANY nesting
+    /// depth, has a leaf whose truth is decided by a [`ConditionContinuation`]
+    /// that `mode`'s enforcement point does NOT run
+    /// ([`StaticMode::provides_continuation`]).
     ///
-    /// Callers must only use this where the enforcement point does NOT run the
-    /// continuation in question. The untap step (CR 502.3) is such a point: it
-    /// is a turn-based action with no cast in flight and no payment prompt, so
-    /// BOTH continuations are unavailable and any such leaf is unsatisfiable
-    /// there. The combat-tax and self-spell-cost gates deliberately do NOT call
-    /// this — they are the continuations.
-    pub(crate) fn requires_out_of_layer_continuation(&self) -> bool {
-        self.any_leaf(|leaf| leaf.required_continuation().is_some())
+    /// The mode parameter is load-bearing, not decoration: the same leaf is
+    /// legitimate on one mode and unsatisfiable on another. A CR 118.12a
+    /// `UnlessPay` is exactly right on `CantAttack` (Ghostly Prison —
+    /// `WaitingFor::CombatTaxPayment` prompts for it at declaration) and a false
+    /// green on `CantBeBlocked` (Awesome Presence) or `BlockRestriction`
+    /// (Hipparion), where no prompt exists and the layer pipeline returns
+    /// `false` forever. An earlier mode-blind form of this view was the reason
+    /// those two cards stayed falsely "supported" after the untap-step fix.
+    ///
+    /// The enforcement points that DO run a continuation
+    /// (`game::combat::compute_combat_tax`,
+    /// `game::casting::collect_self_spell_cost_modifiers`) deliberately never
+    /// consult this — they are the continuations.
+    pub(crate) fn requires_unavailable_continuation(&self, mode: &StaticMode) -> bool {
+        self.any_leaf(|leaf| {
+            leaf.required_continuation()
+                .is_some_and(|continuation| !mode.provides_continuation(continuation))
+        })
+    }
+
+    /// Engine limitation, not CR-mandated: the ACCEPTANCE PREDICATE — can this
+    /// condition ever be satisfied at `mode`'s enforcement point?
+    ///
+    /// The union of the two rejection classes, and the single authority both
+    /// consumers read:
+    ///
+    /// - `oracle_static::static_helpers::gate_static_condition` — the PARSER
+    ///   gate, which substitutes the honest gap marker when this is true.
+    /// - `database::CardDatabase::export_integrity_errors` — the corpus-wide
+    ///   CI gate, which fails the shipped export when any face still carries
+    ///   one.
+    ///
+    /// Having both read ONE predicate is the point. The parser gate is a
+    /// call-site discipline — it only fires where a call site routes through it
+    /// — and that discipline has now been breached three separate times
+    /// (PR #8012's `CantUntap`-only gate; the `" unless "` split in
+    /// `evasion::parse_subject_rule_static`; the `"as long as"` conditional
+    /// continuous grant in `grammar::parse_enchanted_equipped_predicate`). A
+    /// predicate the export must satisfy no matter WHICH parser route built the
+    /// definition converts that discipline into an invariant: a fourth bypass
+    /// fails CI on the card that reaches it instead of shipping as a false
+    /// green.
+    pub(crate) fn is_unenforceable_on(&self, mode: &StaticMode) -> bool {
+        self.requires_unavailable_continuation(mode)
+            || (!mode.binds_scoped_player_anchor() && self.has_unbindable_designation_anchor())
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -10151,7 +10523,7 @@ impl StaticCondition {
     /// Single authority for tree recursion over `StaticCondition`. Every
     /// tree-level view — [`Self::contains_unrecognized`],
     /// [`Self::unrecognized_texts`], [`Self::has_unbindable_designation_anchor`],
-    /// [`Self::requires_out_of_layer_continuation`] — is DERIVED from this one
+    /// [`Self::requires_unavailable_continuation`] — is DERIVED from this one
     /// walk rather than reimplementing its own `And`/`Or`/`Not` recursion.
     /// Parallel walks are exactly how a nested `Unrecognized` came to be seen by
     /// one coverage check and missed by another (PR #8012, review rounds 2-5):
@@ -15219,7 +15591,8 @@ pub enum Effect {
     },
     /// CR 608.2g + CR 601.2 + CR 118.9: Open an interactive "free-cast window"
     /// during this spell/ability's resolution: the controller may cast up to
-    /// `count` spells matching `filter` from any of `zones` (their own
+    /// `count` spells (or ANY NUMBER when `count` is `None`) matching `filter`
+    /// from any of `zones` (their own
     /// graveyard and/or hand), each without paying its mana cost, casting them
     /// one at a time during resolution (CR 608.2g — "casting other spells this
     /// way"). When `max_total_mv` is `Some(n)`, the *running total* mana value
@@ -15237,8 +15610,23 @@ pub enum Effect {
     /// is no target slot; candidates are gathered by `filter` across `zones` at
     /// resolution time. Invoke Calamity is the type specimen.
     FreeCastFromZones {
-        /// CR 601.2: Maximum number of spells the controller may cast this way.
-        count: u8,
+        /// CR 608.2c: Maximum number of spells the controller may cast this way,
+        /// as printed, or `None` for the UNBOUNDED "any number of spells" form.
+        ///
+        /// The encoding is deliberately identical to
+        /// `ResolutionCastWindow::max_casts`, the parsed bound this field is
+        /// populated from: `None` there already means "any number of spells",
+        /// so carrying `Option<u8>` end-to-end makes the conversion a
+        /// pass-through instead of a lossy `unwrap_or(pool.len() as u8)`. The
+        /// previous `u8` had no unbounded value, so an unbounded window over a
+        /// pool larger than 255 silently truncated to 255 casts and stranded
+        /// every eligible card past the cap — a cap no printed instruction states.
+        ///
+        /// Serde: a bare number still deserializes as `Some(n)` (`Option`'s
+        /// `visit_some`), so pre-existing serialized `"count": 2` bodies and
+        /// generated card data keep their meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u8>,
         /// CR 202.3: Optional running-total mana-value budget shared across all
         /// spells cast this way. `None` means no MV cap.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23355,10 +23743,60 @@ pub struct EffectResolutionResult {
     pub count: usize,
 }
 
+/// CR 608.2c: Objects produced by a `forward_result` instruction, retained for
+/// the remainder of that resolution chain. This is distinct from declared
+/// targets: a producer may move zero objects (`Some(vec![])`), and that result
+/// must not fall back to an earlier target selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedResultContext {
+    pub targets: Vec<TargetRef>,
+    /// CR 400.7: Exact identities of object results at the moment the producer
+    /// completed. A later continuation must not bind a new incarnation that
+    /// reused the same storage `ObjectId`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+impl ForwardedResultContext {
+    /// Capture the complete ordered object result of a forwarding instruction.
+    pub fn from_object_ids(
+        state: &crate::types::game_state::GameState,
+        object_ids: &[ObjectId],
+    ) -> Self {
+        Self {
+            targets: object_ids.iter().copied().map(TargetRef::Object).collect(),
+            object_incarnations: object_ids
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(ObjectIncarnationRef::from_object))
+                .collect(),
+        }
+    }
+
+    /// CR 400.7: A forwarded object referent remains valid only while its
+    /// producer-time incarnation is still current. Unpinned legacy payloads
+    /// remain readable for wire compatibility.
+    pub fn object_pin_is_current(
+        &self,
+        id: ObjectId,
+        state: &crate::types::game_state::GameState,
+    ) -> bool {
+        self.object_incarnations
+            .iter()
+            .find(|pin| pin.object_id == id)
+            .is_none_or(|pin| pin.is_current(state))
+    }
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 608.2c: The immediate `forward_result` producer's complete ordered
+    /// result. `None` means no producer has run in this resolution; `Some([])`
+    /// is a completed producer that moved no objects and intentionally blocks
+    /// inherited-target fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
     /// CR 610.3b: specified duration events observed after a triggered ability
     /// triggered but before this initial zone-change effect occurred.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -25773,6 +26211,44 @@ impl StaticDefinition {
             caster_scope: cost_modifier_caster_scope(self.affected.as_ref()),
             condition: self.condition.as_ref(),
         })
+    }
+
+    /// THE `StaticDefinition` nesting walk: visits `self`, then every static
+    /// definition nested beneath it by a
+    /// [`ContinuousModification::GrantStaticAbility`], transitively, in Oracle
+    /// order.
+    ///
+    /// CR 613.1f + CR 604.1: a granted static is a static ability in its own
+    /// right — it carries its own `mode`, `affected` scope, `modifications` and
+    /// (load-bearing here) its own `condition`. Any authority that asks a
+    /// question about "this face's static abilities" must therefore ask it of
+    /// the granted definitions too, or a nested definition is invisible to it.
+    ///
+    /// Single authority for that recursion, for the same reason
+    /// [`StaticCondition::walk_leaves`] is the single authority for the
+    /// condition-tree recursion: parallel walks are exactly how a nested node
+    /// comes to be seen by one coverage gate and missed by another. The
+    /// corpus-wide unenforceable-gate backstop
+    /// (`database::CardDatabase::export_integrity_errors`) originally read only
+    /// each face's top-level `static_abilities`, so an unofferable CR 118.12a
+    /// `UnlessPay` sitting on a definition inside a `GrantStaticAbility`
+    /// bypassed it entirely and the card shipped falsely supported.
+    ///
+    /// `GrantAbility` / `GrantTrigger` / `GrantReplacement` are deliberately NOT
+    /// descended into: they nest an `AbilityDefinition` / `TriggerDefinition` /
+    /// `ReplacementDefinition`, not a `StaticDefinition`, so they hold nothing
+    /// this walk's element type can yield.
+    pub(crate) fn walk_self_and_granted<F>(&self, visit: &mut F) -> ControlFlow<()>
+    where
+        F: FnMut(&StaticDefinition) -> ControlFlow<()>,
+    {
+        visit(self)?;
+        for modification in &self.modifications {
+            if let ContinuousModification::GrantStaticAbility { definition } = modification {
+                definition.walk_self_and_granted(visit)?;
+            }
+        }
+        ControlFlow::Continue(())
     }
 }
 
@@ -29293,10 +29769,24 @@ mod tests {
             ..SpellContext::default()
         };
         assert!(external_style.attach_target_bindings.is_empty());
+        assert!(external_style.forwarded_result_context.is_none());
 
         let absent: SpellContext =
             serde_json::from_value(serde_json::json!({})).expect("legacy context deserializes");
         assert!(absent.attach_target_bindings.is_empty());
+        assert!(absent.forwarded_result_context.is_none());
+
+        let empty_forwarded: SpellContext = serde_json::from_value(serde_json::json!({
+            "forwarded_result_context": { "targets": [] }
+        }))
+        .expect("empty forward-result context deserializes");
+        assert_eq!(
+            empty_forwarded.forwarded_result_context,
+            Some(Box::new(ForwardedResultContext {
+                targets: vec![],
+                object_incarnations: vec![],
+            }))
+        );
 
         let empty: SpellContext = serde_json::from_value(serde_json::json!({
             "attach_target_bindings": {}
@@ -34181,7 +34671,7 @@ mod monarch_subject_axis_tests {
 /// `contains_unrecognized`, `unrecognized_texts` and
 /// `has_unbindable_designation_anchor` used to be three INDEPENDENT
 /// wildcard-recursive walks that could silently diverge. They — plus the new
-/// `requires_out_of_layer_continuation` — are now all derived from the single
+/// `requires_unavailable_continuation` — are now all derived from the single
 /// exhaustive [`StaticCondition::walk_leaves`]. These tests pin that
 /// derivation: every view must agree on the same tree at the same depth.
 #[cfg(test)]
@@ -34308,7 +34798,8 @@ mod static_condition_traversal_tests {
                 "{leaf:?} has no layer-pipeline answer and must report a required continuation"
             );
             assert!(
-                nested_at_depth(leaf.clone()).requires_out_of_layer_continuation(),
+                nested_at_depth(leaf.clone())
+                    .requires_unavailable_continuation(&StaticMode::CantUntap),
                 "{leaf:?} nested under And(Or(Not(..))) must still be found"
             );
         }
@@ -34335,7 +34826,8 @@ mod static_condition_traversal_tests {
                 None,
                 "{leaf:?} is a pure function of game state and must stay enforceable"
             );
-            assert!(!nested_at_depth(leaf.clone()).requires_out_of_layer_continuation());
+            assert!(!nested_at_depth(leaf.clone())
+                .requires_unavailable_continuation(&StaticMode::CantUntap));
         }
     }
 }

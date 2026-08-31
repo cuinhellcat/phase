@@ -5553,6 +5553,65 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
     );
 }
 
+/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring, Foe-hammer — "Instant and
+/// sorcery spells you cast cost {X} less to cast, where X is equipped
+/// creature's power." Unlike the self-spell "This spell costs {X} less ..."
+/// family above, this is a BOARD-WIDE reduction the Equipment grants to OTHER
+/// spells (`affected` = cards you control, not `SelfRef`), and X must be an
+/// `Aggregate` over the EQUIPPED creature's power — re-evaluated live off the
+/// static's own source (the Equipment) at cost-determination time, never
+/// snapshotted — so an unattached Equipment (CR 301.5f: no such creature)
+/// naturally sums to 0 rather than a garbage/default value.
+#[test]
+fn static_glamdring_foe_hammer_cost_reduction_is_live_equipped_power() {
+    let def = parse_static_line(
+        "Instant and sorcery spells you cast cost {X} less to cast, where X is equipped creature's power.",
+    )
+    .expect("Glamdring, Foe-hammer's cost reduction should parse");
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        dynamic_count: Some(QuantityRef::PropertyAggregate(ref aggregate)),
+        ..
+    } = &def.mode
+    else {
+        panic!(
+            "expected ModifyCost{{Reduce, amount: generic 1, dynamic_count: \
+             PropertyAggregate(Sum, Power, Objects(Typed(Creature, EquippedBy)))}}, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::Power);
+    let crate::types::ability::CardTypeSetSource::Objects {
+        filter: TargetFilter::Typed(ref tf),
+    } = aggregate.source()
+    else {
+        panic!(
+            "expected aggregate source Objects(Typed(Creature, EquippedBy)), got {:?}",
+            aggregate.source()
+        );
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    assert_eq!(tf.properties, vec![FilterProp::EquippedBy]);
+    // Board-wide reduction on other spells — NOT a self-spell SelfRef scope.
+    assert!(
+        matches!(&def.affected, Some(TargetFilter::Typed(tf)) if tf.controller == Some(crate::types::ability::ControllerRef::You)),
+        "expected affected = cards you control, got {:?}",
+        def.affected
+    );
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        unreachable!("already matched ModifyCost above");
+    };
+    let Some(TargetFilter::Or { filters }) = spell_filter else {
+        panic!(
+            "expected an Instant/Sorcery Or spell_filter, got {:?}",
+            def.mode
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected exactly Instant + Sorcery");
+}
+
 /// Issue #1372: Demilich's self-spell reduction must function from the graveyard
 /// during cast-time cost determination.
 #[test]
@@ -9687,6 +9746,18 @@ fn static_cant_untap_unless_payment_condition_is_unrecognized() {
 /// contract directly, including the NESTED Boolean forms the maintainer called
 /// out (`And`/`Or` wrapping the unsupported leaf), which no current Oracle
 /// phrasing produces but a future combinator extension would.
+///
+/// The marker is INERT for every leaf and every grammatical direction. This
+/// assertion previously required the `"as long as"` / `"if"` direction to yield
+/// a BARE `Unrecognized`, which `layers::evaluate_condition` reads as `true`
+/// forever — a permanently-ON static behind a gate the engine cannot evaluate.
+/// That was the defect, not the contract: see
+/// `static_helpers::unenforceable_gate_marker` for why the rejected leaves all
+/// already evaluate `false` at their enforcement point, so a `true` marker
+/// inverts the truth value that justified rejecting them. The property #8012
+/// actually shipped — EVERY unenforceable leaf, at ANY nesting depth, becomes a
+/// coverage-visible marker rather than a fully-typed condition — is unchanged
+/// and asserted below alongside the runtime value.
 #[test]
 fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
     use crate::types::ability::{PlayerScope, UnlessPayScaling};
@@ -9728,21 +9799,19 @@ fn cant_untap_gate_rejects_every_unenforceable_leaf_at_any_depth() {
         },
     ];
     for condition in unenforceable {
+        let marker = gate_cant_untap_condition(condition.clone(), "gap text");
         assert_eq!(
-            gate_cant_untap_condition(condition.clone(), "gap text", UntapGatePolarity::Negative),
+            marker,
             StaticCondition::Not {
                 condition: Box::new(StaticCondition::Unrecognized {
                     text: "gap text".to_string(),
                 }),
             },
-            "{condition:?} is not enforceable at the untap step and must be              replaced by the negative-polarity gap marker"
+            "{condition:?} is not enforceable at the untap step and must be              replaced by the inert gap marker, whichever grammatical direction              the clause was written in"
         );
-        assert_eq!(
-            gate_cant_untap_condition(condition.clone(), "gap text", UntapGatePolarity::Positive),
-            StaticCondition::Unrecognized {
-                text: "gap text".to_string(),
-            },
-            "{condition:?} must be replaced by the positive-polarity gap marker              on the 'as long as'/'if' branch — the fallback polarity must match              how the branch stores its condition, or the restriction's sense flips"
+        assert!(
+            marker.contains_unrecognized(),
+            "{condition:?}'s deferral must stay visible to every              coverage-honesty gate"
         );
     }
 }
@@ -9785,11 +9854,121 @@ fn cant_untap_gate_passes_through_every_enforceable_leaf() {
     ];
     for condition in enforceable {
         assert_eq!(
-            gate_cant_untap_condition(condition.clone(), "gap text", UntapGatePolarity::Negative),
+            gate_cant_untap_condition(condition.clone(), "gap text"),
             condition,
             "{condition:?} is fully evaluable at the untap step and must pass through unchanged"
         );
     }
+}
+
+/// The generalization of the two tests above, and the fix for the follow-up
+/// audit finding on PR #8012: the acceptance boundary is a property of the
+/// static's ENFORCEMENT POINT, not of the condition alone.
+///
+/// The untap-step gate landed in round 5 as `CantUntap`-specific, but CR 118.12a
+/// `UnlessPay` is decided by exactly one continuation
+/// (`WaitingFor::CombatTaxPayment`) that `combat::combat_tax_mode_matches`
+/// offers for exactly three modes. Every OTHER mode that can carry an
+/// `UnlessPay` was false-green in precisely the way `CantUntap` had been — and
+/// unlike `CantUntap`, two of them are live on printed cards (Awesome Presence →
+/// `CantBeBlocked`, Hipparion → `BlockRestriction`). This pins both directions of
+/// the axis at the gate level, where one table covers every mode rather than one
+/// card at a time.
+#[test]
+fn payment_gate_acceptance_follows_the_mode_that_owns_the_prompt() {
+    use crate::parser::oracle_static::static_helpers::gate_static_condition;
+    use crate::types::ability::{ConditionContinuation, UnlessPayScaling};
+    use crate::types::statics::StaticMode;
+
+    let unless_pay = StaticCondition::UnlessPay {
+        cost: ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        },
+        scaling: UnlessPayScaling::Flat,
+        defended: None,
+    };
+    let deferred = StaticCondition::Not {
+        condition: Box::new(StaticCondition::Unrecognized {
+            text: "gap text".to_string(),
+        }),
+    };
+
+    // The three modes `compute_combat_tax` actually walks: the payment IS
+    // offered, so the leaf is enforceable and must survive untouched.
+    for mode in [
+        StaticMode::CantAttack,
+        StaticMode::CantBlock,
+        StaticMode::CantAttackOrBlock,
+    ] {
+        assert!(
+            mode.provides_continuation(ConditionContinuation::OptionalCostPayment),
+            "{mode:?} is walked by combat_tax_mode_matches and must report the continuation"
+        );
+        assert_eq!(
+            gate_static_condition(&mode, unless_pay.clone(), "gap text"),
+            unless_pay,
+            "{mode:?} prompts for the payment — the gate must not defer a satisfiable leaf"
+        );
+    }
+
+    // Every other mode has no prompt anywhere in the engine, so the same leaf is
+    // unsatisfiable by construction and must be deferred. The first two are the
+    // printed cards; the rest are the other modes reachable from an `unless`
+    // tail, pinned so a future parser arm cannot re-open the hole.
+    for mode in [
+        // Awesome Presence.
+        StaticMode::CantBeBlocked,
+        // Hipparion (via `lower_rule_static`'s "can't block <object>" lowering).
+        StaticMode::BlockRestriction {
+            filter: TargetFilter::Any,
+        },
+        StaticMode::CantUntap,
+        StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Any,
+        },
+        StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter: TargetFilter::SelfRef,
+            exemption: ActivationExemption::None,
+            kind: None,
+        },
+        StaticMode::MustAttackDefender {
+            defender: RequiredDefender::Fixed {
+                player: crate::types::player::PlayerId(0),
+            },
+        },
+        StaticMode::Continuous,
+    ] {
+        assert!(
+            !mode.provides_continuation(ConditionContinuation::OptionalCostPayment),
+            "{mode:?} has no payment prompt and must not claim the continuation"
+        );
+        assert_eq!(
+            gate_static_condition(&mode, unless_pay.clone(), "gap text"),
+            deferred,
+            "{mode:?} can never prompt for the payment, so the gate must defer it \
+             to a labelled gap rather than accept a condition no player can satisfy"
+        );
+    }
+
+    // The CR 601.2f axis is orthogonal and must NOT be swept up by the payment
+    // fix: a cast-variant gate stays enforceable everywhere except the untap
+    // step (CR 502.3 — a turn-based action, so no cast is ever in flight).
+    let cast_variant = StaticCondition::CastingAsVariant {
+        variant: crate::types::game_state::CastingVariant::Flashback,
+    };
+    assert_eq!(
+        gate_static_condition(&StaticMode::Continuous, cast_variant.clone(), "gap text"),
+        cast_variant,
+        "narrowing the PendingCast axis without a per-mode audit would demote working \
+         cost-modifier cards to unsupported"
+    );
+    assert_eq!(
+        gate_static_condition(&StaticMode::CantUntap, cast_variant, "gap text"),
+        deferred,
+        "the untap step runs no cast, so a cast-variant gate is unsatisfiable there"
+    );
 }
 
 #[test]
@@ -20356,7 +20535,10 @@ fn classify_block_exception_count_vs_quality() {
 
 #[test]
 fn cant_be_blocked_as_long_as_defending_controls() {
-    // CR 509.1a: "can't be blocked as long as defending player controls an artifact"
+    // CR 509.1b: an evasion ability creates a blocking restriction — "can't be
+    // blocked as long as defending player controls an artifact". NOT 509.1a,
+    // which governs only which creatures the defending player chooses to block
+    // with and says nothing about restrictions.
     let def = parse_static_line(
         "This creature can't be blocked as long as defending player controls an artifact.",
     )
@@ -27399,21 +27581,114 @@ fn parse_unless_condition_excludes_unless_pay_from_not_wrap() {
     );
 }
 
-/// CR 509.1c: Awesome Presence — block tax with defending-player payer and
-/// per-blocking-creature scaling.
+/// CR 509.1c + CR 118.12a: Awesome Presence — the block-side sibling of the
+/// PR #8012 round-5 payment-continuation blocker, found by a follow-up audit of
+/// the SAME defect class rather than by review.
+///
+/// The clause parses to `CantBeBlocked` + `UnlessPay { PerAffectedCreature }`,
+/// and this test used to assert exactly that — a false green. CR 509.1c makes
+/// "unless [a player] pays [cost]" an OPTIONAL cost that must actually be
+/// offered, and the engine offers it in exactly one place:
+/// `WaitingFor::CombatTaxPayment`, driven by `combat::combat_tax_mode_matches`,
+/// which inspects only `CantAttack` / `CantBlock` / `CantAttackOrBlock`.
+/// `CantBeBlocked` is not in that set, so the defending player is NEVER prompted
+/// and `game::layers::evaluate_condition` hard-codes the leaf to `false` — the
+/// evasion static silently never applies. The parser now defers the gate to the
+/// honest `Not(Unrecognized)` shape so coverage tooling sees the gap.
+///
+/// The scaling combinator that produced `PerAffectedCreature` is still exercised
+/// below, at the building-block level where it belongs: the shape is correct,
+/// it just has no enforcement point on this mode.
 #[test]
-fn awesome_presence_block_tax_unless_pay() {
-    let def = parse_static_line(
-        "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.",
-    )
-    .expect("Awesome Presence should parse");
+fn awesome_presence_block_tax_is_deferred_for_lack_of_a_payment_prompt() {
+    use crate::parser::oracle_static::static_helpers::gate_static_condition;
+    use crate::types::ability::UnlessPayScaling;
+
+    let text = "Enchanted creature can't be blocked unless defending player pays {3} for each creature they control that's blocking it.";
+    let def = parse_static_line(text).expect("Awesome Presence should parse");
     assert_eq!(def.mode, StaticMode::CantBeBlocked);
-    let Some(StaticCondition::UnlessPay { scaling, .. }) = def.condition.as_ref() else {
-        panic!("expected UnlessPay, got {:?}", def.condition);
-    };
     assert_eq!(
-        *scaling,
-        crate::types::ability::UnlessPayScaling::PerAffectedCreature
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "defending player pays {3} for each creature they control that's blocking it"
+                    .to_string(),
+            }),
+        }),
+        "a payment gate on CantBeBlocked has no prompt at block declaration and must \
+         NOT be reported as a fully supported UnlessPay condition, got {:?}",
+        def.condition
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized),
+        "the deferral must be visible to every coverage-honesty gate"
+    );
+
+    // Building-block half: the "unless <player> pays <cost> for each …" clause
+    // still parses to the right typed shape with the right scaling axis. Nothing
+    // about the scaling combinator regressed — only the ACCEPTANCE decision for
+    // a mode whose enforcement point can't run the payment changed.
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    // `def.affected` is threaded in exactly as the production route does (CR
+    // 611.3a: the gate's anaphoric "it" binds against the host static's affected
+    // set), so this building-block probe mirrors the real call rather than
+    // guessing a filter.
+    let parsed = super::shared::parse_unless_static_condition(&tp, def.affected.as_ref())
+        .expect("the unless clause itself must still parse");
+    let StaticCondition::UnlessPay { scaling, .. } = &parsed else {
+        panic!("expected UnlessPay from the clause parser, got {parsed:?}");
+    };
+    assert_eq!(*scaling, UnlessPayScaling::PerAffectedCreature);
+
+    // And the gate is enforcement-point-aware, not a blanket ban on UnlessPay:
+    // the very same condition is accepted unchanged on a taxed combat mode.
+    assert_eq!(
+        gate_static_condition(&StaticMode::CantBlock, parsed.clone(), "gap"),
+        parsed,
+        "UnlessPay must still pass through on a mode WaitingFor::CombatTaxPayment covers"
+    );
+}
+
+/// CR 509.1b + CR 118.12a: the `"can't be blocked"` FALLBACK arm in `dispatch`
+/// must clear the same enforcement-point bar as the evasion route above it.
+///
+/// TWO authorities build `StaticMode::CantBeBlocked`. `parse_subject_rule_static`
+/// classifies the well-formed subject lines; whatever it declines — here a
+/// flavor-word prefix, one of the shapes the fallback exists to catch — lands on
+/// `dispatch`'s fallback instead. Gating only the first authority would leave the
+/// second one reporting an unofferable CR 509.1c payment as a fully supported
+/// `UnlessPay`, which is precisely the defect this change closes for Awesome
+/// Presence. The enforcement point is a property of the MODE, so it cannot depend
+/// on which parser happened to build the definition.
+///
+/// This is a building-block probe rather than a card assertion: it pins that the
+/// CLASS is gated at both entry points, and the first assertion proves the probe
+/// actually exercises the fallback rather than silently retesting the evasion
+/// route.
+#[test]
+fn cant_be_blocked_fallback_arm_defers_unenforceable_payment_gate() {
+    let text = "Wraith Form — This creature can't be blocked unless defending player pays {2}.";
+    assert!(
+        crate::parser::oracle_static::evasion::parse_subject_rule_static(text).is_none(),
+        "this probe must exercise the dispatch FALLBACK arm, not the evasion route"
+    );
+
+    let def = parse_static_line(text).expect("the fallback arm should still parse the line");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert!(
+        !matches!(def.condition, Some(StaticCondition::UnlessPay { .. })),
+        "the fallback must not report an unofferable payment as a supported UnlessPay, got {:?}",
+        def.condition
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized),
+        "the deferral must stay visible to every coverage-honesty gate, got {:?}",
+        def.condition
     );
 }
 
@@ -33720,7 +33995,17 @@ fn subject_cant_block_object_keeps_both_halves() {
 /// The object composes with the shared trailing-condition handling, because it
 /// is consumed inside `parse_subject_combat_rule_static` rather than by a
 /// parallel arm that would never reach that code. Hipparion keeps BOTH its
-/// object and its cost condition; previously the object was dropped.
+/// object and its cost gate; previously the object was dropped.
+///
+/// CR 509.1b + CR 118.12a (PR #8012 follow-up audit): the gate is now DEFERRED
+/// rather than accepted. `lower_rule_static` turns "can't block <object>" into
+/// `BlockRestriction { Not(<object>) }` — a whitelist mode that
+/// `combat::combat_tax_mode_matches` does not inspect, so
+/// `WaitingFor::CombatTaxPayment` never prompts for the {1} and
+/// `game::layers::evaluate_condition` hard-codes the leaf `false`, leaving the
+/// restriction permanently off. This test still pins the composition (the object
+/// survives, and the trailing clause is still reached and consumed) while
+/// asserting the honest gap shape instead of a condition no player can satisfy.
 #[test]
 fn object_composes_with_a_trailing_unless_condition() {
     use crate::types::StaticCondition;
@@ -33729,17 +34014,31 @@ fn object_composes_with_a_trailing_unless_condition() {
         parse_static_line("~ can't block creatures with power 3 or greater unless you pay {1}.")
             .expect("Hipparion's clause");
     block_restriction_object(&def);
-    assert!(
-        matches!(def.condition, Some(StaticCondition::UnlessPay { .. })),
-        "the unless-cost condition must survive alongside the object: {:?}",
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::Not {
+            condition: Box::new(StaticCondition::Unrecognized {
+                text: "you pay {1}".to_string(),
+            }),
+        }),
+        "the trailing clause must still be reached alongside the object, and — having \
+         no payment prompt on BlockRestriction — must be deferred as a labelled gap: {:?}",
         def.condition
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized),
+        "the deferral must be visible to every coverage-honesty gate"
     );
 }
 
 /// Guard: shapes with no object keep their existing lowering. A blanket
-/// prohibition, the `alone` companion requirement, and the symmetric
-/// `or be blocked by` conjunction all sit next to this production in dispatch
-/// order, so each is pinned against the object grammar loosening later.
+/// prohibition and the `alone` companion requirement both sit next to this
+/// production in dispatch order, so each is pinned against the object grammar
+/// loosening later. The symmetric `or be blocked by` conjunction moved to
+/// `symmetric_block_conjunction_declines_the_single_return_path` when #7454 gave
+/// it a per-direction lowering on the multi-static path.
 #[test]
 fn shapes_without_an_object_keep_their_existing_lowering() {
     use crate::types::statics::{CombatAloneAction, CombatAloneRequirement, StaticMode};
@@ -33767,17 +34066,6 @@ fn shapes_without_an_object_keep_their_existing_lowering() {
         alone.mode
     );
 
-    // Sneaky Homunculus — the symmetric conjunction needs a static per
-    // direction and is deliberately not claimed by this production.
-    let symmetric =
-        parse_static_line("~ can't block or be blocked by creatures with power 2 or greater.")
-            .expect("symmetric clause");
-    assert!(
-        matches!(symmetric.mode, StaticMode::CantBlock),
-        "the symmetric conjunction must keep its existing lowering: {:?}",
-        symmetric.mode
-    );
-
     // A conditionless blanket prohibition with a trailing gate keeps both.
     let gated = parse_static_line("~ can't block unless you control another Minotaur.")
         .expect("Felhide Brawler's clause");
@@ -33785,6 +34073,644 @@ fn shapes_without_an_object_keep_their_existing_lowering() {
         matches!(gated.mode, StaticMode::CantBlock) && gated.condition.is_some(),
         "an object-less unless-gate must stay a conditioned CantBlock: {:?} / {:?}",
         gated.mode,
+        gated.condition
+    );
+}
+
+/// CR 509.1b (#7454): the symmetric conjunction is TWO opposite-direction
+/// restrictions sharing ONE printed object, which a single `StaticDefinition`
+/// cannot carry. The single-return path therefore DECLINES it and
+/// `parse_static_line_multi` owns it. Before #7454 this arm lowered the line to
+/// a blanket `CantBlock` — the inverse of the printed text.
+#[test]
+fn symmetric_block_conjunction_declines_the_single_return_path() {
+    let symmetric = "~ can't block or be blocked by creatures with power 2 or greater.";
+    assert!(
+        parse_static_line(symmetric).is_none(),
+        "the symmetric conjunction must not lower to one blanket static: {:?}",
+        parse_static_line(symmetric).map(|d| d.mode),
+    );
+    // POSITIVE REACH-GUARD for the negative above: the multi path must produce
+    // BOTH halves, proving the `is_none()` is a deliberate hand-off and not a
+    // plain parse failure.
+    let halves = parse_static_line_multi(symmetric);
+    assert_eq!(
+        halves.len(),
+        2,
+        "multi path must own both halves: {halves:#?}"
+    );
+}
+
+/// CR 509.1b (#7454): "<subject> can't block or be blocked by <object>" emits one
+/// `StaticDefinition` per direction, in printed clause order, and BOTH consume
+/// the SAME object filter. Covers both printed wordings of the class: Sneaky
+/// Homunculus' power comparison and the `non-Spirit` token text granted by the
+/// Avatar: The Last Airbender cycle.
+///
+/// The shared-object identity assertion is the load-bearing one: if the two
+/// halves ever parsed the object independently, or one negation were built by
+/// hand instead of through `lower_rule_static`, the halves would diverge in a way
+/// that is compile-green and runtime-wrong.
+#[test]
+fn symmetric_block_conjunction_emits_both_directions() {
+    use crate::types::statics::StaticMode;
+
+    for line in [
+        "~ can't block or be blocked by creatures with power 2 or greater.",
+        "~ can't block or be blocked by non-Spirit creatures.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(
+            defs.len(),
+            2,
+            "{line}: one static per direction, got: {defs:#?}"
+        );
+
+        // Printed clause order: the block half first, then the be-blocked half.
+        let block_object = block_restriction_object(&defs[0]);
+        let StaticMode::CantBeBlockedBy {
+            filter: evasion_object,
+        } = &defs[1].mode
+        else {
+            panic!(
+                "{line}: the second half must be the attacker-side evasion, got: {:?}",
+                defs[1].mode
+            );
+        };
+
+        // ONE printed object serves BOTH directions.
+        assert_eq!(
+            block_object, evasion_object,
+            "{line}: both halves must share the SAME object filter"
+        );
+
+        for def in &defs {
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::SelfRef),
+                "{line}: both halves are scoped to the subject, got: {:?}",
+                def.affected
+            );
+            assert!(
+                def.condition.is_none(),
+                "{line}: the printed clause carries no gate: {:?}",
+                def.condition
+            );
+        }
+    }
+}
+
+/// CR 509.1b (#7454): the production is SUBJECT-GENERAL, not `~`-only — the
+/// subject goes through `parse_rule_static_subject_filter`, so any subject that
+/// grammar expresses is covered. Building-block generality per CLAUDE.md ("test
+/// the building block, not the special case"); no printed card uses this subject
+/// today. Before the fix the whole line collapsed to `CantBlock { SelfRef }`,
+/// which lost the SUBJECT SCOPE as well as the direction.
+#[test]
+fn symmetric_block_conjunction_scopes_a_filtered_subject() {
+    use crate::types::statics::StaticMode;
+
+    let defs = parse_static_line_multi(
+        "Creatures you control can't block or be blocked by non-Spirit creatures.",
+    );
+    assert_eq!(defs.len(), 2, "one static per direction, got: {defs:#?}");
+
+    let expected_subject = Some(TargetFilter::Typed(
+        TypedFilter::creature().controller(ControllerRef::You),
+    ));
+    for def in &defs {
+        assert_eq!(
+            def.affected, expected_subject,
+            "the subject scope must survive on both halves, got: {:?}",
+            def.affected
+        );
+        assert!(
+            !matches!(def.affected, Some(TargetFilter::SelfRef)),
+            "a filtered subject must not collapse to the source: {:?}",
+            def.affected
+        );
+    }
+
+    // The object is still the shared `non-Spirit creatures` filter on both sides.
+    let StaticMode::CantBeBlockedBy {
+        filter: evasion_object,
+    } = &defs[1].mode
+    else {
+        panic!(
+            "the second half must be the evasion half: {:?}",
+            defs[1].mode
+        );
+    };
+    assert_eq!(
+        block_restriction_object(&defs[0]),
+        evasion_object,
+        "the shared object must be independent of the subject"
+    );
+}
+
+/// CR 509.1b + CR 604.1 (#7454): an ABSENT or UNPARSEABLE object must leave the
+/// line honestly unsupported (coverage red) on BOTH entry points, never lower to
+/// the INVERSE blanket restriction. This is why the phrase marker is split out
+/// from the predicate: the `dispatch.rs` guard declines on the phrase alone, so
+/// an object this grammar cannot yet express fails CLOSED.
+///
+/// The two bare cases reach two DIFFERENT production branches — the absent object
+/// fails at `space1` inside the predicate, the unparseable one at
+/// `parse_block_object_filter`'s unconsumed-input/`Any` rejection — which is why
+/// both are asserted.
+///
+/// The two GATED cases matter for the same reason at a different seam: a leading
+/// `"As long as <condition>, "` gate plus a bad object must decline as well, not
+/// fall through to the inverted-as-long-as empty-modification fallback and lower
+/// an inert `Continuous` static with no modifications, which would read as
+/// supported to any consumer that counts statics.
+#[test]
+fn symmetric_block_conjunction_declines_a_missing_or_unparseable_object() {
+    for line in [
+        // No object at all.
+        "~ can't block or be blocked by.",
+        // An object the type-phrase grammar cannot express.
+        "~ can't block or be blocked by wibble.",
+        // Same two, under a leading gate.
+        "As long as you control a Wall, ~ can't block or be blocked by.",
+        "As long as you control a Wall, ~ can't block or be blocked by wibble.",
+    ] {
+        assert!(
+            parse_static_line(line).is_none(),
+            "{line}: must not lower to a blanket static, got: {:?}",
+            parse_static_line(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line_multi(line).is_empty(),
+            "{line}: must stay honestly unsupported, got: {:#?}",
+            parse_static_line_multi(line),
+        );
+    }
+
+    // POSITIVE REACH-GUARD: the well-formed sibling still yields both halves, so
+    // the declines above are OBJECT-specific and not phrase-wide breakage.
+    assert_eq!(
+        parse_static_line_multi("~ can't block or be blocked by non-Spirit creatures.").len(),
+        2,
+        "a well-formed object must still produce both halves"
+    );
+}
+
+/// CR 509.1b + CR 604.1 (#7454, round 2): a trailing RIDER must not smuggle the
+/// symmetric conjunction past the decline. `parse_subject_combat_rule_static` is
+/// dispatched BEFORE the terminal blanket `can't block` arm, and its
+/// trailing-`unless` fallback accepted a FAILED object parse and then attached
+/// `parse_unless_static_condition` over the whole line — so the `unless` family,
+/// and only that family, still lowered the clause to the INVERSE blanket
+/// `CantBlock`. That is a silent inversion, not an honest gap: it invents a
+/// restriction the card lacks, drops the one it prints, and the `CantBlock`
+/// coverage anchor passes vacuously on the same "can't block" substring, so the
+/// card would report `supported = true, gap_count = 0`.
+///
+/// No printed card carries a rider on this phrase (census: 8 cards, none gated),
+/// so this is a SHAPE test BY DESIGN — there is no runtime behaviour to pin, and
+/// a fabricated card driven through `apply()` would assert on an input the engine
+/// can never receive. What must hold is that both entry points stay honestly
+/// unsupported (coverage red) rather than exporting an inversion.
+#[test]
+fn symmetric_block_conjunction_declines_every_trailing_rider() {
+    use crate::types::statics::StaticMode;
+
+    // POSITIVE REACH-GUARD 1 — the guarded seam is alive and still reaches its
+    // trailing-rider branch: the SAME rider on the ONE-direction sibling parses
+    // through this exact function AND attaches its condition. So every decline
+    // below is caused by the conjunction marker, not by an unparseable rider, a
+    // dead branch, or an upstream predicate miss.
+    let sibling = super::evasion::parse_subject_combat_rule_static(
+        "~ can't block Spirits unless you control a Wall.",
+    )
+    .expect("the one-direction sibling must still parse through this seam");
+    assert!(
+        matches!(sibling.mode, StaticMode::BlockRestriction { .. }),
+        "reach-guard: the seam must still lower a one-direction object, got: {:?}",
+        sibling.mode
+    );
+    assert!(
+        sibling.condition.is_some(),
+        "reach-guard: the seam must still attach the trailing rider"
+    );
+
+    // POSITIVE REACH-GUARD 2 — subject and object both parse for every subject
+    // used below: strip the rider and the multi path still yields both halves.
+    for ungated in [
+        "~ can't block or be blocked by non-Spirit creatures.",
+        "Creatures you control can't block or be blocked by non-Spirit creatures.",
+    ] {
+        assert_eq!(
+            parse_static_line_multi(ungated).len(),
+            2,
+            "reach-guard: {ungated} must still yield both halves"
+        );
+    }
+
+    // The `unless` family — the channel that bypassed the terminal arm's guard.
+    // A board-state rider and a cost rider reach two DIFFERENT condition parsers
+    // (`Not { IsPresent }` vs `UnlessPay`) and both produced the inversion, so
+    // both are asserted. The filtered subject is included because it lost the
+    // SUBJECT SCOPE as well as the direction (`CantBlock` on `Typed`, not
+    // `SelfRef`). The unparseable object proves the decline does not depend on the
+    // object parsing.
+    for line in [
+        "~ can't block or be blocked by creatures with power 2 or greater unless you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures unless you pay {2}.",
+        "~ can't block or be blocked by non-Spirit creatures unless its controller pays {2}.",
+        "Creatures you control can't block or be blocked by non-Spirit creatures unless you control a Wall.",
+        "~ can't block or be blocked by wibble unless you control a Wall.",
+    ] {
+        assert!(
+            super::evasion::parse_subject_combat_rule_static(line).is_none(),
+            "{line}: the seam must decline, not lower the inverse blanket restriction, got: {:?}",
+            super::evasion::parse_subject_combat_rule_static(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line(line).is_none(),
+            "{line}: the single-return entry point must decline, got: {:?}",
+            parse_static_line(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line_multi(line).is_empty(),
+            "{line}: the multi entry point must stay honestly unsupported, got: {:#?}",
+            parse_static_line_multi(line),
+        );
+    }
+
+    // The sibling riders already declined honestly at 0 statics. Pinned so this
+    // fix cannot over-reach into them — and so a future "fix" cannot make them
+    // lower the inversion the `unless` family just stopped producing.
+    for line in [
+        "~ can't block or be blocked by non-Spirit creatures as long as you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures if you control a Wall.",
+        "~ can't block or be blocked by non-Spirit creatures this turn.",
+    ] {
+        assert!(
+            parse_static_line(line).is_none(),
+            "{line}: must stay declined, got: {:?}",
+            parse_static_line(line).map(|d| d.mode),
+        );
+        assert!(
+            parse_static_line_multi(line).is_empty(),
+            "{line}: must stay declined, got: {:#?}",
+            parse_static_line_multi(line),
+        );
+    }
+}
+
+/// CR 509.1b (#7454, round 2): the rider decline is POSITIONAL — it fires only
+/// where the guarded production's OWN `can't block` predicate opens the
+/// conjunction. A line that merely CONTAINS the phrase in a DIFFERENT clause must
+/// keep its exact lowering, and the OWNER differs per row: row 1 (the quoted
+/// grant) belongs to an arm dispatched earlier than the guarded seam, while row 2
+/// belongs to the guarded seam ITSELF, which matched a different predicate first.
+/// Hoisting a line-wide marker scan ahead of the combat-rule family instead of
+/// guarding the seam was measured to break row 2, which is why the guard is
+/// applied at the predicate offset rather than over the line.
+#[test]
+fn marker_in_another_clause_keeps_its_owning_production() {
+    use crate::types::statics::StaticMode;
+
+    // ROW 1 — a quoted granted ability: the OUTER line is a subject grant, and the
+    // inner static is correctly decomposed into BOTH directions as `AddStaticMode`
+    // modifications by `anthem::parse_subject_continuous_static` (`dispatch.rs:1818`),
+    // which runs well before the combat-rule family (`dispatch.rs:2261`). Only a
+    // line-wide gate hoisted to the TOP of `parse_static_line_inner` could
+    // endanger this row; a gate at the combat-rule seam never could.
+    let granted = parse_static_line(
+        "Spirits you control have \"This creature can't block or be blocked by non-Spirit creatures.\"",
+    )
+    .expect("the quoted grant must still parse");
+    let granted_modes: Vec<&StaticMode> = granted
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddStaticMode { mode } => Some(mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        granted_modes.len(),
+        2,
+        "the granted ability must keep BOTH directions: {:?}",
+        granted.modifications
+    );
+    assert!(
+        matches!(granted_modes[0], StaticMode::BlockRestriction { .. })
+            && matches!(granted_modes[1], StaticMode::CantBeBlockedBy { .. }),
+        "the grant must carry one mode per direction, got: {granted_modes:?}"
+    );
+
+    // ROW 2 — a sibling sentence owned by the GUARDED SEAM ITSELF, not by another
+    // arm: `parse_subject_combat_rule_static` matches its own predicate at the
+    // FIRST word boundary that parses (the `can't attack` offset), and the marker
+    // check at THAT offset does not match, so the seam lowers this sentence and its
+    // rider. That is precisely why the check must be positional: a line-wide gate
+    // at the seam would decline the line and destroy the seam's own output. The
+    // single-return path must still return THAT sentence's static, rider intact.
+    let two_sentences =
+        "~ can't attack unless you control a Wall. ~ can't block or be blocked by Walls.";
+    let sibling_sentence =
+        parse_static_line(two_sentences).expect("the `can't attack` sentence must still parse");
+    assert!(
+        matches!(sibling_sentence.mode, StaticMode::CantAttack),
+        "the unrelated sentence must keep its own lowering, got: {:?}",
+        sibling_sentence.mode
+    );
+    assert!(
+        sibling_sentence.condition.is_some(),
+        "its rider must survive: {:?}",
+        sibling_sentence.condition
+    );
+    // ...and the multi path still binds all three statics the line defines.
+    assert_eq!(
+        parse_static_line_multi(two_sentences).len(),
+        3,
+        "both sentences must bind on the multi path: {:#?}",
+        parse_static_line_multi(two_sentences),
+    );
+}
+
+/// CR 509.1b + CR 611.3a (#7454, round 4): a leading `"As long as <condition>, "`
+/// gate in front of the symmetric conjunction binds BOTH direction-scoped halves
+/// with the typed condition attached to each. CR 611.3a makes clause orientation
+/// semantically irrelevant, so the gated lowering must be the bare lowering plus
+/// the gate — nothing dropped, nothing invented.
+///
+/// The assertion is deliberately RELATIVE: each gated half is compared field by
+/// field against the corresponding BARE half, so the test cannot drift into
+/// re-encoding whatever the parser happens to emit. Only `condition` (added) and
+/// `description` (the full printed line, gate included) may differ.
+///
+/// The single-return `parse_static_line` path DECLINES, because one
+/// `StaticDefinition` cannot carry two opposite-direction restrictions — the same
+/// division of labour the bare form already uses. Declining is what keeps the
+/// coverage report honest; the previous behaviour was an inert `Continuous` static
+/// with zero modifications and `affected: SelfRef`, which drops every printed
+/// semantic while remaining indistinguishable from a supported line to any
+/// consumer that counts statics.
+#[test]
+fn leading_as_long_as_gate_binds_both_halves_with_the_condition() {
+    use crate::types::statics::StaticMode;
+
+    for (bare, gated) in [
+        (
+            "~ can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
+        ),
+        (
+            "Creatures you control can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, creatures you control can't block or be blocked by non-Spirit creatures.",
+        ),
+    ] {
+        // REACH-GUARD: the bare orientation still binds both halves unchanged.
+        let bare_halves = parse_static_line_multi(bare);
+        assert_eq!(
+            bare_halves.len(),
+            2,
+            "reach-guard: {bare} must still bind both halves: {bare_halves:#?}"
+        );
+
+        let gated_halves = parse_static_line_multi(gated);
+        assert_eq!(
+            gated_halves.len(),
+            2,
+            "the gate must bind both halves, not suppress them: {gated_halves:#?}"
+        );
+        // Printed clause order: blocker side first, evasion side second.
+        assert!(
+            matches!(gated_halves[0].mode, StaticMode::BlockRestriction { .. })
+                && matches!(gated_halves[1].mode, StaticMode::CantBeBlockedBy { .. }),
+            "one half per direction, in printed order, got: {:?}",
+            gated_halves.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+
+        for (gated_half, bare_half) in gated_halves.iter().zip(bare_halves.iter()) {
+            // The restriction itself — mode (object filter included) and the
+            // subject scope — must be IDENTICAL to the ungated lowering.
+            assert_eq!(
+                gated_half.mode, bare_half.mode,
+                "{gated}: the gate must not alter the restriction, only gate it"
+            );
+            assert_eq!(
+                gated_half.affected, bare_half.affected,
+                "{gated}: the subject scope must survive the gate"
+            );
+            // The bare form carries no condition; the gated form carries the typed
+            // gate on EVERY half (CR 509.1b: the two restrictions are independent,
+            // so each is gated on its own).
+            assert!(
+                bare_half.condition.is_none(),
+                "{bare}: the ungated form must stay unconditional, got {:?}",
+                bare_half.condition
+            );
+            assert!(
+                matches!(gated_half.condition, Some(StaticCondition::IsPresent { .. })),
+                "{gated}: the gate must be typed, never dropped and never `Unrecognized` (which evaluates to true and would apply the restriction unconditionally), got {:?}",
+                gated_half.condition
+            );
+            assert_eq!(
+                gated_half.description.as_deref(),
+                Some(gated),
+                "{gated}: the description must be the full printed line, gate included"
+            );
+        }
+
+        // The single-return path cannot represent two opposite-direction
+        // restrictions, so it declines instead of lowering an inert placeholder.
+        assert!(
+            parse_static_line(gated).is_none(),
+            "{gated}: the single-return path must decline, got {:?}",
+            parse_static_line(gated).map(|d| (d.mode, d.modifications))
+        );
+    }
+
+    // FAIL-CLOSED 1 — an UNTYPEABLE condition must decline on both paths rather
+    // than attach `StaticCondition::Unrecognized`, which evaluates to `true` at
+    // runtime and would therefore apply both restrictions unconditionally.
+    let untypeable = "As long as wibble wobble, ~ can't block or be blocked by Walls.";
+    assert!(
+        parse_static_line_multi(untypeable).is_empty(),
+        "an untypeable gate must leave the line honestly unsupported, got: {:#?}",
+        parse_static_line_multi(untypeable)
+    );
+    assert!(
+        parse_static_line(untypeable).is_none(),
+        "an untypeable gate must leave the line honestly unsupported, got: {:?}",
+        parse_static_line(untypeable).map(|d| d.mode)
+    );
+
+    // FAIL-CLOSED 2 — the gated channel only reaches subjects
+    // `parse_effect_subject_prefix` admits. A bare typed plural (`Beasts`) fails
+    // `split_on_effect_subject_comma`, so nothing lowers and the line stays
+    // honestly unsupported at 0 statics on both paths. The BARE orientation of the
+    // same subject is unaffected and still binds both halves.
+    let unsplittable = "As long as you control a Wall, Beasts can't block or be blocked by Walls.";
+    assert!(
+        parse_static_line(unsplittable).is_none(),
+        "the unsplittable subject must stay honestly unsupported, got: {:?}",
+        parse_static_line(unsplittable).map(|d| d.mode)
+    );
+    assert!(
+        parse_static_line_multi(unsplittable).is_empty(),
+        "the unsplittable subject must stay honestly unsupported, got: {:#?}",
+        parse_static_line_multi(unsplittable)
+    );
+    assert_eq!(
+        parse_static_line_multi("Beasts can't block or be blocked by Walls.").len(),
+        2,
+        "the bare orientation of the same subject must still bind both halves"
+    );
+}
+
+/// CR 509.1b (#7454, round 4): the symmetric conjunction's prohibition verb
+/// accepts the U+2019 typographic apostrophe (`can’t`) as well as the ASCII one,
+/// per the paired-apostrophe convention `oracle_trigger.rs` already follows for
+/// `wasn't`/`wasn’t` and `isn't`/`isn’t`.
+///
+/// MTGJSON prints the ASCII form today (zero exported cards carry `’` anywhere in
+/// `oracle_text`), so this is a typography guard, not a card unlock: the marker is
+/// what BOTH decline guards key on, so a curly-apostrophe line that missed it
+/// would slip past them toward the blanket-`CantBlock` inversion instead of being
+/// declined.
+///
+/// Asserted relative to the ASCII form — mode, subject scope and condition must
+/// match exactly; only `description` differs, since it echoes the printed text.
+#[test]
+fn symmetric_block_conjunction_accepts_the_typographic_apostrophe() {
+    for (ascii, curly) in [
+        (
+            "~ can't block or be blocked by non-Spirit creatures.",
+            "~ can’t block or be blocked by non-Spirit creatures.",
+        ),
+        (
+            "Creatures you control can't block or be blocked by creatures with power 2 or greater.",
+            "Creatures you control can’t block or be blocked by creatures with power 2 or greater.",
+        ),
+        (
+            "As long as you control a Wall, ~ can't block or be blocked by non-Spirit creatures.",
+            "As long as you control a Wall, ~ can’t block or be blocked by non-Spirit creatures.",
+        ),
+    ] {
+        let ascii_halves = parse_static_line_multi(ascii);
+        let curly_halves = parse_static_line_multi(curly);
+        assert_eq!(
+            ascii_halves.len(),
+            2,
+            "precondition: {ascii} must bind both halves: {ascii_halves:#?}"
+        );
+        assert_eq!(
+            curly_halves.len(),
+            2,
+            "{curly}: the typographic apostrophe must bind the same two halves: {curly_halves:#?}"
+        );
+        for (curly_half, ascii_half) in curly_halves.iter().zip(ascii_halves.iter()) {
+            assert_eq!(
+                curly_half.mode, ascii_half.mode,
+                "{curly}: apostrophe form must not alter the restriction"
+            );
+            assert_eq!(
+                curly_half.affected, ascii_half.affected,
+                "{curly}: apostrophe form must not alter the subject scope"
+            );
+            assert_eq!(
+                curly_half.condition, ascii_half.condition,
+                "{curly}: apostrophe form must not alter the gate"
+            );
+        }
+        // The single-return path declines both spellings, for the same reason.
+        assert!(
+            parse_static_line(curly).is_none(),
+            "{curly}: the single-return path must decline, got {:?}",
+            parse_static_line(curly).map(|d| d.mode)
+        );
+    }
+}
+
+/// CR 509.1b (#7454): the decline guard must not OVER-REACH. Every adjacent
+/// block-object shape that reaches the same terminal `can't block` arm keeps its
+/// exact prior lowering, including the one the `!scan_contains("can't be
+/// blocked")` gate routes elsewhere entirely — which proves the new guard sits
+/// INSIDE the arm rather than pre-empting that gate.
+#[test]
+fn adjacent_block_object_grammar_is_unaffected() {
+    use crate::types::statics::{CombatAloneAction, CombatAloneRequirement, StaticMode};
+
+    // Blanket prohibition, self-scoped and subject-scoped.
+    let blanket = parse_static_line("~ can't block.").expect("blanket clause");
+    assert!(matches!(blanket.mode, StaticMode::CantBlock));
+    assert_eq!(blanket.affected, Some(TargetFilter::SelfRef));
+
+    let beasts = parse_static_line("Beasts can't block.").expect("subject-scoped blanket");
+    assert!(matches!(beasts.mode, StaticMode::CantBlock));
+    assert_eq!(
+        typed_subtypes(beasts.affected.as_ref().expect("a scoped subject")),
+        vec!["Beast".to_string()],
+        "the subject must stay scoped to Beasts"
+    );
+
+    // "alone" is a companion requirement, not an object.
+    let alone = parse_static_line("~ can't block alone.").expect("alone clause");
+    assert!(matches!(
+        alone.mode,
+        StaticMode::CombatAlone {
+            action: CombatAloneAction::Block,
+            requirement: CombatAloneRequirement::NeedsCompanion,
+        }
+    ));
+
+    // The bare (non-symmetric) power object keeps its single blocker-side static.
+    let power = parse_static_line("~ can't block creatures with power 2 or greater.")
+        .expect("bare power object");
+    assert_eq!(
+        block_restriction_object(&power),
+        &TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }])
+        ),
+        "the bare object must keep its exact prior filter"
+    );
+    assert_eq!(power.affected, Some(TargetFilter::SelfRef));
+
+    // Subtype subject AND subtype object.
+    let gornog = parse_static_line("Cowards can't block Warriors.").expect("Gornog's clause");
+    assert_eq!(
+        typed_subtypes(block_restriction_object(&gornog)),
+        vec!["Warrior".to_string()]
+    );
+    assert_eq!(
+        typed_subtypes(gornog.affected.as_ref().expect("a scoped subject")),
+        vec!["Coward".to_string()]
+    );
+
+    // The `can't be blocked by` sibling must still route to the evasion mode: the
+    // new guard is inside the arm, so this line never reaches it.
+    let evasion =
+        parse_static_line("~ can't be blocked by artifact creatures.").expect("evasion clause");
+    let StaticMode::CantBeBlockedBy { filter } = &evasion.mode else {
+        panic!("must stay attacker-side evasion, got: {:?}", evasion.mode);
+    };
+    assert_eq!(
+        filter,
+        &TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).with_type(TypeFilter::Creature)
+        ),
+        "the evasion object must be unchanged"
+    );
+
+    // A trailing gate on an object-less prohibition keeps mode AND condition.
+    let gated = parse_static_line("~ can't block unless you control another Minotaur.")
+        .expect("Felhide Brawler's clause");
+    assert!(matches!(gated.mode, StaticMode::CantBlock));
+    assert!(
+        gated.condition.is_some(),
+        "the unless gate must survive: {:?}",
         gated.condition
     );
 }
@@ -33935,4 +34861,155 @@ fn alt_cost_as_foretold_stays_zone_free() {
         }
         other => panic!("expected Typed(any spell), got {other:?}"),
     }
+}
+
+/// The THIRD route into the same defect class, found while self-reviewing the
+/// Awesome Presence / Hipparion fix — and the one that would have been a
+/// behavior regression, not just a reporting one.
+///
+/// `parse_subject_rule_static`'s `cant_be_blocked_mode` fallthrough runs the
+/// whole tail through `nom_condition::parse_condition`, whose `"unless "` branch
+/// yields a raw CR 118.12a `UnlessPay`. `CantBeBlocked` has no block-declaration
+/// payment prompt (`combat::combat_tax_mode_matches` covers only
+/// `CantAttack`/`CantBlock`/`CantAttackOrBlock`), so the gate must defer it — and
+/// specifically to an INERT marker. A marker that evaluated `true` forever would
+/// make every affected creature UNCONDITIONALLY unblockable: an evasion ability
+/// the card does not have. `Not(Unrecognized)` matches what the ungated raw
+/// `UnlessPay` already did at runtime (`false`), so the deferral changes
+/// reporting only. `unenforceable_gate_marker` now emits that shape for every
+/// enforcement-point rejection, in either grammatical direction, so this route
+/// can no longer regress by picking the wrong polarity at the call site.
+#[test]
+fn subject_led_cant_be_blocked_payment_gate_defers_without_inventing_evasion() {
+    let def = parse_static_line(
+        "Creatures you control can't be blocked unless defending player pays {2}.",
+    )
+    .expect("subject-led evasion line should parse");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+        panic!(
+            "the gap marker MUST be Not-wrapped — a bare Unrecognized evaluates true              and would grant unconditional evasion, got {:?}",
+            def.condition
+        );
+    };
+    assert!(
+        matches!(condition.as_ref(), StaticCondition::Unrecognized { .. }),
+        "expected a labelled gap inside the Not, got {condition:?}"
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(StaticCondition::contains_unrecognized),
+        "the deferral must be visible to every coverage-honesty gate"
+    );
+}
+
+/// Guard for the complement of the test above: an enforceable positive gate on
+/// the SAME route must still pass through untouched. Without this, the fix could
+/// silently degrade into "defer every conditional evasion static", which would be
+/// a far larger coverage loss than the false green it replaces.
+#[test]
+fn subject_led_cant_be_blocked_state_backed_gate_still_passes_through() {
+    let def = parse_static_line(
+        "Creatures you control can't be blocked as long as you control a Forest.",
+    )
+    .expect("subject-led conditional evasion should parse");
+    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert!(
+        matches!(def.condition, Some(StaticCondition::IsPresent { .. })),
+        "a board-state gate is a pure function of game state and must survive the          enforcement-point gate unchanged, got {:?}",
+        def.condition
+    );
+}
+
+/// The FOURTH route into the same defect class (maintainer review of this PR),
+/// and the first one on a POSITIVE tail.
+///
+/// `grammar::parse_enchanted_equipped_predicate`'s `"as long as"`
+/// conditional-grant branch assigned `def.condition` directly after
+/// `parse_attached_static_condition`, bypassing `attach_gated_condition`
+/// entirely. That matters because a positive tail is NOT restricted to
+/// board-state gates: `oracle_nom::condition::parse_unless_pay_condition`
+/// accepts a bare `"you pay {N}"` with no `"unless"` prefix, so
+/// `"… as long as you pay {1}"` produced a CR 118.12a `UnlessPay` on a
+/// `StaticMode::Continuous`. `Continuous` runs in the CR 613 layer pipeline,
+/// which offers no payment round-trip, so `game::layers::evaluate_condition`
+/// hard-codes that leaf `false` and the grant silently never applies — while
+/// coverage reported the condition fully supported.
+///
+/// Parameterized over the two grant shapes the branch serves (`"gets +N/+M"`
+/// and `"has <keyword>"`) because the bypass was in the shared branch, not in
+/// either shape: the class is "every conditional continuous grant", not one
+/// Oracle phrasing.
+#[test]
+fn attached_conditional_grant_payment_gate_is_deferred_not_accepted() {
+    for line in [
+        "Enchanted creature gets +2/+2 as long as you pay {1}.",
+        "Enchanted creature has flying as long as you pay {1}.",
+        "Equipped creature gets +1/+1 as long as its controller pays {2}.",
+    ] {
+        let def = parse_static_line(line).unwrap_or_else(|| panic!("{line} should parse"));
+        assert!(
+            matches!(def.mode, StaticMode::Continuous),
+            "{line}: expected a Continuous grant, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.condition
+                .as_ref()
+                .is_some_and(StaticCondition::contains_unrecognized),
+            "{line}: an unofferable CR 118.12a payment gate must be deferred to the \
+             honest gap marker so every coverage-honesty gate sees it, got {:?}",
+            def.condition
+        );
+        assert!(
+            !def.condition
+                .as_ref()
+                .is_some_and(|c| c.requires_unavailable_continuation(&def.mode)),
+            "{line}: no continuation-backed leaf may survive on a mode whose \
+             enforcement point never runs it, got {:?}",
+            def.condition
+        );
+        // And the marker must be the INERT shape. A bare `Unrecognized` reads
+        // `true` forever in `layers::evaluate_condition`, which would turn a
+        // conditional grant into an UNCONDITIONAL +2/+2 or flying grant — a buff
+        // the printed card confers only on payment. `Not`-wrapping pins the gate
+        // `false` while `contains_unrecognized` (asserted above) still walks
+        // through the `Not` and reports the gap. Runtime proof lives in
+        // `game::layers`'s
+        // `conditional_grant_with_unenforceable_payment_gate_does_not_apply`.
+        let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
+            panic!(
+                "{line}: the gap marker MUST be Not-wrapped — a bare Unrecognized \
+                 evaluates true and would apply the grant unconditionally, got {:?}",
+                def.condition
+            );
+        };
+        assert!(
+            matches!(condition.as_ref(), StaticCondition::Unrecognized { .. }),
+            "{line}: expected a labelled gap inside the Not, got {condition:?}"
+        );
+    }
+}
+
+/// Complement of the test above, and the reason it is not "defer everything":
+/// an enforceable positive gate on the SAME conditional-grant branch must still
+/// be accepted verbatim. A board-state condition is a pure function of game
+/// state, so the layer pipeline resolves it on its own with no round-trip.
+#[test]
+fn attached_conditional_grant_state_backed_gate_still_passes_through() {
+    let def = parse_static_line("Enchanted creature gets +2/+2 as long as you control a Forest.")
+        .expect("conditional attached grant should parse");
+    assert!(
+        matches!(def.mode, StaticMode::Continuous),
+        "expected a Continuous grant, got {:?}",
+        def.mode
+    );
+    assert!(
+        def.condition
+            .as_ref()
+            .is_some_and(|c| !c.contains_unrecognized()),
+        "a board-state gate must survive the enforcement-point gate unchanged, got {:?}",
+        def.condition
+    );
 }

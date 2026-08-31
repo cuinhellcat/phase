@@ -65,6 +65,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugLibrary": {
+    "openActions": "Apri le azioni di debug per {{name}}"
+  },
   "nextUp": {
     "label": "Prossimo",
     "tooltip": "Il turno di questo giocatore è il prossimo."
@@ -1941,6 +1944,7 @@
     "title": "Lancia una magia gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",

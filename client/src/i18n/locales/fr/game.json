@@ -65,6 +65,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugLibrary": {
+    "openActions": "Ouvrir les actions de débogage pour {{name}}"
+  },
   "nextUp": {
     "label": "Suivant",
     "tooltip": "Ce joueur joue le prochain tour."
@@ -1941,6 +1944,7 @@
     "title": "Lancez un sort gratuitement",
     "subtitle": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)). Valeur de mana totale restante : {{budget}}.",
     "subtitleNoBudget": "Choisissez un sort à lancer sans payer son coût de mana ({{remaining}} restant(s)).",
+    "remainingAny": "n'importe quel nombre",
     "castNamed": "Lancer {{name}}",
     "castSuffix": "(sans payer son coût de mana)",
     "done": "Terminé",
