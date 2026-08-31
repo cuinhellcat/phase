@@ -1186,11 +1186,19 @@ export class P2PHostAdapter implements EngineAdapter {
     await saveResumableGameStrict(this.gameId, JSON.parse(json) as PersistedGameState);
   }
 
-  /** Abort an unpublished resumed engine so no reconnect can observe volatile state. */
+  /** Abort an unpublished resumed engine so no reconnect can observe volatile
+   * state. Also stops the redelivery sweep: it is armed in `initializeInner`
+   * before the resume barrier, and only `dispose()` cleared it, so reaching
+   * this path left a 5 s interval firing for the life of the page. A resume
+   * that fails before this path is reached still relies on `dispose()`. */
   private async abortUnpublishedResume(): Promise<void> {
     this.resumedAutomation = null;
     this.unsubscribeHostConnections();
     this.disposed = true;
+    if (this.redeliveryTimer !== null) {
+      clearInterval(this.redeliveryTimer);
+      this.redeliveryTimer = null;
+    }
     if (sharedEngineHost === this.engineClaim) sharedEngineHost = null;
     await this.wasm.releaseHostSession(true);
     releaseP2PHostLease(this.authority);
@@ -2045,23 +2053,41 @@ export class P2PHostAdapter implements EngineAdapter {
       }
 
       const revision = ++this.authoritativeRevision;
+      let setupFailure: unknown = null;
       for (const [pid, session] of this.guestSessions) {
         const token = this.playerTokens.get(pid)!;
-        const snapshot = await this.wasm.getViewerSnapshot(pid);
-        void this.send(session, {
-          type: "game_setup",
-          wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-          assignedPlayerId: pid,
-          playerToken: token,
-          revision,
-          state: snapshot.state,
-          events: result.events,
-          playerNames: allNames,
-          ...legalActionsToWire(snapshot),
-        }).then((delivered) => {
-          if (delivered) this.recordGuestDelivery(pid, revision);
-        });
+        try {
+          const snapshot = await this.wasm.getViewerSnapshot(pid);
+          void this.send(session, {
+            type: "game_setup",
+            wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+            assignedPlayerId: pid,
+            playerToken: token,
+            revision,
+            state: snapshot.state,
+            events: result.events,
+            playerNames: allNames,
+            ...legalActionsToWire(snapshot),
+          }).then((delivered) => {
+            if (delivered) this.recordGuestDelivery(pid, revision);
+          });
+        } catch (err) {
+          // Isolate per seat. Unisolated, one rejected read left every LATER
+          // seat without its setup frame — and those seats are then stuck for
+          // good: no `game_setup` means no ledger entry, so the sweep skips
+          // them by design, and a second start returns early because
+          // `gameStarted` is already true. The seat whose own read failed
+          // still belongs to the setup/reconnect path, not to the sweep.
+          console.error(`[P2PHost] game_setup for seat ${pid} failed:`, err);
+          setupFailure ??= err;
+        }
       }
+      // Isolation buys the LATER seats their frame; it must not also buy
+      // silence. Before it, the throw reached the host. A seat that never got
+      // `game_setup` waits on a promise that never settles (the guest's
+      // `initializeGame` resolves only on `game_setup`/`reconnect_ack`), so the
+      // host is the only party that can learn of it — keep the throw.
+      if (setupFailure !== null) throw setupFailure;
 
       await this.runAiLoop();
       return result;
@@ -2247,6 +2273,17 @@ export class P2PHostAdapter implements EngineAdapter {
    * Final state first, terminal statement second. The ordered transport plus
    * the state commitment lets a guest reject a plausible-looking terminal
    * result that belongs to another final position or host incarnation.
+   *
+   * Per recipient this reads a viewer snapshot of its own, so it carries the
+   * same rejection source as the state fan-out and is isolated the same way.
+   * Unisolated, one rejected read cost the seat its statement, with no way
+   * back — this function returns early once `this.terminalResult` is set; it
+   * cost that seat its sweep nomination too, whenever the state fan-out had
+   * already recorded it at this revision; and it cost the host its own
+   * `terminalResult` emit, which clears the prompt overlay, drops the
+   * resumable save and supplies the closing reason (the board itself already
+   * reads GameOver from the published snapshot). A failed seat is now pushed below the
+   * revision and the sweep heals it.
    */
   private async commitTerminalIfComplete(
     snapshot: EngineSnapshot,
@@ -2278,11 +2315,19 @@ export class P2PHostAdapter implements EngineAdapter {
     this.terminalResult = result;
     this.gameRunState = "terminal";
     await Promise.all([...this.guestSessions].map(async ([playerId, session]) => {
-      const viewerSnapshot = this.nativeBridge
-        ? this.nativeBridge.viewerSnapshot(playerId)
-        : await this.wasm.getViewerSnapshot(playerId);
-      const recipientResult = await createResult(playerId, viewerSnapshot.state);
-      await this.send(session, { type: "terminal_result", result: recipientResult });
+      try {
+        const viewerSnapshot = this.nativeBridge
+          ? this.nativeBridge.viewerSnapshot(playerId)
+          : await this.wasm.getViewerSnapshot(playerId);
+        const recipientResult = await createResult(playerId, viewerSnapshot.state);
+        if (await this.send(session, { type: "terminal_result", result: recipientResult })) return;
+      } catch (err) {
+        console.error(`[P2PHost] terminal delivery for seat ${playerId} failed; the sweep resyncs it:`, err);
+      }
+      // Same authority that heals a failed state fan-out: hand the seat to the
+      // ledger, and `redeliverGuestState` re-sends the final state plus a
+      // freshly committed, recipient-bound statement on the next sweep.
+      this.markGuestBehind(playerId, revision);
     }));
     this.emit({ type: "terminalResult", result });
     return true;
@@ -2363,7 +2408,42 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     }
     await Promise.all(sends);
-    await this.commitTerminalIfComplete(await this.wasm.getSnapshot(), revision, terminalReason);
+    // This read decides whether the game closes AT ALL, and the guest-path
+    // `try` around this call would swallow a rejection: `terminalResult` would
+    // stay null with nothing to retry it, because a finished game produces no
+    // further action to drive another close. Surface it rather than leaving the
+    // match silently unclosed.
+    let closingSnapshot;
+    try {
+      closingSnapshot = await this.wasm.getSnapshot();
+    } catch (err) {
+      console.error("[P2PHost] terminal close could not read the final state:", err);
+      this.emit({
+        type: "terminalUnavailable",
+        message: "Failed to read the authoritative state; a game that just ended stays open until something drives another close",
+      });
+      return;
+    }
+    await this.commitTerminalIfComplete(closingSnapshot, revision, terminalReason);
+  }
+
+  /**
+   * Push a seat BELOW the authoritative revision so the sweep nominates it.
+   *
+   * `recordGuestDelivery` is deliberately monotonic; this is the one caller
+   * allowed to lower an entry, and only where the seat provably did not
+   * receive this revision.
+   *
+   * A seat with NO entry is left alone: a missing entry means the seat never
+   * took its `game_setup`, and that seat belongs to the setup/reconnect path
+   * (a `state_update` cannot substitute for the handshake). Creating an entry
+   * here would hand it a resync every tick that it discards unauthenticated.
+   * `Math.min` keeps the entry from claiming a revision the seat never had.
+   */
+  private markGuestBehind(pid: PlayerId, revision: number): void {
+    const prior = this.guestDeliveredRevisions.get(pid);
+    if (prior === undefined) return;
+    this.guestDeliveredRevisions.set(pid, Math.min(prior, revision - 1));
   }
 
   /** Monotonic: a stale resync result must never roll a seat's entry back. */
@@ -2444,9 +2524,9 @@ export class P2PHostAdapter implements EngineAdapter {
    * Call this BEFORE `broadcastStateUpdate`, never after (#7924). On the
    * guest-message paths the fan-out runs inside a `try`, and it can still
    * reject at its close: the host snapshot read feeding
-   * `commitTerminalIfComplete`, and that commit's own recipient-bound reads
-   * (`broadcastStateUpdateInner`'s per-seat viewer reads, by contrast, are
-   * caught per seat and settle into the delivery ledger). Emitting
+   * `commitTerminalIfComplete`. The per-seat viewer reads on both sides of
+   * that close — the fan-out's and the terminal commit's own recipient-bound
+   * ones — are caught per seat and settle into the delivery ledger. Emitting
    * afterwards therefore makes the host's own screen depend on work done on
    * every guest's behalf — the host freezes on a board its own engine has
    * already advanced.

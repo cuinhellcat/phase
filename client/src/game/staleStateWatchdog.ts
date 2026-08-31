@@ -40,7 +40,7 @@ export const WATCHDOG_ARM_DELAY_MS = 10_000;
  * invisible here. The positive-knowledge path (`resyncFromAdapter`) therefore
  * recommits without consulting this. The complete detector is an engine-owned
  * state revision surfaced through every transport — an engine + protocol
- * change, tracked as follow-up work.
+ * change, and out of scope here.
  */
 export function stateFingerprint(state: GameState): string {
   return JSON.stringify({
