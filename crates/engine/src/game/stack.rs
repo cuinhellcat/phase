@@ -65,6 +65,22 @@ pub(super) fn finish_resolving_stack_entry(
     }
 }
 
+/// Abandon the currently resolving family as one lifecycle unit. Prompt owners
+/// call this only after settling any events already completed by their cursor.
+pub(super) fn abandon_active_resolution_carrier(
+    state: &mut GameState,
+    disposition: super::lifecycle::DelayedTerminalDisposition,
+) {
+    super::priority::clear_priority_passes(state);
+    let _ = state
+        .clear_active_ability_continuation()
+        .expect("resolution abandonment cannot clear a buried ability continuation");
+    finish_resolving_stack_entry(state, disposition);
+    state.resolution_source_relatch = None;
+    state.deferred_entry_events.clear();
+    state.pending_token_battlefield_entry = None;
+}
+
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<GameEvent>) {
     let trigger_firing = matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
@@ -2775,6 +2791,15 @@ fn resolve_keyword_action(
                         }],
                         None,
                     );
+                    // CR 702.122a: the crew RESOLVED — the payoff is now in
+                    // force. Record the resolved-crew marker exactly here (single
+                    // write authority: `engine::record_crew_resolution`) so the
+                    // AI crew-repeat guard's payoff-in-force predicate keys on
+                    // explicit successful-Crew provenance rather than a
+                    // transient-effect shape match. Only installed payoffs and
+                    // only battlefield Vehicles record; a countered or otherwise
+                    // unresolved entry never reaches this arm.
+                    crate::game::engine::record_crew_resolution(state, vehicle_id);
                 }
             }
             events.push(GameEvent::VehicleCrewed {

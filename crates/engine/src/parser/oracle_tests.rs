@@ -3816,7 +3816,7 @@ fn free_cast_window_clause_chains_rider_and_self_exile() {
             zones,
             graveyard_replacement,
         } => {
-            assert_eq!(*count, 2);
+            assert_eq!(*count, Some(2));
             assert_eq!(*max_total_mv, Some(6));
             assert_eq!(
                 graveyard_replacement.as_ref(),
@@ -3884,7 +3884,7 @@ fn free_cast_window_parses_single_zone_non_invoke_variant() {
         );
     };
 
-    assert_eq!(*count, 1);
+    assert_eq!(*count, Some(1));
     assert_eq!(*max_total_mv, None);
     assert_eq!(
         *filter,
@@ -18283,6 +18283,91 @@ fn drag_to_the_underworld_devotion_cost_reduction_and_destroy_parse() {
     );
 }
 
+/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring, Foe-hammer (verbatim Oracle
+/// text) — "Instant and sorcery spells you cast cost {X} less to cast, where
+/// X is equipped creature's power." + "Equip {2}". Unlike the self-spell
+/// devotion reduction above (`SelfRef`, applies to the card printing the
+/// ability), this is a board-wide reduction the Equipment grants to OTHER
+/// spells its controller casts (`affected` = cards you control), with X bound
+/// to a live `Aggregate` over the EQUIPPED creature's power rather than a
+/// snapshot. Zero `Unimplemented` effects end to end.
+#[test]
+fn glamdring_foe_hammer_equipped_power_cost_reduction_and_equip_parse() {
+    let r = parse(
+        "Instant and sorcery spells you cast cost {X} less to cast, where X is equipped creature's power.\n\
+         Equip {2}",
+        "Glamdring, Foe-hammer",
+        &[],
+        &["Artifact"],
+        &["Equipment"],
+    );
+
+    assert!(
+        !parsed_has_unimplemented(&r),
+        "Glamdring must parse with zero Unimplemented effects: {r:#?}"
+    );
+
+    assert_eq!(r.statics.len(), 1, "expected exactly one static ability");
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: ManaCost::Cost { generic: 1, .. },
+        spell_filter: Some(TargetFilter::Or { ref filters }),
+        dynamic_count: Some(QuantityRef::PropertyAggregate(ref aggregate)),
+    } = &r.statics[0].mode
+    else {
+        panic!(
+            "expected ModifyCost{{Reduce, amount: generic 1, spell_filter: Or[Instant,Sorcery], \
+             dynamic_count: PropertyAggregate(Sum, Power, Objects(Typed(Creature, EquippedBy)))}}, got {:?}",
+            r.statics[0].mode
+        );
+    };
+    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+    assert_eq!(aggregate.property(), ObjectProperty::Power);
+    let crate::types::ability::CardTypeSetSource::Objects {
+        filter: TargetFilter::Typed(ref tf),
+    } = aggregate.source()
+    else {
+        panic!(
+            "expected aggregate source Objects(Typed(Creature, EquippedBy)), got {:?}",
+            aggregate.source()
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected Instant + Sorcery");
+    assert!(
+        filters.iter().any(|filter| {
+            matches!(filter, TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Instant])
+        }) && filters.iter().any(|filter| {
+            matches!(filter, TargetFilter::Typed(tf)
+                if tf.type_filters == vec![TypeFilter::Sorcery])
+        }),
+        "expected spell_filter = Or[Instant, Sorcery], got {filters:?}"
+    );
+    assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    assert_eq!(tf.properties, vec![FilterProp::EquippedBy]);
+    // Board-wide — NOT the self-spell SelfRef scope (contrast Drag to the
+    // Underworld above).
+    assert!(
+        matches!(
+            &r.statics[0].affected,
+            Some(TargetFilter::Typed(tf)) if tf.controller == Some(ControllerRef::You)
+        ),
+        "expected affected = cards you control, got {:?}",
+        r.statics[0].affected
+    );
+
+    // Equip {2} activated ability is untouched by the cost-reduction work.
+    let equip = r
+        .abilities
+        .iter()
+        .find(|a| a.ability_tag == Some(crate::types::ability::AbilityTag::Equip));
+    assert!(
+        equip.is_some(),
+        "expected an Equip-tagged activated ability, got {:?}",
+        r.abilities
+    );
+}
+
 #[test]
 fn read_the_runes_draw_discard_unless_sacrifice_permanent_parse() {
     let r = parse(
@@ -20086,7 +20171,7 @@ fn assert_abzan_greatest_toughness_gate(condition: &AbilityCondition) {
         let FilterProp::PtComparison {
             stat: PtStat::Toughness,
             scope: PtValueScope::Current,
-            comparator: Comparator::GE,
+            comparator: Comparator::EQ,
             value:
                 QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(aggregate),
@@ -20644,15 +20729,8 @@ fn assert_controlled_creature_greatest_power_ability_gate(condition: &AbilityCon
 }
 
 fn assert_controlled_creature_greatest_power_trigger_gate(condition: &TriggerCondition) {
-    let TriggerCondition::QuantityComparison {
-        lhs: QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount { filter },
-        },
-        comparator: Comparator::GE,
-        rhs: QuantityExpr::Fixed { value: 1 },
-    } = condition
-    else {
-        panic!("expected ObjectCount >= 1 trigger condition, got {condition:?}");
+    let TriggerCondition::ControlsType { filter } = condition else {
+        panic!("expected controlled-type trigger condition, got {condition:?}");
     };
     assert_controlled_creature_greatest_power_filter(filter);
 }
@@ -20663,11 +20741,22 @@ fn assert_controlled_creature_greatest_power_filter(filter: &TargetFilter) {
     };
     assert_eq!(controlled.controller, Some(ControllerRef::You));
     assert_eq!(controlled.type_filters, vec![TypeFilter::Creature]);
+    assert_eq!(
+        controlled.properties.len(),
+        2,
+        "expected exactly battlefield scope plus aggregate membership: {controlled:?}"
+    );
+    assert!(controlled.properties.iter().any(|property| matches!(
+        property,
+        FilterProp::InZone {
+            zone: Zone::Battlefield
+        }
+    )));
     let has_battlefield_power_max = controlled.properties.iter().any(|prop| {
         let FilterProp::PtComparison {
             stat: PtStat::Power,
             scope: PtValueScope::Current,
-            comparator: Comparator::GE,
+            comparator: Comparator::EQ,
             value:
                 QuantityExpr::Ref {
                     qty: QuantityRef::PropertyAggregate(aggregate),
@@ -27890,5 +27979,106 @@ fn granted_cost_axis_is_not_walked_and_no_parse_shape_reaches_it() {
         !json.contains(GRANTING_SELF_PLACEHOLDER),
         "no production parse shape may plant a marker on the excluded \
          `AbilityCost` axis: {json}"
+    );
+}
+
+/// CR 603.2 + CR 608.2c: Cyclops Gladiator (verbatim MTGJSON Oracle text) —
+/// the "if you do" continuation's damage-back amount must keep reading the
+/// TARGET creature's power (`ObjectScope::EventSource`, the "that creature"
+/// established by the first sentence), never the attacking Cyclops's own
+/// power.
+///
+/// Regression guard for a `parse_effect_chain_ir` chunk-subject bug: a
+/// `prior_typed_referent` rebind (added for Galion, Elvenking's Butler's bare
+/// possessive-pronoun base-P/T grammar, "Its base power and toughness become
+/// equal to ~'s power and toughness") originally cleared `chunk_subject` for
+/// EVERY later chunk following any prior sibling clause with a typed target —
+/// not just the base-P/T-set clause shape it was built for. Cyclops
+/// Gladiator's first sentence ("you may have it deal damage ... to target
+/// creature defending player controls") introduces exactly such a typed
+/// target, so its second sentence ("If you do, that creature deals damage
+/// equal to its power to this creature") fell into the same over-broad
+/// rebind: `if_you_do_object_anchor` only recognizes a `GenericEffect`
+/// predecessor (Galion's shape), not `Effect::DealDamage`, so it returns
+/// `None` here and control reached the (then-unconstrained) rebind, clearing
+/// `ctx.subject` to `None` and silently flipping the damage-back amount's
+/// possessive "its power" from the target's power (`EventSource`) to the
+/// Cyclops's own power (`Source`) — a real rules regression, not just a
+/// cosmetic parse-tree diff. The fix scopes the rebind to the bare
+/// possessive-pronoun base-P/T-set clause shape only
+/// (`subject::is_bare_pronoun_base_pt_possessive_clause`), so this unrelated
+/// `DealDamage` chunk now falls through to the original `ctx.subject.clone()`
+/// path unchanged.
+#[test]
+fn cyclops_gladiator_if_you_do_damage_back_reads_targets_power_not_sources() {
+    let result = parse(
+        "Whenever this creature attacks, you may have it deal damage equal to its power to target creature defending player controls. If you do, that creature deals damage equal to its power to this creature.",
+        "Cyclops Gladiator",
+        &[],
+        &["Creature"],
+        &["Cyclops", "Warrior"],
+    );
+
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Cyclops Gladiator must parse with zero Unimplemented effects: {result:#?}"
+    );
+    assert_eq!(result.triggers.len(), 1, "triggers={:?}", result.triggers);
+    let attack = &result.triggers[0];
+    assert_eq!(attack.mode, TriggerMode::Attacks);
+
+    let first = attack
+        .execute
+        .as_ref()
+        .expect("attack trigger must have an execute body");
+    let Effect::DealDamage {
+        amount: first_amount,
+        target: first_target,
+        ..
+    } = first.effect.as_ref()
+    else {
+        panic!(
+            "expected the first sentence to be DealDamage, got {:?}",
+            first.effect
+        );
+    };
+    assert_eq!(
+        *first_amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        },
+        "the first sentence's 'its power' is the attacking Cyclops's OWN power"
+    );
+    assert!(
+        matches!(first_target, TargetFilter::Typed(_)),
+        "the first sentence targets a creature the defending player controls, got {first_target:?}"
+    );
+
+    let if_you_do = first
+        .sub_ability
+        .as_ref()
+        .expect("the 'if you do' continuation must chain after the optional damage clause");
+    let Effect::DealDamage {
+        amount: back_amount,
+        ..
+    } = if_you_do.effect.as_ref()
+    else {
+        panic!(
+            "expected the 'if you do' continuation to be DealDamage, got {:?}",
+            if_you_do.effect
+        );
+    };
+    assert_eq!(
+        *back_amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::EventSource,
+            },
+        },
+        "the damage-back amount must read the TARGET creature's ('that \
+         creature', the first sentence's chosen recipient) power, not the \
+         attacking Cyclops's own power — got {back_amount:?}"
     );
 }

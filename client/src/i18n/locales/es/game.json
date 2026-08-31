@@ -65,6 +65,9 @@
     "tokenToughnessPlaceholder": "Toughness",
     "sourceDefinedPtRequired": "Enter power and toughness for this source-defined token."
   },
+  "debugLibrary": {
+    "openActions": "Abrir acciones de depuración para {{name}}"
+  },
   "nextUp": {
     "label": "Sigue",
     "tooltip": "El turno de este jugador es el siguiente."
@@ -1941,6 +1944,7 @@
     "title": "Lanza un hechizo gratis",
     "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
     "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "remainingAny": "cualquier cantidad",
     "castNamed": "Lanzar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
     "done": "Listo",

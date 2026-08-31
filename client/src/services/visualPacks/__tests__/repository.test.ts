@@ -54,6 +54,11 @@ function fakeBackend(
   const unavailable = vi.fn(async (): Promise<never> => { throw new Error("unused"); });
   return {
     catalogStatus: unavailable,
+    curatedSelector: unavailable,
+    curatedDrift: unavailable,
+    deckLibrarySelector: unavailable,
+    deckLibraryDrift: unavailable,
+    reconcileDeckLibrary: unavailable,
     refreshCatalog: unavailable,
     catalogSummary: unavailable,
     estimateInstall: unavailable,

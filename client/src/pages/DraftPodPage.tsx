@@ -715,7 +715,7 @@ function BetweenGamesView({
 
     return (
       <div className={tabletLayout
-        ? "mx-auto flex h-[calc(100dvh_-_8rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
+        ? "mx-auto flex h-[calc(100dvh_-_4rem)] min-h-0 w-full max-w-none flex-col gap-4 overflow-hidden"
         : "mx-auto flex w-full max-w-4xl flex-col gap-4 py-8"}
       >
         <div className="flex items-center justify-between">
@@ -917,13 +917,19 @@ function DraftingPhaseContent({
     // so `view` is genuinely nullable here. In that window the seat count is unknown
     // and nothing is rendered: an intro sentence stating a confident wrong number is
     // worse than a frame with no intro, and the following `viewUpdated` supplies it.
-    return view ? (
+    if (!view) return null;
+
+    return (
       <DraftIntro
         mode={view.kind === "CommanderDraft" ? "commander" : "pod"}
         podSize={view.seats.length}
+        packCount={view.pack_count}
+        cardsPerPack={view.cards_per_pack}
+        packSizes={view.pack_sizes}
+        minDeckSize={view.min_deck_size}
         onContinue={() => setIntroDismissed(true)}
       />
-    ) : null;
+    );
   }
 
   // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
@@ -1325,7 +1331,7 @@ export function DraftPodPage() {
   }, [enterKind, searchParams]);
 
   const handleLeave = useCallback(async () => {
-    await leave(true);
+    await leave(false);
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);
@@ -1352,7 +1358,10 @@ export function DraftPodPage() {
       <MenuShell
         layout="stacked"
         contentWidthClass="max-w-none"
-        compactTopPadding={phoneLayout && (phase === "drafting" || phase === "deckbuilding")}
+        compactTopPadding={
+          (phoneLayout && (phase === "drafting" || phase === "deckbuilding"))
+          || tabletDeckbuilding
+        }
       >
         <div className="flex w-full flex-col">
           {screen === "betweenGames" && overlayDismissed && (

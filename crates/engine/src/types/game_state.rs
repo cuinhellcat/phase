@@ -69,7 +69,9 @@ use super::resolved_commands::{
 use super::zones::{ChainReferentIntent, EtbTapState};
 use super::zones::{ExileCostSourceZone, Zone};
 
-use crate::analysis::resource::{object_class, CounterClass, ObjectClass, ResourceAxis};
+use crate::analysis::resource::{
+    object_class, CounterClass, ObjectClass, ResourceAxis, UnboundedMarkKind,
+};
 use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -2119,6 +2121,21 @@ impl ResolveAllConsentRun {
             .find(|participant| !participant.granted)
             .map(|participant| participant.representative)
     }
+
+    /// The single authority for whether a `RespondResolveAllConsent` naming
+    /// `epoch` and `representative` is still answerable.
+    ///
+    /// The public `WaitingFor::ResolveAllConsent` prompt and this private run
+    /// are separate fields, and a run can be absent behind a standing prompt —
+    /// a viewer projection redacts the run (`visibility.rs`) while retaining
+    /// the prompt, so any state reconstructed from one carries the prompt with
+    /// no run behind it. Every producer of the prompt's action domain must ask
+    /// this before offering Grant or Decline: an offer the reducer can only
+    /// reject leaves the representative hammering an unanswerable prompt with
+    /// no other legal action, which no later boundary can undo.
+    pub fn accepts_response_from(&self, epoch: u64, representative: PlayerId) -> bool {
+        self.epoch == epoch && self.next_pending_representative() == Some(representative)
+    }
 }
 
 /// CR 609.7a: A source of damage chosen while creating a prevention or
@@ -3866,15 +3883,16 @@ pub struct PendingCopyTokenBatch {
 /// every seam honest — a new variant will not compile until classified).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PersistentAxisMaterialization {
-    /// CR 707.2 + CR 111.1: mint N tapped copy-tokens of this fodder profile
-    /// (the `TokensCreated` axis). Carries NO per-cycle count because the per-cycle
-    /// fodder count k is STRUCTURALLY ≡ 1: this stash is only registered when
-    /// `materialize_object_growth_shortcut`'s `derived_fodder_class`
-    /// found EXACTLY one new battlefield object per period
-    /// (a two+-object period returns `None` ⇒ no `Tokens` stash), so the boundary
-    /// mint of `count: amount` == k·amount is EXACT. (Contrast `Counters`/`Life`,
-    /// which carry a measured `per_cycle_delta` to handle k>1.)
-    Tokens(Box<CopiableValues>),
+    /// CR 707.2 + CR 111.1: mint `per_cycle_delta × N` tapped copy-tokens of this fodder profile
+    /// (the `TokensCreated` axis). `per_cycle_delta` is the per-cycle fodder count k, which
+    /// `materialize_object_growth_shortcut`'s `derived_fodder_class` proves is a HOMOGENEOUS
+    /// multiset — every member equal under `analysis::resource::fodder_content_eq` AND under
+    /// `game::printed_cards::intrinsic_copiable_values`, so one profile faithfully represents all
+    /// k. A count contributed by a live `CreateToken` replacement is NOT in k: that period routes
+    /// to `DriveSequence` instead (`analysis::resource::token_growth_is_observed`), because this
+    /// arm re-runs the replacement pipeline and would otherwise apply it twice.
+    /// (Mirrors `Counters`/`Life`, which carry the same field.)
+    Tokens(Box<TokenGrowth>),
     /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
     /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).
     Counters(Vec<CounterGrowth>),
@@ -3890,8 +3908,12 @@ pub enum PersistentAxisMaterialization {
     /// The `sequence` is CLONED into the stash (it serializes; round-trip verified) so the
     /// boundary read survives save/reload and does NOT rely on the serde-skipped live
     /// `last_loop_action_sequence` (sidesteps the Kilo FIX-3 drop-on-load scar).
-    /// `collapsed_axes` is the exact ∞-mark set this loop set (== `proposal.unbounded`),
-    /// captured at accept for a scoped clear.
+    /// `collapsed_axes` is the subset of the loop's ∞-mark set that THIS materialization is
+    /// accountable for ending — the `DeferredAccrual` axes, per
+    /// `analysis::resource::ResourceAxis::unbounded_mark_kind`, captured at accept for a scoped
+    /// clear. It is deliberately NOT `proposal.unbounded`: a `StandingCapability` axis (today,
+    /// `Mana(_)`) is already materialized in the pool and its `∞` ends under CR 500.5 + CR 106.4,
+    /// not with this collapse.
     DriveSequence {
         sequence: Vec<LoopActionContext>,
         collapsed_axes: Vec<ResourceAxis>,
@@ -3962,6 +3984,26 @@ pub(crate) fn collapsed_counter_axis(
         .map(|o| object_class(o.card_types.core_types.as_slice()))
         .unwrap_or(ObjectClass::Other);
     ResourceAxis::Counter(CounterClass::from_counter_type(ct), oc)
+}
+
+/// CR 111.3 + CR 707.2: the fodder profile the boundary mint copies, plus the per-cycle count
+/// `k` the certified period reproduces. Mirrors [`CounterGrowth`]'s `per_cycle_delta`; the mint
+/// applies `per_cycle_delta * N` exactly as the `Counters`/`Life` arms do.
+///
+/// CR 111.3, not CR 111.10: a created token's characteristics are the ones the creating spell or
+/// ability defines, and those ARE its copiable values. CR 111.10's scope is predefined tokens
+/// (Treasure, Food, ...) and does not cover this profile.
+///
+/// `per_cycle_delta` is the count the period's OWN effects create. A count contributed by a live
+/// `CreateToken` REPLACEMENT is deliberately NOT in it: the boundary mint re-runs that pipeline
+/// (`game::effects::token_copy::drive_copy_token_batches` -> `ProposedEvent::CreateToken` ->
+/// `replacement::replace_event`), so folding the replacement's multiplication in here would apply
+/// it twice. Such a period never reaches this struct — it routes to `DriveSequence`; see
+/// `analysis::resource::token_growth_is_observed`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenGrowth {
+    pub profile: Box<CopiableValues>,
+    pub per_cycle_delta: u32,
 }
 
 /// CR 122.1: one object's per-cycle beneficial counter growth captured at accept, for
@@ -4092,8 +4134,10 @@ pub struct PendingChooseOneOf {
     pub branches: Vec<AbilityDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parent_targets: Vec<TargetRef>,
+    /// Boxed to keep the serializable resolution-frame enum compact. `Box` is
+    /// serde-transparent, so suspended-game wire payloads remain unchanged.
     #[serde(default)]
-    pub context: super::ability::SpellContext,
+    pub context: Box<super::ability::SpellContext>,
     /// CR 608.2c: Runtime tail retained until the final queued chooser selects
     /// a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5728,7 +5772,7 @@ pub enum BatchCompletion {
         /// must too. `None` for the kept-choice / dig paths, which emit their own
         /// `EffectResolved` before the pause (or rely on the continuation).
         emit_reveal_until_resolved: Option<ObjectId>,
-        /// CR 608.2c + CR 701.62a (#7467): a paused manifest-dread entry's
+        /// CR 608.2c + CR 701.62a: a paused manifest-dread entry's
         /// chosen object. The completion drain publishes it as the chain's
         /// fresh tracked set — only once the entry has actually finished
         /// (battlefield gate) and right before the parked consumer drains —
@@ -5873,6 +5917,19 @@ pub enum BatchCompletion {
     /// second physical card has completed its independently replaceable move,
     /// carrying the originating event's applied-set through every pause.
     MeldRedirect { source_id: ObjectId },
+    /// CR 701.17a + CR 603.2c + CR 616.1: a mill batch settled. One `Milled`
+    /// event is emitted per card that actually left the library, after the whole
+    /// batch has been delivered. A CR 616.1 per-card ordering choice parks the
+    /// undelivered tail and the resume path drains it with a fresh event vector,
+    /// so no single synchronous event window spans the pause — the milling
+    /// context has to ride the batch instead.
+    MilledDeliveryComplete {
+        player_id: PlayerId,
+        /// The cards this instruction asked to mill. Each is emitted only if it
+        /// actually departed the library, so the set is a candidate list rather
+        /// than a result.
+        cards: Vec<ObjectId>,
+    },
 }
 
 /// CR 603.3b + CR 608.2g: terminal settlement that must wait until the
@@ -6270,8 +6327,7 @@ pub enum ZoneDeliveryExileTracking {
 }
 
 /// CR 614.12a + CR 616.1: Which layer drains `post_replacement_continuation`
-/// after a post-replacement zone delivery (Phase-B divergence reconciliation,
-/// PLAN §7). The replacement-choice resume path historically drained the
+/// after a post-replacement zone delivery. The replacement-choice resume path drained the
 /// continuation in its own epilogue — WITH the spell-resolution ctx and with
 /// `post_replacement_source` cleared for zone changes — while the shared
 /// delivery tail drains it ctx-less without the clear. Parameterizing the tail
@@ -6362,7 +6418,7 @@ pub struct DelayedTrigger {
     /// Source permanent that created this delayed trigger.
     pub source_id: ObjectId,
     /// Whether this trigger fires once and is removed (most delayed triggers).
-    /// CR 603.7c.
+    /// CR 603.7b.
     pub one_shot: bool,
     /// Private command-backed installation identity. Legacy delayed triggers
     /// continue through the normal rules lifecycle without receipt or
@@ -6897,11 +6953,18 @@ pub struct ManaAbilityCostCursor {
 /// replacement-paused sacrifice cost. Selected sacrifices remove their
 /// activation-cost component; a SelfRef sacrifice resumes the automatic
 /// additional-cost path without replaying the sacrifice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PendingSacrificeCostCompletion {
     SelectedNonSelf,
     SelfRef,
+    /// CR 118.3 + CR 118.11-12: a resolving optional PayCost branch owns its
+    /// substituted root and exact selected incarnations until every sacrifice
+    /// has reached a terminal replacement outcome.
+    ResolutionOptionalPayment {
+        frame: Box<OptionalEffectFrame>,
+        selected: Vec<ObjectIncarnationRef>,
+    },
 }
 
 /// CR 702.21a + CR 701.21 + CR 616.1: The unpaid work after one ward sacrifice
@@ -6953,7 +7016,10 @@ pub enum PendingCostMoveResume {
     },
     SacrificeForCost {
         player: PlayerId,
-        pending: Box<PendingCast>,
+        /// Cast/activation payments retain their announcement. Resolution-time
+        /// optional payments instead carry their typed tail in `completion`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<Box<PendingCast>>,
         chosen: Vec<ObjectId>,
         /// Index into `chosen` whose sacrifice completes or is prevented by
         /// the replacement action. Resumption continues at the next index.
@@ -8750,17 +8816,24 @@ pub enum CastOfferKind {
     /// CR 608.2g + CR 601.2 + CR 118.9: Interactive free-cast window opened by
     /// `Effect::FreeCastFromZones` (Invoke Calamity). The controller repeatedly
     /// chooses one `candidate` to cast for free (or declines to finish), up to
-    /// `remaining_casts` times, while the chosen spells' running total mana
-    /// value stays within `remaining_mv_budget`. After each successful cast the
-    /// window is re-offered with `remaining_casts` decremented, the budget
-    /// reduced, and `candidates` re-filtered to those still affordable.
+    /// `remaining_casts` times — or without a cast limit at all when
+    /// `remaining_casts` is `None` (the printed "any number of spells") — while the
+    /// chosen spells' running total mana value stays within
+    /// `remaining_mv_budget`. After each successful cast the window is
+    /// re-offered with `remaining_casts` decremented (a `None` bound stays
+    /// `None`), the budget reduced, and `candidates` re-filtered to those still
+    /// affordable.
     FreeCastWindow {
         /// CR 601.2a: Instant/sorcery cards (in the controller's graveyard
         /// and/or hand) that match the effect's filter and still fit the
         /// remaining MV budget.
         candidates: Vec<ObjectId>,
-        /// CR 601.2: Casts still available in this window.
-        remaining_casts: u8,
+        /// CR 608.2c: Casts still available in this window, or `None` for the
+        /// unbounded "any number of spells" form. Same encoding as
+        /// `Effect::FreeCastFromZones::count`; the candidate list is then the
+        /// only bound, which is what the printed instruction states.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_casts: Option<u8>,
         /// CR 202.3: Running-total mana-value budget remaining, or `None` for
         /// no MV cap.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10901,28 +10974,20 @@ fn migrate_legacy_turn_face_up_resume(value: &mut serde_json::Value) -> Result<(
     Ok(())
 }
 
-/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried
-/// `options: Vec<DungeonId>` and `WaitingFor::ChooseDungeonRoom` carried
-/// `options: Vec<u8>` plus `option_names: Vec<String>` before each option grew
-/// the room's printed name and room-ability text (CR 309.4b-c).
+/// Protocol 36 / P2P 27: `WaitingFor::ChooseDungeon` carried `options: Vec<DungeonId>` and
+/// `WaitingFor::ChooseDungeonRoom` carried `options: Vec<u8>` plus `option_names: Vec<String>`
+/// before each option grew the room's printed name and room-ability text (CR 309.4b-c), so a save
+/// paused at either prompt cannot deserialize into the current shape.
 ///
-/// A save paused at either prompt therefore cannot deserialize into the current
-/// shape. This migrates rather than rejects because the migration is TOTAL: the
-/// legacy payload's scalars are exactly the keys into the static dungeon table.
-/// A `DungeonId` resolves its own topmost room (CR 309.4a), and a room index
-/// resolves that room's name and text, so the rebuilt preview is identical to
-/// what the current engine would emit at that position — no saved game is lost
-/// and no field is guessed. `option_names` is dropped because `RoomPreview::name`
-/// now carries it from the same authority.
-///
-/// Rebuilt through `dungeon::dungeon_preview` / `dungeon::room_preview` rather
-/// than hand-written JSON, so this migration cannot drift from the shape the
-/// prompts actually emit.
-///
-/// Idempotent: legacy options are scalars (string / number) and current ones are
-/// objects, so a re-run over already-current state matches nothing. A `DungeonId`
-/// this engine does not know is a hard error — that is corrupt state, not a
-/// migratable shape.
+/// This migrates rather than rejects because the migration is TOTAL: the legacy scalars are
+/// exactly the keys into the static dungeon table. A `DungeonId` resolves its own topmost room
+/// (CR 309.4a) and a room index resolves that room's name and text, so the rebuilt preview equals
+/// what the engine emits at that position; `option_names` is dropped because `RoomPreview::name`
+/// carries it from the same authority. Rebuilt through `dungeon::dungeon_preview` /
+/// `dungeon::room_preview` rather than hand-written JSON, so it cannot drift from the shape the
+/// prompts emit. Idempotent: legacy options are scalars and current ones are objects, so a re-run
+/// matches nothing. An unknown `DungeonId` is a hard error — corrupt state, not a migratable
+/// shape.
 fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Result<(), String> {
     use crate::game::dungeon::{dungeon_preview, room_preview, DungeonId};
     use std::str::FromStr;
@@ -11210,6 +11275,53 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a viewer projection presented as authoritative state.
+///
+/// A projection is not a damaged authority that could be repaired — it is a
+/// different kind of object. `filter_state_for_viewer` zeroes `rng_seed` and
+/// `rng_word_pos`, clears `resolved_rules_journal` and `product_knowledge_state`,
+/// and empties `resolution_stack`; none of that is reconstructible, so a
+/// "repair" could only fabricate rules authority. Refusing is the only sound
+/// answer. `RestoredStackAutomation::Repair` keeps its separate job: an
+/// authoritative state whose stack automation is incoherent.
+///
+/// THIS STRING IS PLAYER-VISIBLE COPY, not a log line. On the WASM restore
+/// route it is wrapped by these frames, innermost outward — named by SYMBOL
+/// rather than counted, because a frame count is exactly the claim that goes
+/// stale:
+///
+///   - `prepare_restored_game_state` (`crates/engine-wasm/src/lib.rs`) —
+///     `format!("Failed to deserialize GameState: {error}")`. A **Rust** frame.
+///   - `gameProvider.resumeReset.restoreFailed` —
+///     `"Could not restore saved game: {{error}}"`, interpolated from
+///     `err.message` by the resume `catch` in
+///     `client/src/providers/GameProvider.tsx`.
+///   - `gamePage.resumeReset.message` — `"{{reason}} A new game was started."`,
+///     rendered by `client/src/pages/GamePage.tsx` in a dismissible notice.
+///
+/// **That list is scoped to that route and is NOT asserted complete for any
+/// other.** Other ingests wrap differently (`GameSession::from_persisted` in
+/// server-core; the bare `impl Deserialize for GameState`), and the
+/// `TrustedEnvelope` arm adds two `serde::de::Error::custom` hops that add no
+/// text of their own.
+///
+/// So this sentence must read correctly BOTH standing alone (a future caller
+/// may drop the Rust prefix) and inside those frames: it must neither repeat
+/// "could not restore" nor announce that a new game is starting, because the
+/// two locale frames already say those. Write for a player; keep seat numbers
+/// and engine vocabulary out of it. The engine-wasm prefix contributes its own
+/// duplicated register and the noun `GameState`; that residue belongs to that
+/// frame, is knowingly accepted here, and is NOT a reason to reword this
+/// sentence — rewording it cannot remove either.
+fn reject_viewer_projection_as_authority(state: &GameState) -> Result<(), String> {
+    match state.viewer_projection {
+        None => Ok(()),
+        Some(_) => Err("This saved game only holds the view that was shown on \
+                        screen, not the full game record."
+            .to_string()),
+    }
+}
+
 impl Serialize for TrustedGameStateEnvelope {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -11419,6 +11531,95 @@ pub enum PersistedGameState {
     Trusted(Box<TrustedGameStateEnvelope>),
 }
 
+/// Controls when a decoded persisted state may be finalized.
+///
+/// A persisted payload contains only serializable engine state. Callers that
+/// restore runtime-only card data must defer finalization until that data has
+/// been installed; finalizing it first can publish a priority window derived
+/// from incomplete characteristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistedRestoreFinalization {
+    /// The caller supplies runtime-only state before consuming the prepared
+    /// token with [`PreparedPersistedGameState::finalize_after_rehydration`].
+    DeferUntilRehydrated,
+    /// Compatibility policy for consumers that have no runtime rehydration
+    /// step. This still uses the same checked restore pipeline.
+    Immediate,
+}
+
+/// A decoded persisted game that has passed restore-boundary repair but has
+/// not yet been made externally observable.
+///
+/// The contained game state is deliberately opaque. The only way to mutate it
+/// is the one-shot rehydration closure, followed by the engine-owned finalizer.
+/// This prevents a persistence consumer from accidentally publishing an
+/// intermediate priority state between decode and runtime rehydration.
+#[derive(Debug)]
+pub struct PreparedPersistedGameState {
+    state: GameState,
+    finalization: PersistedRestoreFinalization,
+    recovered_terminal_rest: bool,
+}
+
+/// A persisted state reached a priority window with unresolved resolution
+/// ownership and no exact engine-owned terminal repair.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PersistedRestoreError {
+    #[error("persisted state uses an unsupported format configuration: {0}")]
+    UnsupportedFormat(String),
+    #[error("persisted restore finalization policy mismatch: {0}")]
+    FinalizationPolicyMismatch(&'static str),
+    #[error("persisted state runtime rehydration failed: {0}")]
+    RehydrationFailed(String),
+    #[error("persisted state has unsettled resolution ownership at priority")]
+    UnsettledPriorityResolution,
+    #[error("persisted terminal-rest recovery did not make strict progress")]
+    TerminalRestRecoveryExhausted,
+    #[error("persisted priority state has deferred triggers that could not settle")]
+    DeferredTriggerSettlement,
+    #[error("persisted priority settlement failed: {0}")]
+    PrioritySettlementFailed(String),
+}
+
+impl PreparedPersistedGameState {
+    /// Rehydrate runtime-only state, then run the single restore finalization
+    /// boundary. The closure is intentionally the only mutable access to the
+    /// decoded state and is consumed exactly once with this token.
+    pub fn finalize_after_rehydration(
+        self,
+        rehydrate: impl FnOnce(&mut GameState) -> Result<(), String>,
+    ) -> Result<GameState, PersistedRestoreError> {
+        if self.finalization != PersistedRestoreFinalization::DeferUntilRehydrated {
+            return Err(PersistedRestoreError::FinalizationPolicyMismatch(
+                "prepared for immediate finalization",
+            ));
+        }
+        self.finish_after_rehydration(rehydrate)
+    }
+
+    fn finish_after_rehydration(
+        self,
+        rehydrate: impl FnOnce(&mut GameState) -> Result<(), String>,
+    ) -> Result<GameState, PersistedRestoreError> {
+        let mut state = self.state;
+        rehydrate(&mut state).map_err(PersistedRestoreError::RehydrationFailed)?;
+        crate::game::engine::finalize_persisted_restore(&mut state, self.recovered_terminal_rest)?;
+        Ok(state)
+    }
+
+    /// Finish a checked restore whose consumer has no runtime-only state to
+    /// hydrate. Kept separate from `into_game_state` so every new persistence
+    /// boundary chooses its finalization policy explicitly.
+    pub fn finalize_immediately(self) -> Result<GameState, PersistedRestoreError> {
+        if self.finalization != PersistedRestoreFinalization::Immediate {
+            return Err(PersistedRestoreError::FinalizationPolicyMismatch(
+                "requires runtime rehydration before finalization",
+            ));
+        }
+        self.finish_after_rehydration(|_| Ok(()))
+    }
+}
+
 impl Serialize for PersistedGameState {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -11488,8 +11689,10 @@ impl PersistedGameState {
         Self::Trusted(Box::new(TrustedGameStateEnvelope::capture(state)))
     }
 
-    /// Restores the persisted form through the appropriate trust boundary.
-    pub fn into_game_state(self) -> GameState {
+    /// Decodes the persisted form through the appropriate trust boundary,
+    /// without publishing it. This is private on purpose: every external
+    /// restore must first pass the checked terminal-rest preparation below.
+    fn into_game_state_unchecked(self) -> GameState {
         let mut state = match self {
             Self::Raw(state) => {
                 let mut state = *state;
@@ -11542,6 +11745,38 @@ impl PersistedGameState {
         state.rehydrate_rng();
         state.resume_stale_token_commander_zone_choice();
         state
+    }
+
+    /// Decode and repair a persisted state before runtime-only data is
+    /// rehydrated. No priority pass, Resolve All resume, or other player action
+    /// is manufactured here.
+    pub fn prepare_for_restore(
+        self,
+        finalization: PersistedRestoreFinalization,
+    ) -> Result<PreparedPersistedGameState, PersistedRestoreError> {
+        let mut state = self.into_game_state_unchecked();
+        state
+            .format_config
+            .reject_unimplemented_range_of_influence()
+            .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        let recovered_terminal_rest =
+            crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
+        Ok(PreparedPersistedGameState {
+            state,
+            finalization,
+            recovered_terminal_rest,
+        })
+    }
+
+    /// Checked decode for callers without runtime-only rehydration.
+    ///
+    /// Production persistence boundaries that need runtime-only card data use
+    /// [`Self::prepare_for_restore`] with deferred finalization. This immediate
+    /// variant remains fallible so persisted corruption cannot turn into a
+    /// process panic at a library boundary.
+    pub fn into_game_state(self) -> Result<GameState, PersistedRestoreError> {
+        self.prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .and_then(PreparedPersistedGameState::finalize_immediately)
     }
 }
 
@@ -13755,28 +13990,19 @@ pub struct PendingLifelinkGain {
     pub amount: u32,
 }
 
-/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous
-/// combat-damage batch, parked because a lifelink life-gain event met two or
-/// more co-applicable replacement effects and the gaining player must choose
-/// which applies first.
+/// CR 510.2 + CR 616.1 + CR 702.15b: the unfinished tail of ONE simultaneous combat-damage batch,
+/// parked because a lifelink life-gain event met two or more co-applicable replacement effects
+/// and the gaining player must choose which applies first. CR 510.2 forbids *casting spells and
+/// activating abilities* between combat damage being assigned and dealt — a priority window — but
+/// not a CR 616.1 choice made while the event is being applied, which opens no priority window
+/// and puts nothing on the stack. What it *does* forbid is replaying the batch: it is one event,
+/// so the damage is never re-dealt and only the unstarted tail is parked.
 ///
-/// CR 510.2 forbids *casting spells and activating abilities* between combat
-/// damage being assigned and dealt — a priority window. It does NOT forbid a
-/// CR 616.1 choice made while the event is being applied, which opens no
-/// priority window and puts nothing on the stack. The belief that it did is
-/// what dropped the gain: the choice cannot be answered inside the turn-based
-/// action, so 100% of that source's gain — and every later lifelink source in
-/// the same batch — was discarded.
-///
-/// What CR 510.2 *does* forbid is replaying the batch: it is one event. So the
-/// damage is never re-dealt; only the unstarted tail is parked.
-///
-/// The tail is parked whole, in emission order, so the completing batch's event
-/// stream is byte-identical to the un-paused one: per-source gains, then the
-/// per-player `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention
-/// riders. Deferring Phase D rather than hoisting it is what makes it
-/// impossible for a rider's own continuation (CR 615.5) to run while the
-/// CR 616.1 prompt is open.
+/// The tail is parked whole, in emission order, so the completing batch's event stream is
+/// byte-identical to the un-paused one: per-source gains, then the per-player
+/// `CombatDamageDealtToPlayer` aggregate, then Phase D's prevention riders. Deferring Phase D
+/// rather than hoisting it makes it impossible for a rider's own continuation (CR 615.5) to run
+/// while the CR 616.1 prompt is open.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCombatLifelink {
     /// CR 702.15e: per-source gains still owed, in batch order — separate life
@@ -13803,25 +14029,18 @@ pub struct PendingCombatLifelink {
     /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
     /// is not a JSON map key, and the record is serialized.
     pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
-    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on.
+    /// CR 732.2a: the pre-batch life totals the loop-detection ring keys on. Carried here rather
+    /// than re-snapshotted at resume time, which is what buys the PAUSE-path guard call: the
+    /// pause is reached under `PassPriority`, which `apply()` exempts from its blanket ring
+    /// clear, so a pre-batch snapshot lets that call observe the CR 120.3a damage this batch
+    /// already dealt. Re-snapshotting at drain entry makes the comparison vacuous there —
+    /// `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot` fails when it is.
     ///
-    /// Carried here rather than re-snapshotted at resume time. What that buys is
-    /// the PAUSE-path guard call: the pause is reached under `PassPriority`, which
-    /// `apply()` exempts from its blanket ring clear, so a pre-batch snapshot is
-    /// what lets that call observe the CR 120.3a damage this batch has already
-    /// dealt. Re-snapshotting at drain entry would make the comparison vacuous
-    /// there — `parked_batch_invalidates_the_loop_ring_against_the_pre_batch_snapshot`
-    /// is the fixture that fails when it is.
-    ///
-    /// It buys NOTHING on the resume, and this is MEASURED, not assumed:
-    /// `apply()` clears `loop_detect_ring` for every action that is neither in its
-    /// exemption list nor an answer to a `WaitingFor::is_forced_cascade_window`,
-    /// and `GameAction::ChooseReplacement` / `WaitingFor::ReplacementChoice` are in
-    /// neither set. The ring is therefore already empty before the drain is
-    /// re-entered, so the completion-path call cannot be observed to clear
-    /// anything on that path. Do not write, or rely on, a claim that this window
-    /// "observes the paused source's own gain" — arithmetically it spans it, but
-    /// no observer survives to see it.
+    /// It buys NOTHING on the resume: `apply()` clears `loop_detect_ring` for every action
+    /// neither in its exemption list nor answering a `WaitingFor::is_forced_cascade_window`, and
+    /// `ChooseReplacement` / `ReplacementChoice` are in neither set, so the ring is already empty
+    /// before the drain is re-entered. Do not claim this window "observes the paused source's own
+    /// gain" — arithmetically it spans it, but no observer survives to see it.
     pub lives_before: Vec<i32>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
@@ -13973,7 +14192,7 @@ impl LoopCollapseAxis {
     /// only the three materializable axes carry a label; every non-materializable axis
     /// maps to `None` explicitly, so a future materializable axis build-breaks here and
     /// forces a conscious classification.
-    fn from_resource_axis(axis: ResourceAxis) -> Option<LoopCollapseAxis> {
+    pub(crate) fn from_resource_axis(axis: ResourceAxis) -> Option<LoopCollapseAxis> {
         match axis {
             ResourceAxis::TokensCreated => Some(LoopCollapseAxis::Tokens),
             // Real value on the observed-growth path is `Counter(Other, Other)`; both
@@ -14007,29 +14226,20 @@ pub enum RetargetScope {
     ForcedTo(TargetRef),
 }
 
-/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state.
+/// CR 103.5 / CR 104.1: who — if anyone — may act in a `WaitingFor` state. THE single authority
+/// behind [`WaitingFor::acting_player`] and [`WaitingFor::acting_players`], which are adapters
+/// over [`WaitingFor::acting_authority`], whose exhaustive per-variant match lives there and
+/// nowhere else.
 ///
-/// THE single authority behind [`WaitingFor::acting_player`] and
-/// [`WaitingFor::acting_players`]; both are adapters over
-/// [`WaitingFor::acting_authority`], and the exhaustive per-variant match lives
-/// there and nowhere else.
-///
-/// The type exists so that "nobody acts" cannot be written as a bare `None`.
-/// A state with no acting player is advanced by something OUTSIDE the action
-/// pipeline, and if that something is never called the game hangs with no
-/// player able to move it and no client rendering a prompt. Naming the
-/// advancer in the type is what makes the obligation reviewable; the census in
-/// `tests/integration/waiting_for_actor_authority_census.rs` is what makes it
-/// unskippable.
-///
-/// INVARIANT THE CENSUS ENFORCES: every arm of `acting_authority` is a bare,
-/// UNGUARDED pattern whose body is exactly one constructor call on this enum —
-/// possibly wrapped by `rustfmt` in a block whose single tail expression is
-/// that call — and the census PINS the constructor set it accepts, so a new
-/// one cannot route its arms past the adjudications while the census still
-/// reports healthy (see that file's `A4c` and `A4d`). A match guard would let
-/// an arm decide the answer somewhere the census cannot read, so guards are
-/// rejected outright — see that file's `A8`.
+/// The type exists so that "nobody acts" cannot be written as a bare `None`. A state with no
+/// acting player is advanced by something OUTSIDE the action pipeline, and if that something is
+/// never called the game hangs with no player able to move it and no client rendering a prompt.
+/// Naming the advancer in the type makes the obligation reviewable; the census in
+/// `tests/integration/waiting_for_actor_authority_census.rs` makes it unskippable. That census
+/// requires every arm of `acting_authority` to be a bare, UNGUARDED pattern whose body is exactly
+/// one constructor call on this enum, PINS the constructor set it accepts (its `A4c` / `A4d`) so a
+/// new one cannot route arms past the adjudications, and rejects guards outright (its `A8`) — a
+/// guard would let an arm decide the answer where the census cannot read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActingAuthority {
     /// Exactly one player is authorized to submit the next action.
@@ -14220,21 +14430,17 @@ impl WaitingFor {
         }
     }
 
-    /// THE single authority on who — if anyone — may act in this state.
+    /// THE single authority on who — if anyone — may act in this state. [`Self::acting_player`]
+    /// and [`Self::acting_players`] are adapters over this function; the per-variant match lives
+    /// here and nowhere else.
     ///
-    /// [`Self::acting_player`] and [`Self::acting_players`] are adapters over
-    /// this function; the per-variant match lives here and nowhere else.
-    ///
-    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one
-    /// [`ActingAuthority`] constructor call, from the set that type's census
-    /// pins. No `let`, no early return, no preprocessing before the `match`,
-    /// and no match guard: a guard would let an arm decide the answer
-    /// somewhere that census cannot read it. [`ActingAuthority`]'s doc names
-    /// the census by path; `source_census.rs`'s `EXEMPT` table records that
-    /// path too. If a per-arm condition seems necessary, it belongs either in
-    /// a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
-    /// (when it merely narrows an authority this arm already declares,
-    /// exactly as the CR 103.5 `pending.len() == 1` test does).
+    /// Every arm MUST be a bare, UNGUARDED pattern whose body is exactly one [`ActingAuthority`]
+    /// constructor call, from the set that type's census pins. No `let`, no early return, no
+    /// preprocessing before the `match`, and no match guard: a guard would let an arm decide the
+    /// answer somewhere that census cannot read it. If a per-arm condition seems necessary it
+    /// belongs either in a new `WaitingFor` variant (when it changes WHO acts) or in an adapter
+    /// (when it merely narrows an authority this arm already declares, exactly as the CR 103.5
+    /// `pending.len() == 1` test does).
     pub fn acting_authority(&self) -> ActingAuthority {
         match self {
             WaitingFor::MulliganDecision { pending, .. } => {
@@ -15609,7 +15815,6 @@ impl CastingVariant {
             | CastingVariant::MoreThanMeetsTheEye
             | CastingVariant::Disturb
             | CastingVariant::Impending
-            | CastingVariant::Prototype
             // CR 702.140a: Mutate replaces the spell's mana cost with the mutate
             // cost — an alternative cost, so only one may apply (CR 118.9a).
             | CastingVariant::Mutate
@@ -15627,6 +15832,12 @@ impl CastingVariant {
             | CastingVariant::Omen
             | CastingVariant::Retrace
             | CastingVariant::Aftermath
+            // CR 718.2 + CR 718.3b: Prototype swaps in an alternative SET OF
+            // CHARACTERISTICS — the prototyped mana cost IS the spell's mana
+            // cost, not an alternative cost (CR 118.9). A prototyped cast can
+            // therefore still combine with one alternative cost (a free-cast
+            // grant or rider).
+            | CastingVariant::Prototype
             // CR 702.133a: Jump-start discards a card as an *additional* cost on
             // top of the normal mana cost — not an alternative cost (CR 118.9a).
             | CastingVariant::JumpStart
@@ -15634,6 +15845,75 @@ impl CastingVariant {
             // cost of both halves — not an alternative cost.
             | CastingVariant::Fuse
             | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::ExilePermission { .. } => false,
+        }
+    }
+
+    /// CR 118.9a + CR 601.2b: does this variant elect an alternative cost of
+    /// the CARD's own — a keyword rider (Evoke, Bestow, Overload, …) or the
+    /// fixed face-down {3} — INDEPENDENT of whatever zone authority admits
+    /// the cast? Such a rider may only ride a normal-cost route: an
+    /// alternative-cost grant underneath it would be a second alternative
+    /// cost on the same cast.
+    ///
+    /// Distinct from [`CastingVariant::uses_alternative_cost`]: a variant
+    /// whose alternative cost IS its admitting permission's cost (Madness,
+    /// Suspend, Plot, Foretell, the permission elections, the graveyard
+    /// keyword routes) forms ONE casting method with its route — it applies
+    /// one alternative cost total, never a second — so it is `false` here
+    /// while `true` there.
+    pub fn is_independent_alternative_cost_rider(self) -> bool {
+        match self {
+            CastingVariant::Miracle
+            | CastingVariant::Evoke
+            | CastingVariant::Emerge
+            | CastingVariant::Dash
+            | CastingVariant::Blitz
+            | CastingVariant::Spectacle
+            | CastingVariant::Overload
+            | CastingVariant::Bestow
+            | CastingVariant::Awaken
+            | CastingVariant::Cleave
+            | CastingVariant::MoreThanMeetsTheEye
+            | CastingVariant::Impending
+            | CastingVariant::Mutate
+            | CastingVariant::Freerunning
+            | CastingVariant::Prowl
+            | CastingVariant::Surge
+            // CR 702.185a: the warp cost is the HAND-side alternative cost;
+            // the exile return cast is its own `WarpExile` route and never
+            // elects this variant.
+            | CastingVariant::Warp
+            | CastingVariant::Sneak { .. }
+            | CastingVariant::WebSlinging { .. }
+            // CR 601.2b + CR 702.37c / CR 702.168b: the fixed face-down {3}.
+            | CastingVariant::FaceDown => true,
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            // CR 718.2 + CR 718.3b: alternative CHARACTERISTICS, not an
+            // alternative cost — a free grant stacks with the prototype
+            // election (see `uses_alternative_cost`).
+            | CastingVariant::Prototype
+            // CR 702.81a / CR 702.133a / CR 702.102c: additional or combined
+            // printed costs, no alternative cost anywhere.
+            | CastingVariant::Retrace
+            | CastingVariant::JumpStart
+            | CastingVariant::Fuse
+            | CastingVariant::Aftermath
+            // Route-coupled: the variant's alternative cost IS its admitting
+            // permission's or keyword-route's cost — one method (CR 118.9a).
+            | CastingVariant::Madness
+            | CastingVariant::Suspend
+            | CastingVariant::Plot
+            | CastingVariant::Foretell
+            | CastingVariant::Escape
+            | CastingVariant::Flashback
+            | CastingVariant::Harmonize
+            | CastingVariant::Mayhem
+            | CastingVariant::Disturb
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::HandPermission { .. }
             | CastingVariant::ExilePermission { .. } => false,
         }
     }
@@ -16549,6 +16829,28 @@ declare_game_state! {
     /// one for legacy saves and is minted only by `BeginResolveAll`.
     #[serde(default = "initial_resolve_all_consent_epoch")]
     pub next_resolve_all_consent_epoch: u64,
+    /// Records that this state is a VIEWER PROJECTION, not rules authority.
+    ///
+    /// `None` is an authoritative state. `Some(viewer)` is the display snapshot
+    /// [`crate::game::visibility::filter_state_for_viewer`] produced for `viewer`,
+    /// which blanks ~20 private rules-execution carriers (the Resolve All consent
+    /// run, the stack-resolution session, every pending-resume cursor, the rules
+    /// journal, the RNG seed) while deliberately preserving the public
+    /// `waiting_for` that stands over them — see CR 400.2 for why hidden-zone
+    /// information is stripped in the first place. `viewer` may be a real seat or
+    /// the server's non-seat spectator sentinel.
+    ///
+    /// Serialized on purpose. The confusion this prevents crosses a JSON boundary:
+    /// without a marker on the wire, a projection is byte-identical to an
+    /// authoritative state whose carriers are legitimately absent, and installing
+    /// one leaves a prompt no player can answer (#8193). `skip_serializing_if`
+    /// keeps every authoritative payload byte-identical to what it is today, and
+    /// `default` keeps every pre-existing save loadable as `None`.
+    ///
+    /// NEVER `#[serde(skip)]`: that is defeated by exactly the round-trip this
+    /// exists to catch and would make the gate vacuous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_projection: Option<PlayerId>,
     /// Private protocol ledger behind the public consent/ready waiting states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_all_consent_run: Option<ResolveAllConsentRun>,
@@ -16773,7 +17075,7 @@ declare_game_state! {
     /// existing CR 704.5a SBA (which already ends every realistic-life drain), so
     /// losing it across a save/load/MP-snapshot boundary only defers the shortcut by a
     /// few resolutions — never changes a winner. Snapshots are `Arc`-shared so the
-    /// frequent `GameState::clone` (AI search, §9 probes) pays O(ring.len()) refcount
+    /// frequent `GameState::clone` (AI search probes) pays O(ring.len()) refcount
     /// bumps, not deep copies. INTENTIONALLY omitted from `impl PartialEq for GameState`
     /// (derived state, like `static_source_index`/`static_gate_truth` — both
     /// `#[serde(skip)]` AND eq-excluded; NOT `public_state_dirty`/`state_revision`/
@@ -17522,6 +17824,24 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_activated_this_turn: HashSet<ObjectIncarnationRef>,
+    /// CR 702.122a: Vehicles whose `KeywordAction::Crew` stack entry has
+    /// RESOLVED this turn — the explicit successful-crew provenance behind the
+    /// AI crew-repeat guard's payoff-in-force predicate
+    /// ([`crate::game::engine::crew_resolved_this_turn_contains`]). Recorded at
+    /// stack RESOLUTION (never at announcement — a countered crew never resolves
+    /// and never sets this, CR 701.6a) in the same arm that installs the UEOT
+    /// `AddType(Creature)` transient, so the marker and the payoff cannot drift.
+    /// Deliberately NOT derivable from `transient_continuous_effects`: a generic
+    /// SelfRef self-animation (Kylox, Voltstrider-class) installs the same
+    /// transient shape with no Crew resolution behind it. Cleared at turn start.
+    ///
+    /// Legacy saves default to an empty set: a save created after a crew already
+    /// resolved restores the UEOT transient without the marker, so the guard may
+    /// permit one bounded redundant crew before the first re-crew writes the
+    /// marker (mirrors the accepted `crew_activated_this_turn` legacy default).
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub crew_resolved_this_turn: HashSet<ObjectIncarnationRef>,
     /// CR 606.1 + CR 606.3 + CR 603.4: Per-player count of loyalty-ability
     /// activations this turn. Incremented in
     /// `planeswalker::finalize_loyalty_activation` whenever any loyalty ability
@@ -17586,7 +17906,8 @@ declare_game_state! {
     /// Empty except mid-declaration; drained by `finish_declare_attackers`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_attack_trigger_events: Vec<crate::types::events::GameEvent>,
-    /// CR 603.4: Per-ability per-turn resolution counter.
+    /// CR 608.2c: Per-ability per-turn resolution counter for ordinary
+    /// resolution-time conditions, not intervening-if conditions under CR 603.4.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
     /// `resolve_ability_chain` (depth 0) when the resolving ability has a
@@ -18755,12 +19076,16 @@ impl GameStateDecode {
             .as_object_mut()
             .ok_or_else(|| "persisted game state must be a JSON object".to_string())?;
         match mode {
-            // Historical raw persistence predates the explicit resolution-wire
-            // discriminator. This is the only ingress allowed to stamp v1.
+            // An UNVERSIONED raw payload carries no resolution-wire
+            // discriminator. Raw persistence in general does: the engine's own
+            // raw writer, `PersistedGameState::Raw`'s `Serialize`, routes
+            // through `ResolutionStateWire::to_value`, which always declares
+            // version 2. This is the only ingress allowed to infer a MISSING
+            // discriminator, and `declare_raw_resolution_wire` is the single
+            // authority that does. A payload that declares its own version
+            // keeps it and is handled exactly as any declared payload is.
             GameStateDecodeMode::PersistedRaw => {
-                object
-                    .entry("resolution_state_version".to_string())
-                    .or_insert_with(|| serde_json::Value::from(1));
+                crate::types::resolution::declare_raw_resolution_wire(object)?;
             }
             // Trusted snapshots are written as versioned resolution-wire
             // envelopes and must retain their declared compatibility mode.
@@ -18777,6 +19102,9 @@ impl GameStateDecode {
             .map_err(|error| error.to_string())?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
+        // The PERSISTED half of the projection gate; `decode` below carries the other.
+        // See the pairing comment there for why one site is not enough.
+        reject_viewer_projection_as_authority(&state)?;
         validate_trigger_firing_coherence(&state)?;
         reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
@@ -18803,12 +19131,22 @@ impl GameStateDecode {
         migrate_legacy_dungeon_choice_previews(&mut value)?;
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
+        // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
+        // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
+        // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
+        // by design, so a bare `GameState` deserialize is how a viewer legitimately
+        // receives a redacted board. Refusing projections here rejects that broadcast.
+        // The gate lives only on the PERSISTENCE ingress
+        // (`decode_persisted_resolution_state`), which is what a saved game restores
+        // through and where installing a projection as authority is the actual defect.
         validate_trigger_firing_coherence(&state)?;
-        // Both decode entry points guard, because they are genuinely two ingresses:
-        // `decode_persisted_resolution_state` above deserializes `ResolutionStateWire`
-        // itself and never routes through `decode`. Hosting the CR 732.2a bound check on
-        // only one of them leaves the other — the one a bare-`GameState` `impl Deserialize`
-        // reaches — able to revive a zero-bound offer.
+        // The CR 732.2a bound check IS hosted on both decode entry points, because they
+        // are genuinely two ingresses: `decode_persisted_resolution_state` above
+        // deserializes `ResolutionStateWire` itself and never routes through `decode`.
+        // Hosting it on only one leaves the other — the one a bare-`GameState`
+        // `impl Deserialize` reaches — able to revive a zero-bound offer. That argument
+        // is about a value no wire should ever carry; it does NOT extend to the
+        // projection marker, which the transport wire carries on purpose.
         reject_zero_bound_shortcut_offer(&state)?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
@@ -22667,6 +23005,7 @@ impl GameState {
                 player: starting_player,
             },
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
+            viewer_projection: None,
             resolve_all_consent_run: None,
             stack_resolution_session: None,
             interaction_session_id: None,
@@ -22768,6 +23107,7 @@ impl GameState {
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
+            crew_resolved_this_turn: HashSet::new(),
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
@@ -24193,7 +24533,7 @@ impl GameState {
 
     /// CR 732.2a: take (remove and return) the whole deferred materialization list for
     /// `controller`, if any. Removing on take is load-bearing for the boundary collapse
-    /// fixpoint (§7): the `LoopCollapse` submit handler must clear the stash — even on
+    /// fixpoint: the `LoopCollapse` submit handler must clear the stash — even on
     /// its error path — so the phase-transition re-drain terminates rather than
     /// re-prompting forever.
     pub fn take_pending_materialization(
@@ -24319,8 +24659,11 @@ impl GameState {
     /// projecting, because the marks and their enablers are still live. This set says nothing
     /// about them — it names what the boundary will REMOVE, not what the display may show.
     ///
-    /// Returns the axes UNFILTERED, including any `Mana(_)` a `DriveSequence` names, because the
-    /// caller MUST remove that axis at the boundary. Note the two axis classes end their `∞` by
+    /// Returns the axes UNFILTERED because filtering is the REGISTRATION site's job, not this
+    /// reader's — `game::engine::materialize_object_growth_shortcut` stores only `DeferredAccrual`
+    /// axes (`analysis::resource::ResourceAxis::unbounded_mark_kind`), so a stored `Mana(_)` can
+    /// now arrive only from a pre-fix save or a deliberate test graft, and this function reports
+    /// faithfully what is stored rather than hiding it. Note the two axis classes end their `∞` by
     /// different routes: `Tokens` / `Counters` / `Life` are DEFERRED and end here, when the
     /// boundary applies the growth; a `Mana(_)` is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
@@ -24335,6 +24678,9 @@ impl GameState {
     /// FAIL-CLOSED: only an axis some REGISTERED item actually collapses is returned, so an
     /// ∞ axis with no registration (a mana engine registers nothing) is never removed here —
     /// it keeps its badge until CR 500.5 ends it.
+    /// The `DriveSequence` arm's verbatim `extend` is correct *because* the stored set is now
+    /// computed at REGISTRATION rather than copied from the loop's whole ∞-mark set — see
+    /// `analysis::resource::ResourceAxis::unbounded_mark_kind`.
     /// EXHAUSTIVE over `PersistentAxisMaterialization` (no wildcard) — a future variant
     /// build-breaks here instead of silently leaking a stale `∞`.
     pub fn scheduled_collapse_axes(
@@ -24387,13 +24733,20 @@ impl GameState {
     ///   its axis + pill).
     /// - `Life { player, .. }` ⇒ remove `ResourceAxis::Life(player)`.
     /// - `DriveSequence { collapsed_axes, .. }` ⇒ remove exactly `collapsed_axes` and the
-    ///   display targets those axes back (the driven loop collapses whole).
+    ///   display targets those axes back (the driven loop collapses its `DeferredAccrual` axes;
+    ///   a `StandingCapability` axis it never named is not collapsed here — see
+    ///   `analysis::resource::ResourceAxis::unbounded_mark_kind`).
     ///
     /// PRESERVES any coexisting NON-collapsed axis (a debug `SetInfiniteMana` `Mana(_)`
     /// axis, or a second uncollapsed loop). The batched `Tokens` / `Counters` / `Life` items
-    /// never name a `Mana(_)` axis, so a batched collapse preserves mana by construction; a
-    /// `DriveSequence` CAN name one (its `collapsed_axes` is the loop's whole `proposal.unbounded`
-    /// set) and then removing it here is correct — that loop's mana really did end with it.
+    /// never name a `Mana(_)` axis, so a batched collapse preserves mana by construction; and NO
+    /// PRODUCTION PATH constructs a `DriveSequence` naming one either —
+    /// `game::engine::materialize_object_growth_shortcut` is the only production registration
+    /// site and it filters `collapsed_axes` to `DeferredAccrual`. So both routes now preserve a
+    /// standing `Mana(_)` capability by the SAME rule, and the preservation promise in
+    /// `game::engine_resolution_choices` holds on both. (Deliberately "no production path", not
+    /// "cannot exist": shipped fixtures graft `Mana(_)`-naming `DriveSequence`s by hand to
+    /// exercise the projection, and this function reports whatever is stored.)
     /// Drops `unbounded_resources[controller]`
     /// (and its `unbounded_loop_enablers` entry in engine-state lockstep, mirroring
     /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
@@ -24408,6 +24761,22 @@ impl GameState {
         // The axis set comes from `scheduled_collapse_axes`, so "what a stash schedules" and
         // "what is removed once applied" are one match, never two copies of it.
         let mut axes_to_remove = self.scheduled_collapse_axes(collapsed);
+        // CR 500.5 + CR 106.4: DEFENSE IN DEPTH at the consuming authority.
+        // `game::engine::materialize_object_growth_shortcut` already stores only
+        // `DeferredAccrual` axes, so on a stash from THIS build this retain removes nothing. It
+        // is kept because `ResourceAxis`'s exhaustive `match` build-breaks on a new AXIS, never
+        // on a new REGISTRATION SITE: a future second producer inherits the guarantee only if it
+        // is enforced where the value is USED. Reachability, not an obligation:
+        // `pending_unbounded_materialization` is `#[serde]`-persisted, so a `Mana(_)`-bearing
+        // stash can be grafted by a test or written by an older build (cross-version save
+        // compatibility is EXPRESSLY NOT a goal here), and either route lands ONLY on a
+        // `debug_infinite_mana` seat — `turns::drain_pending_phase_transition_progress`' CR 500.5
+        // loop-mana clear runs before this prompt and excludes exactly those seats. Mirrors the
+        // POSTURE of `derived_views::scheduled_display_axes`, NOT its question, so the predicates
+        // are deliberately NOT unified. Not applied inside `scheduled_collapse_axes`, which must
+        // keep reporting faithfully what a stash stores.
+        axes_to_remove
+            .retain(|axis| axis.unbounded_mark_kind() == UnboundedMarkKind::DeferredAccrual);
         // The token pile drops exactly when the token axis collapses — true for a batched
         // `Tokens` item and for a `DriveSequence` that names `TokensCreated`.
         let drop_token_pile = axes_to_remove.contains(&ResourceAxis::TokensCreated);
@@ -24480,7 +24849,7 @@ impl GameState {
     /// set, drop the player key AND its `unbounded_loop_enablers` entry IN LOCKSTEP (an engine-state
     /// invariant, not a rules requirement):
     /// enablers track the PRESENCE of any unbounded axis, and the `zones.rs` defuse hook
-    /// (`apply_zone_exit_cleanup`, `:534`–`:544`) whole-clears a controller's capability when ANY
+    /// (`apply_zone_exit_cleanup`) whole-clears a controller's capability when ANY
     /// enabler leaves. Leaving enablers orphaned (no backing axis) is a landmine — a later
     /// `SetInfiniteMana` re-marks that controller, then the stale enabler leaving mis-fires
     /// `clear_unbounded_loop`, silently killing the debug toggle. If a coexisting NON-Mana axis
@@ -24535,14 +24904,14 @@ pub(crate) fn objects_content_eq(
 /// comparator for [`objects_content_eq`] and the PR-7 Phase 4a object-growth
 /// cover gate (`analysis::resource::board_covers`, the non-grown complement).
 ///
-/// The compared set is the bucket-(i) partition of §5.2c (see
-/// `_gameobject_partition_is_total`): every per-object field a MANDATORY action can
+/// The compared set is the partition `_gameobject_partition_is_total` names: every per-object
+/// field a MANDATORY action can
 /// change on a stable (same-zone) object between two loop frames. Fields omitted
 /// here are justified by write site, not doc-string — volatile layer identity
 /// (`timestamp`/`incarnation`/`transformation_count`), projected P/T, cast-fact
 /// latches co-variate of a
 /// compared field, monotone-saturating latches (`foretold`/`monstrous`/…), and
-/// layer-derived characteristics (firewall-scanned statics) — see §5.2c.
+/// layer-derived characteristics (firewall-scanned statics).
 ///
 /// Strictness here is FAIL-SAFE for the shared 2p CR 104.4b path: a stricter
 /// equality can only SUPPRESS a wrongful draw, and every compared field represents
@@ -24574,7 +24943,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.loyalty == y.loyalty
         && x.defense == y.defense
         && x.name == y.name
-        // §5.2c ADD set (v4): firewall-blind numeric/growable accumulators and
+        // Firewall-blind numeric/growable accumulators and
         // oscillating designations that a loop body can drift on a stable object.
         && x.intensity == y.intensity // Alchemy Intensify accumulator
         && x.perpetual_mods == y.perpetual_mods // perpetual-edit accumulator
@@ -24585,7 +24954,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.prepared == y.prepared // SOS prepare/unprepare toggle
         && x.prepared_copy_source == y.prepared_copy_source // CR 722.3c linked exile copy
         && x.room_unlocks == y.room_unlocks // CR 709.5c door lock/unlock
-        // §5.2c ADD set (v5, S6): firewall-blind per-iteration accumulators on
+        // Firewall-blind per-iteration accumulators on
         // live battlefield/exile objects.
         && x.chosen_attributes == y.chosen_attributes // CR 205.2 remember/choose accumulator
         && x.goaded_by == y.goaded_by // CR 701.15c goad set
@@ -24603,7 +24972,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
 /// no-`..` destructure breaks the build the instant a GameState field is added,
 /// forcing a reviewer to decide whether `PartialEq` compares it — so no future
 /// field can become a hidden per-cycle accumulator that rides a covering pair to a
-/// false CR 732.2a win. Mirror of `_gameobject_partition_is_total` (§5.2b).
+/// false CR 732.2a win. Mirror of `_gameobject_partition_is_total`.
 #[cfg(test)]
 fn _gamestate_partition_is_total(s: &GameState) {
     let GameState {
@@ -24639,6 +25008,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat: _,
         waiting_for: _,
         next_resolve_all_consent_epoch: _,
+        // `viewer_projection`: COMPARED (fail-safe). It is `None` on every authoritative
+        // state, so every loop-detection sample compares `None == None` and COMPARING it
+        // can never suppress a legitimate CR 104.4b repeat. It is not an accumulator.
+        viewer_projection: _,
         resolve_all_consent_run: _,
         stack_resolution_session: _,
         interaction_session_id: _,
@@ -24763,6 +25136,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         activated_abilities_this_turn: _,
         activated_abilities_this_game: _,
         crew_activated_this_turn: _,
+        crew_resolved_this_turn: _,
         loyalty_abilities_activated_this_turn: _,
         extra_loyalty_activations_this_turn: _,
         exerted_this_turn: _,
@@ -24935,7 +25309,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     COMPARED — upstream's PartialEq excludes it, but excluding a COUNT from the cover gate
         //     is the fail-DANGEROUS direction, so `eq_except_growable` (resource.rs) compares it
         //     explicitly. It is `None` at every sample beat (cleared whenever `waiting_for ==
-        //     Priority`, effects/mod.rs:759) or a constant direct-assigned count across a real
+        //     Priority`, in `effects/mod.rs`) or a constant direct-assigned count across a real
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         //   - `pending_discard_batch`: COMPARED (hand-written `impl PartialEq` conjunct) — a
         //     paused discard-batch interaction state, the direct sibling of
@@ -25008,6 +25382,7 @@ impl PartialEq for GameState {
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for
             && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
+            && self.viewer_projection == other.viewer_projection
             && self.resolve_all_consent_run == other.resolve_all_consent_run
             && self.stack_resolution_session == other.stack_resolution_session
             && self.lands_played_this_turn == other.lands_played_this_turn
@@ -25090,6 +25465,7 @@ impl PartialEq for GameState {
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
+            && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.loyalty_abilities_activated_this_turn
                 == other.loyalty_abilities_activated_this_turn
             && self.extra_loyalty_activations_this_turn == other.extra_loyalty_activations_this_turn
@@ -26473,7 +26849,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("legacy effect save restores through the persisted boundary")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(matches!(
             restored.objects[&source].abilities[0].effect.as_ref(),
             Effect::SetTapState {
@@ -26680,7 +27057,8 @@ mod tests {
 
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("legacy pair marker migrates at the persistence boundary")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert!(restored.batched_zone_change_trigger_fired.contains(&(
                 definition_ref.clone(),
                 19,
@@ -26987,10 +27365,12 @@ mod tests {
 
         let raw = serde_json::from_value::<PersistedGameState>(raw)
             .expect("raw delayed install migrates")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let trusted = serde_json::from_value::<PersistedGameState>(trusted)
             .expect("trusted delayed install migrates")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
 
         assert_eq!(raw.delayed_triggers, trusted.delayed_triggers);
         assert_eq!(
@@ -27096,10 +27476,12 @@ mod tests {
         [
             serde_json::from_value::<PersistedGameState>(raw)
                 .expect("raw legacy dungeon prompt migrates")
-                .into_game_state(),
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
             serde_json::from_value::<PersistedGameState>(trusted)
                 .expect("trusted legacy dungeon prompt migrates")
-                .into_game_state(),
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract"),
         ]
     }
 
@@ -27402,7 +27784,8 @@ mod tests {
             erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("unique legacy event records reconcile")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert_eq!(
                 restored_deferred_zone_change_keys(&restored),
                 vec![(19, 0), (19, 1)]
@@ -27464,7 +27847,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("the parked batch's records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let batch = restored
             .pending_discard_batch
             .as_ref()
@@ -27569,7 +27953,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(wire)
             .expect("an absent parked batch defaults to None")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(restored.pending_discard_batch.is_none());
         assert!(
             matches!(
@@ -27650,7 +28035,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("the parked batch's records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let parked = restored
             .pending_combat_lifelink
             .as_ref()
@@ -27729,7 +28115,8 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(wire)
             .expect("an absent parked batch defaults to None")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert!(restored.pending_combat_lifelink.is_none());
         assert!(
             matches!(
@@ -27762,7 +28149,8 @@ mod tests {
             .expect("fixture serializes");
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("unique records repair a stale collision")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             restored_deferred_zone_change_keys(&restored),
             vec![(19, 0), (19, 1)]
@@ -27790,7 +28178,8 @@ mod tests {
             .expect("fixture serializes");
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("stamped prior-turn event remains valid")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(restored_deferred_zone_change_keys(&restored), vec![(18, 0)]);
     }
 
@@ -27814,7 +28203,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("stale ledger history is pruned before live event reconciliation")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
 
         assert_eq!(restored.zone_changes_this_turn.len(), 1);
         assert_eq!(
@@ -28001,7 +28391,8 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("all serialized carrier records reconcile")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         let GameEvent::ZoneChanged { record, .. } = &restored
             .pending_player_scope_sacrifice_choice
             .as_ref()
@@ -28250,7 +28641,8 @@ mod tests {
             erase_deferred_and_order_trigger_firing_classifiers(&mut persisted);
             let state = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("historical omitted Normal classifiers migrate")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
 
             assert_eq!(state.deferred_triggers[0].firing(), TriggerFiring::Ordinary);
             assert_eq!(
@@ -28330,6 +28722,902 @@ mod tests {
         }
     }
 
+    /// A coherent state parking exactly one `SpellResolution` frame with **no**
+    /// `resolving_stack_entry`. That omission is load-bearing: it is what keeps
+    /// `PersistedRestoreError::UnsettledPriorityResolution` from firing at the
+    /// restore boundary (its guard reads `resolving_stack_entry.is_some()`), so
+    /// the payload exercises the full decode *and* restore path rather than
+    /// stopping at a fail-closed refusal.
+    fn parked_spell_resolution_fixture() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(9_101),
+            PlayerId(0),
+            "Parked spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .resolution_stack
+            .push_spell_resolution(PendingSpellResolution {
+                object_id: spell,
+                controller: PlayerId(0),
+                casting_variant: CastingVariant::Normal,
+                cast_from_zone: None,
+                cast_controller: None,
+                cast_timing_permission: None,
+                spell_targets: Vec::new(),
+                actual_mana_spent: 0,
+                kickers_paid: Vec::new(),
+                additional_cost_payment_count: 0,
+                additional_cost_payments: Vec::new(),
+                convoked_creatures: Vec::new(),
+            });
+        state
+    }
+
+    /// The same parked frame, but resting on a **triggered** `resolving_stack_entry`
+    /// that carries its `TriggerFiring` discriminator. Removing that carrier from
+    /// the serialized value is what the unlabeled-carrier tests below do.
+    fn parked_frame_on_triggered_carrier_fixture() -> GameState {
+        let mut state = parked_spell_resolution_fixture();
+        let source = create_object(
+            &mut state,
+            CardId(9_102),
+            PlayerId(0),
+            "Triggered carrier source".to_string(),
+            Zone::Battlefield,
+        );
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(9_103),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Triggered carrier source".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.resolving_trigger_firing = Some(TriggerFiring::Ordinary);
+        state
+    }
+
+    /// V1 + V2. A raw save carrying a live `resolution_stack` decodes AND fully
+    /// restores, with the parked frame preserved rather than discarded.
+    ///
+    /// Red before `declare_raw_resolution_wire`: the raw ingress stamped
+    /// `resolution_state_version = 1` unconditionally, and the v1 branch refuses
+    /// any payload containing `resolution_stack`.
+    #[test]
+    fn raw_round_trip_preserves_a_live_resolution_frame() {
+        let state = parked_spell_resolution_fixture();
+        let parked = state
+            .active_spell_resolution()
+            .expect("the fixture parks a spell resolution")
+            .object_id;
+
+        // `GameState`'s derived `Serialize` — the unversioned raw writer whose
+        // shape `declare_raw_resolution_wire` infers from. NOT
+        // `to_value(PersistedGameState::Raw(..))`, which routes through
+        // `ResolutionStateWire::to_value` and emits a DECLARED v2 wire that would
+        // take the inference's early return and make this test vacuous.
+        let wire = serde_json::to_value(&state).expect("the bare GameState serializes");
+        assert!(
+            wire.get("resolution_stack").is_some(),
+            "the raw writer must emit resolution_stack for a non-empty frame stack; \
+             the inference keys on exactly this field"
+        );
+        assert!(
+            wire.get("resolution_state_version").is_none(),
+            "the raw writer must not declare a resolution wire version"
+        );
+        assert!(
+            wire.get("resolution_frames").is_none(),
+            "the raw writer must not emit the v2 frame carrier"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an unversioned raw payload with a live frame stack decodes")
+            .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+            .expect("a parked frame on no resolving carrier is coherent at the restore boundary")
+            .finalize_immediately()
+            .expect("the prepared restore finalizes");
+
+        assert_eq!(
+            restored.resolution_stack.len(),
+            1,
+            "the parked frame must survive the persistence boundary"
+        );
+        assert_eq!(
+            restored.active_spell_resolution().map(|p| p.object_id),
+            Some(parked),
+            "the frame must be PRESERVED, not merely tolerated — this is what \
+             distinguishes the fix from dropping the offending key"
+        );
+    }
+
+    /// V4. The absent-`resolution_stack` sibling: pre-#6269 saves and post-#6269
+    /// saves with an empty frame stack alike keep the legacy v1 treatment.
+    #[test]
+    fn raw_round_trip_without_a_resolution_frame_is_unchanged() {
+        let state = GameState::new_two_player(42);
+        let wire = serde_json::to_value(&state).expect("the bare GameState serializes");
+        assert!(
+            wire.get("resolution_stack").is_none(),
+            "an empty frame stack is omitted by skip_serializing_if, which is what \
+             routes this payload to the legacy v1 branch"
+        );
+
+        let restored = serde_json::from_value::<PersistedGameState>(wire)
+            .expect("an unversioned raw payload without a frame stack still decodes")
+            .into_game_state()
+            .expect("the legacy v1 projection restores");
+
+        assert!(
+            restored.resolution_stack.is_empty(),
+            "the v1 projection yields an empty frame stack, exactly as before"
+        );
+    }
+
+    /// V6 + V7. The unlabeled-carrier allowance is **not** widened to the raw
+    /// ingress by the inference. A raw payload that now classifies as v2 and
+    /// carries a triggered `resolving_stack_entry` with no firing carrier is
+    /// refused, at BOTH a Priority rest and a non-Priority prompt rest.
+    ///
+    /// What this prevents: `migrate_legacy_trigger_firing_carriers` fabricates
+    /// `TriggerFiring::LegacyDelayed` for an unlabeled triggered carrier when
+    /// `allow_unlabeled_v1_carriers` is set. CR 603.7 classifies delayed
+    /// triggered abilities, `TriggerFiring::is_delayed()` returns `true` for
+    /// `LegacyDelayed`, and three production consumers in `game/triggers.rs`
+    /// branch on it — trigger doubling (CR 603.2d), dropped-target re-push
+    /// (CR 603.3d), and ordering-batch grouping. Fabricating that classification
+    /// for an ordinary trigger is a rules error, so the inference must leave the
+    /// allowance exactly where it was.
+    #[test]
+    fn raw_inferred_v2_refuses_an_unlabeled_triggered_carrier() {
+        let priority_rest = parked_frame_on_triggered_carrier_fixture();
+
+        // The non-Priority sibling. `SpellResolution` is an `AfterChild` frame,
+        // so `ResolutionStack::validate` imposes no prompt match on it; what this
+        // case varies is the REST, because `recover_terminal_resolution_rest_on_restore`
+        // short-circuits on any non-Priority `waiting_for`. The refusal must
+        // therefore come from decode, not from the restore-boundary guard.
+        let mut prompt_rest = parked_frame_on_triggered_carrier_fixture();
+        prompt_rest.waiting_for = WaitingFor::ExertChoice {
+            player: PlayerId(0),
+            attacker: ObjectId(9_104),
+            remaining: Vec::new(),
+        };
+
+        for (label, state) in [
+            ("Priority rest", priority_rest),
+            ("prompt rest", prompt_rest),
+        ] {
+            let labeled = serde_json::to_value(&state).expect("the bare GameState serializes");
+            assert!(
+                labeled.get("resolution_stack").is_some(),
+                "{label}: the fixture must reach the inferred-v2 classification"
+            );
+
+            // Paired positive reach-guard, asserted FIRST: the identical payload
+            // WITH the carrier decodes. Without this the refusal below could pass
+            // for an unrelated reason.
+            assert!(
+                labeled
+                    .get("resolving_trigger_firing")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("Ordinary"),
+                "{label}: the fixture must carry the firing discriminator"
+            );
+            serde_json::from_value::<PersistedGameState>(labeled.clone()).unwrap_or_else(|error| {
+                panic!("{label}: the labeled payload must decode, got {error}")
+            });
+
+            let mut unlabeled = labeled;
+            unlabeled
+                .as_object_mut()
+                .expect("the raw payload is a JSON object")
+                .remove("resolving_trigger_firing");
+
+            let error = serde_json::from_value::<PersistedGameState>(unlabeled)
+                .expect_err("an unlabeled triggered carrier must not be admitted");
+            assert!(
+                error
+                    .to_string()
+                    .contains("resolving triggered entry has no firing carrier"),
+                "{label}: expected the fail-closed carrier refusal, got {error}"
+            );
+        }
+    }
+
+    /// V8. A declared `resolution_state_version` always beats the inferred shape,
+    /// and the raw and trusted ingresses agree on identical bytes — the inference
+    /// introduces no origin-dependent behavior anywhere downstream.
+    #[test]
+    fn declared_resolution_state_version_wins_over_inferred_shape() {
+        let state = parked_spell_resolution_fixture();
+        let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
+
+        let declare = |version: u64| {
+            let mut value = bare.clone();
+            value
+                .as_object_mut()
+                .expect("the raw payload is a JSON object")
+                .insert(
+                    "resolution_state_version".to_string(),
+                    serde_json::Value::from(version),
+                );
+            value
+        };
+
+        for (version, expected) in [
+            (
+                1_u64,
+                "v1 resolution state must not contain resolution_stack",
+            ),
+            (2_u64, "v2 resolution state is missing resolution_frames"),
+        ] {
+            let declared = declare(version);
+            let raw_error = serde_json::from_value::<PersistedGameState>(declared.clone())
+                .expect_err("a declared version keeps its own branch's verdict");
+            assert!(
+                raw_error.to_string().contains(expected),
+                "v{version} raw: expected {expected}, got {raw_error}"
+            );
+
+            // The same inner bytes through the TRUSTED ingress must produce the
+            // same verdict. That ingress never stamps a version, so agreement here
+            // is what proves the inference did not invent an origin-dependent path.
+            let mut trusted = serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .expect("the trusted envelope serializes");
+            trusted
+                .as_object_mut()
+                .expect("the trusted envelope is a JSON object")
+                .insert("state".to_string(), declared);
+            let trusted_error = serde_json::from_value::<PersistedGameState>(trusted)
+                .expect_err("the trusted ingress reaches the same declared branch");
+            assert!(
+                trusted_error.to_string().contains(expected),
+                "v{version} trusted: expected {expected}, got {trusted_error}"
+            );
+        }
+    }
+
+    /// V12. Pins the premise `declare_raw_resolution_wire` rests on for the
+    /// entire client-wire population: `client_state_wire_value` must keep
+    /// emitting `resolution_stack`.
+    ///
+    /// That function redacts by an explicit, MUTABLE removal list. Nothing in the
+    /// type system ties it to the inference rule, so if it ever begins stripping
+    /// `resolution_stack`, every client-wire payload silently stops being
+    /// classifiable and no compiler signal fires. This assertion is the signal.
+    ///
+    /// It pins a SECOND premise of the same kind, and for the same reason: the
+    /// client wire must keep declaring NO `resolution_state_version`. Both are
+    /// premises about whether `declare_raw_resolution_wire` is REACHED at all —
+    /// its first statement early-returns on a declared version, and its guard's
+    /// first conjunct is `resolution_stack` present. That is why the version
+    /// premise lives here rather than in
+    /// `client_wire_removes_every_unconditional_projection_field`, whose subject
+    /// is the removal LIST, i.e. whether the guard FIRES once reached. If the
+    /// deferred write-time stamping lands at `client_state_wire_value` on its
+    /// own, every client-wire payload takes that early return, the projection
+    /// guard goes dead for its entire population, and without the assertion
+    /// below no row reddens.
+    #[test]
+    fn client_wire_still_carries_resolution_stack() {
+        let state = parked_spell_resolution_fixture();
+        let bare = serde_json::to_value(&state).expect("the bare GameState serializes");
+        // `viewer: None` performs no viewer filtering, so no projection sentinel
+        // is stamped — the same constructor a client debug export comes through.
+        let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+            &state, None,
+        ))
+        .expect("the client wire envelope serializes");
+
+        // Paired positive reach-guard, asserted FIRST. `next_delayed_trigger_token`
+        // carries `#[serde(default)]` with NO `skip_serializing_if`, so the derived
+        // `Serialize` always emits it and only the redactor can remove it. Without
+        // this, a green below could mean the redactor never ran — i.e. that this
+        // test measured the bare writer instead of the wire.
+        assert!(
+            bare.get("next_delayed_trigger_token").is_some(),
+            "the bare writer always emits next_delayed_trigger_token; if it does not, \
+             this test can no longer prove the redactor ran"
+        );
+        assert!(
+            wire["state"].get("next_delayed_trigger_token").is_none(),
+            "the client redactor must have run — it removes next_delayed_trigger_token"
+        );
+
+        assert!(
+            wire["state"].get("resolution_stack").is_some(),
+            "`client_state_wire_value` no longer preserves `resolution_stack`. \
+             `declare_raw_resolution_wire` (types/resolution.rs) keys on that field, \
+             and its inference rule silently stops applying to every client-wire \
+             payload if the redactor removes it. Fix the redactor or re-derive the \
+             rule — do not delete this assertion."
+        );
+
+        assert!(
+            wire["state"].get("resolution_state_version").is_none(),
+            "`client_state_wire_value` now DECLARES a resolution wire version. \
+             `declare_raw_resolution_wire` (types/resolution.rs) early-returns on \
+             that key, so its client-wire projection guard is now dead for every \
+             payload this writer produces and no other row reddens. If this is the \
+             deferred write-time stamp landing, replace the absence fingerprint with \
+             a positive `wire_projection` check — do not delete this assertion."
+        );
+    }
+
+    /// The three fields `client_state_wire_value` removes that are
+    /// UNCONDITIONALLY serialized. Local mirror of
+    /// `CLIENT_WIRE_UNCONDITIONAL_FIELDS` in `types/resolution.rs`, which is
+    /// private to that module. The mirror is deliberate: it is exactly what
+    /// mutation B of
+    /// `redaction_fingerprint_is_conjunctive_over_every_unconditional_field`
+    /// detects — dropping an entry from the production `const` leaves this list
+    /// three-wide and reddens the loop iteration for the dropped key.
+    const FINGERPRINT_FIELDS: &[&str] = &[
+        "next_delayed_trigger_token",
+        "next_delayed_trigger_instance",
+        "resolved_rules_journal",
+    ];
+
+    /// The distinctive phrase of the client-wire projection refusal raised by
+    /// `declare_raw_resolution_wire` (`types/resolution.rs`). Its FIRST clause:
+    /// the part of that sentence which is a statement about the file, and so is
+    /// true of both populations the guard refuses — a client-wire projection and
+    /// a genuine 2026-07-21..22 build-window save. The trailing hedge clause is
+    /// NOT asserted on anywhere in this module, and deliberately so — note that
+    /// this constant is a SUBSTRING of the sentence the hedge replaced, so no
+    /// row here reddens if that wording is reverted. The single assertion that
+    /// does is in `raw_capture_is_refused_as_a_client_wire_projection`
+    /// (`tests/integration/raw_resolution_stack_restore.rs`), on the reporter's
+    /// real bytes. Do not add a second one here.
+    const CLIENT_WIRE_PROJECTION_REFUSAL: &str =
+        "missing the private rules record for the resolution it was paused in";
+
+    /// The unversioned raw writer the inference keys on: `GameState`'s own
+    /// derived `Serialize`, NOT `to_value(PersistedGameState::Raw(..))` (which
+    /// routes through `ResolutionStateWire::to_value` and declares a version).
+    fn bare_value(state: &GameState) -> serde_json::Value {
+        serde_json::to_value(state).expect("the bare GameState serializes")
+    }
+
+    /// The redacted client-wire projection of the same state. `viewer: None`
+    /// performs no viewer filtering, so no `viewer_projection` sentinel is
+    /// stamped — this is the exact constructor a client debug export comes
+    /// through, and the population `reject_viewer_projection_as_authority`
+    /// cannot see.
+    fn client_wire_value(state: &GameState) -> serde_json::Value {
+        serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+            state, None,
+        ))
+        .expect("the client wire envelope serializes")["state"]
+            .clone()
+    }
+
+    fn without_keys(mut value: serde_json::Value, keys: &[&str]) -> serde_json::Value {
+        let object = value
+            .as_object_mut()
+            .expect("the raw payload is a JSON object");
+        for key in keys {
+            object.remove(*key);
+        }
+        value
+    }
+
+    /// The same redacted payload with ONE fingerprint key restored, at the value
+    /// an absent key already decodes to: `next_delayed_trigger_token` carries a
+    /// plain `#[serde(default)]` (so absent means `0`), and
+    /// `normalize_delayed_trigger_allocators` collapses both `0` and the absent
+    /// case to `1` for a payload with no install roots.
+    ///
+    /// So this payload is DECODE-IDENTICAL to the redacted one and differs only
+    /// in whether the guard's conjunction holds. It measures what the same bytes
+    /// do with the projection guard bypassed, without deleting the guard — which
+    /// is what makes the `!contains(…)` clauses below discriminated rather than
+    /// vacuously true of any refusal.
+    fn with_the_projection_guard_bypassed(mut wire: serde_json::Value) -> serde_json::Value {
+        wire.as_object_mut()
+            .expect("the client wire payload is a JSON object")
+            .insert(
+                "next_delayed_trigger_token".to_string(),
+                serde_json::Value::from(0),
+            );
+        wire
+    }
+
+    /// A state parking one `AbilityContinuation` frame and no
+    /// `resolving_stack_entry`.
+    ///
+    /// `stashed` selects the shape:
+    /// * `None` — a legitimately absent firing (a paused spell or
+    ///   activated-ability resolution). Decodes on BOTH sides today.
+    /// * `Some(f)` — the RESIDUAL shape: the continuation holds a firing while
+    ///   the live carrier does not. It is built the way production builds it —
+    ///   the live carrier is set, `PendingContinuation::new` snapshots it
+    ///   (`trigger_firing: state.resolving_trigger_firing`), and then the live
+    ///   carrier is taken, which is exactly
+    ///   `game/stack.rs::finish_resolving_stack_entry`'s
+    ///   `state.resolving_trigger_firing.take()`. The engine puts it back through
+    ///   `game/effects/mod.rs::restore_continuation_trigger_firing`'s
+    ///   `(None, Some(stashed))` arm; this fixture is that state captured
+    ///   mid-flight.
+    ///
+    /// Deliberately NOT built on `parked_frame_on_triggered_carrier_fixture()`:
+    /// that fixture sets a triggered `resolving_stack_entry` AND a live firing,
+    /// so extending it yields the coherent shape, which the client wire already
+    /// refuses without any of this — see
+    /// `raw_inferred_v2_refuses_an_unlabeled_triggered_carrier`.
+    fn parked_continuation_fixture(stashed: Option<TriggerFiring>) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(9_301),
+            PlayerId(0),
+            "Continuation source".to_string(),
+            Zone::Battlefield,
+        );
+        state.resolving_trigger_firing = stashed;
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+        // `finish_resolving_stack_entry`'s `.take()`, reproduced.
+        state.resolving_trigger_firing = None;
+        state
+    }
+
+    /// V14. Pins the OTHER half of the premise
+    /// `client_wire_still_carries_resolution_stack` pins: the three fields whose
+    /// absence `declare_raw_resolution_wire` reads as a client-wire redaction
+    /// fingerprint are removed by `client_state_wire_value` and by nothing else.
+    ///
+    /// Mutation (i) — delete any one `root.remove(k)` for these three keys in
+    /// `client_state_wire_value`. Reddens at the WIRE-ABSENT assertion for that
+    /// key; the reach-guard is untouched, because the three siblings it names are
+    /// not in the removal list.
+    ///
+    /// Mutation (ii) — give any of the three declarations a
+    /// `skip_serializing_if`. This is a mutation CLASS, and whether it is
+    /// detected is VALUE-dependent: a predicate that skips the value the fixture
+    /// happens to hold reddens the BARE-PRESENT assertion (which runs before its
+    /// wire-absent sibling), and a predicate that does not skip it leaves this row
+    /// green while the guard's premise has in fact been broken. The
+    /// serde-default control below closes the realistic `is_default` / `is_zero` /
+    /// `is_empty` family for all three fields at once; it does not close an
+    /// arbitrary predicate, and no test can.
+    ///
+    /// Do not delete these assertions: the fingerprint is a fact about a MUTABLE
+    /// removal list, and nothing in the type system ties the two together.
+    #[test]
+    fn client_wire_removes_every_unconditional_projection_field() {
+        let state = parked_spell_resolution_fixture();
+        let bare = bare_value(&state);
+        let wire = client_wire_value(&state);
+
+        // Paired positive reach-guard, asserted FIRST. These three are
+        // unconditionally serialized too but are NOT in the redactor's removal
+        // list, so they must survive on BOTH sides. Without them a green below
+        // could mean "absent everywhere" — the wire value not being a real
+        // `GameState` at all — rather than "the redactor removed exactly these".
+        for sibling in [
+            "next_object_id",
+            "next_pip_id",
+            "next_logical_zone_change_group_id",
+        ] {
+            assert!(
+                bare.get(sibling).is_some(),
+                "the bare writer must emit {sibling}; without it this row cannot \
+                 discriminate a removal from an absence"
+            );
+            assert!(
+                wire.get(sibling).is_some(),
+                "the client redactor must NOT remove {sibling}; it is the control \
+                 that proves the removals below are selective"
+            );
+        }
+
+        for field in FINGERPRINT_FIELDS {
+            assert!(
+                bare.get(*field).is_some(),
+                "the bare writer must always emit {field} — the fingerprint reads \
+                 its absence as a fact about the WRITER, which holds only while the \
+                 field has no skip_serializing_if"
+            );
+            assert!(
+                wire.get(*field).is_none(),
+                "`client_state_wire_value` no longer removes {field}. \
+                 `is_redacted_client_wire_projection` (types/resolution.rs) reads the \
+                 absence of all three as the client-wire redaction fingerprint, and \
+                 that inference silently stops applying if the removal list changes. \
+                 Fix the redactor or re-derive the rule — do not delete this assertion."
+            );
+        }
+
+        // Mutation (ii)'s serde-default control: a state holding exactly the
+        // values an absent key decodes to must STILL emit all three. Any
+        // skip-when-default predicate added to a declaration reddens here.
+        let mut serde_defaults = GameState::new_two_player(7);
+        serde_defaults.next_delayed_trigger_token = 0;
+        serde_defaults.next_delayed_trigger_instance = initial_delayed_trigger_instance_id();
+        serde_defaults.resolved_rules_journal = ResolvedRulesJournal::default();
+        let defaulted = bare_value(&serde_defaults);
+        for field in FINGERPRINT_FIELDS {
+            assert!(
+                defaulted.get(*field).is_some(),
+                "the bare writer must emit {field} even when it holds its serde \
+                 default; a skip-when-default predicate would make its absence \
+                 value-dependent and destroy the fingerprint's premise"
+            );
+        }
+    }
+
+    /// V15. The mechanism row: a payload that decodes cleanly on BOTH sides
+    /// today is newly refused on the redacted side, by name.
+    ///
+    /// Mutation — delete the fingerprint guard in `declare_raw_resolution_wire`.
+    /// The wire payload is MEASURED `DECODE OK (Raw)` today, so with the guard
+    /// gone it decodes. Reddens at the `expect_err` on the wire payload; the
+    /// message `contains` below is never reached under that mutation.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_client_wire_projection() {
+        let state = parked_continuation_fixture(None);
+
+        // Paired positive reach-guard, asserted FIRST: the unredacted payload
+        // decodes through the raw ingress, so the refusal below is attributable
+        // to the redaction and to nothing else in the fixture.
+        let reached = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect("the unredacted payload decodes at the unversioned raw ingress");
+        assert!(
+            matches!(reached, PersistedGameState::Raw(_)),
+            "the reach-guard must decode through the raw ingress, which is the seam \
+             under test"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(client_wire_value(&state))
+            .expect_err(
+                "a redacted client-wire projection must not decode at the unversioned \
+                 raw ingress",
+            )
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+    }
+
+    /// V16. The discriminating row. UNREDACTED this state is REFUSED; redacted
+    /// it decoded silently, with the CR 603.2 ordinary vs CR 603.7 delayed
+    /// firing classification gone from the parked continuation. The guard
+    /// restores the refusal.
+    ///
+    /// The reach-guard is a REFUSAL, not an admission, and that is the point: the
+    /// claim is not "a payload is refused", it is "the redaction converts a
+    /// refusal into an acceptance". An admission guard would be FALSE for this
+    /// fixture, so the row could not even be written that way.
+    ///
+    /// Mutation A — delete the fingerprint guard. The wire payload is MEASURED
+    /// `DECODE OK (Raw) continuation_firings=[None]` today, so it decodes.
+    /// Reddens at the `expect_err` on the wire payload. The reach-guard is
+    /// unaffected: the guard never fires on the bare payload, whose fingerprint
+    /// is fully present.
+    ///
+    /// Mutation B (message only) — reword the guard's `Err` string. The
+    /// `expect_err` still passes, so this reddens at the projection-message
+    /// `contains`. No other mutation reaches that assertion.
+    ///
+    /// The final `!contains(…)` clause is a "not for the wrong reason" guard that
+    /// NO mutation above reddens (deletion reddens the `expect_err` first, reword
+    /// reddens the `contains`). It is not vacuous, though: the bypass control
+    /// immediately before it shows what these exact bytes do when the guard's
+    /// conjunction is broken — they DECODE, losing the stashed firing, which is
+    /// the defect itself.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_projection_that_would_otherwise_lose_its_stashed_firing() {
+        let state = parked_continuation_fixture(Some(TriggerFiring::Ordinary));
+
+        // REACH-GUARD, asserted FIRST — and it is a REFUSAL.
+        let unredacted = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect_err(
+                "the unredacted residual shape is REFUSED — that refusal is what the \
+                 redaction converts into a silent restore",
+            )
+            .to_string();
+        assert!(
+            unredacted
+                .contains("paused trigger continuation has no active resolving trigger carrier"),
+            "the unredacted refusal must come from the coherence authority, got {unredacted}"
+        );
+
+        let wire = client_wire_value(&state);
+
+        // The defect, exhibited rather than asserted: with the guard's
+        // conjunction broken by one restored key, these same bytes DECODE, and
+        // the parked continuation's firing is gone.
+        let bypassed = serde_json::from_value::<PersistedGameState>(
+            with_the_projection_guard_bypassed(wire.clone()),
+        )
+        .expect("with the fingerprint incomplete the redacted payload still decodes today");
+        let PersistedGameState::Raw(decoded) = bypassed else {
+            panic!("a bare gameState object decodes through the raw ingress");
+        };
+        assert!(
+            decoded
+                .resolution_stack
+                .ability_continuations()
+                .all(|continuation| continuation.trigger_firing.is_none()),
+            "the redaction is what silently drops the stashed firing — if it no longer \
+             does, this row's premise is gone"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(wire)
+            .expect_err("the redacted residual shape must not decode")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+        assert!(
+            !error.contains("paused trigger continuation has no active resolving trigger carrier"),
+            "the guard must refuse BEFORE the coherence authority is consulted — after \
+             the redaction that authority has no evidence left to refuse on, got {error}"
+        );
+    }
+
+    /// V17. Multi-authority hostile row: the firing is carried on the live
+    /// resolving entry AND on the parked continuation, while the install root
+    /// that authorises it lives in the `resolved_rules_journal` and in the
+    /// `delayed_triggers` entry's `provenance` — both of which the same redaction
+    /// strips.
+    ///
+    /// Mutation — move the guard to after the decode (e.g. into
+    /// `validate_trigger_firing_coherence`). It cannot be written faithfully,
+    /// and that is the finding: by the time a `GameState` exists the three
+    /// fingerprint fields have already taken their serde defaults and the
+    /// evidence is gone, so a guard placed there is equivalent to no guard. That
+    /// equivalence is what makes the PRE-decode placement load-bearing. With no
+    /// guard the payload is still refused, so the `expect_err` still passes;
+    /// it reddens at the projection-message `contains`, and the string it then
+    /// produces is measured by the bypass control below.
+    #[test]
+    fn raw_ingress_refuses_a_redacted_projection_before_its_delayed_install_roots_are_consulted() {
+        let mut state = parked_frame_on_triggered_carrier_fixture();
+        // `parked_frame_on_triggered_carrier_fixture` returns only a `GameState`,
+        // so the triggered entry's source is read back out of it. CR 603.7: the
+        // continuation's own `chain.source_id` must be THAT object, because
+        // `validate_trigger_firing_coherence` checks the paused continuation's
+        // provenance against its chain source, not merely against the origin.
+        let source = state
+            .resolving_stack_entry
+            .as_ref()
+            .expect("the fixture supplies a triggered resolving entry")
+            .source_id;
+        let origin = DelayedTriggerOrigin {
+            token: DelayedTriggerToken(1),
+            instance: DelayedTriggerInstanceId(1),
+            source_id: source,
+        };
+        // The install root, without which the BARE reach-guard cannot be
+        // established. `register_root` accepts a live delayed trigger's
+        // provenance as a root, so a live entry is sufficient and is far less
+        // construction than a journal command.
+        let mut delayed = DelayedTrigger::new(
+            crate::types::ability::DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        );
+        delayed.provenance = DelayedInstallIdentity::ReceiptEligible(origin);
+        state.delayed_triggers.push(delayed);
+        // The allocator tail check is `next_delayed_trigger_token <= max_token`,
+        // so both allocators must sit ABOVE the root they authorise.
+        state.next_delayed_trigger_token = 2;
+        state.next_delayed_trigger_instance = 2;
+        state.resolving_trigger_firing = Some(TriggerFiring::ReceiptEligible(origin));
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+
+        // Paired positive reach-guard, asserted FIRST: the coherent, unredacted
+        // multi-authority payload decodes.
+        let reached = serde_json::from_value::<PersistedGameState>(bare_value(&state))
+            .expect("the unredacted multi-authority payload decodes at the raw ingress");
+        assert!(
+            matches!(reached, PersistedGameState::Raw(_)),
+            "the reach-guard must decode through the raw ingress, which is the seam \
+             under test"
+        );
+
+        let wire = client_wire_value(&state);
+
+        // Measures the string the ingress produces with the guard bypassed, so
+        // the `!contains` clause below is a discriminated claim rather than a
+        // sentence that is true of any refusal whatsoever.
+        let bypassed = serde_json::from_value::<PersistedGameState>(
+            with_the_projection_guard_bypassed(wire.clone()),
+        )
+        .expect_err("the redaction strips every install root, so the payload is refused")
+        .to_string();
+        assert!(
+            bypassed.contains("resolving triggered entry has no firing carrier"),
+            "with the guard bypassed the redacted payload must fall through to the \
+             carrier refusal, got {bypassed}"
+        );
+
+        let error = serde_json::from_value::<PersistedGameState>(wire)
+            .expect_err("the redacted multi-authority payload must not decode")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the refusal must name the projection, got {error}"
+        );
+        assert!(
+            !error.contains("resolving triggered entry has no firing carrier"),
+            "the projection must be refused at the ingress, before the delayed \
+             install roots are consulted, got {error}"
+        );
+    }
+
+    /// V18. The fingerprint is CONJUNCTIVE over every entry of
+    /// `CLIENT_WIRE_UNCONDITIONAL_FIELDS`. The discriminating population is a
+    /// PARTIALLY absent fingerprint — the real 2026-07-22 to 2026-08-01 build
+    /// shape — because a fully restored one satisfies neither `.all(…)` nor
+    /// `.any(…)` and is blind to every mutation of the conjunction.
+    ///
+    /// Removing two keys does not change the decode for an unrelated reason:
+    /// the serde defaults are `next_delayed_trigger_token → 0`,
+    /// `next_delayed_trigger_instance → 1`, `resolved_rules_journal → default`,
+    /// this fixture holds no delayed triggers and an empty journal, and
+    /// `normalize_delayed_trigger_allocators` collapses both `0` and `1` to `1`
+    /// with no install roots. The decoded state is identical either way.
+    ///
+    /// Mutation A — `.any(…)` instead of `.all(…)` in
+    /// `is_redacted_client_wire_projection`. Every loop iteration has two of the
+    /// three absent, so `any` is true and the guard fires. Reddens at the
+    /// `expect`/`unwrap_or_else` INSIDE the loop, on the first iteration. The
+    /// reach-guard stays green (all three absent means `any` is true too).
+    ///
+    /// Mutation B — drop any one key `k` from `CLIENT_WIRE_UNCONDITIONAL_FIELDS`.
+    /// The iteration whose only present key is `k` then evaluates the conjunction
+    /// over the other two, both of which it removed, so the guard fires. Reddens
+    /// on exactly that iteration; the other two stay green. Together the two
+    /// mutations pin the conjunction AND each of the three entries independently.
+    #[test]
+    fn redaction_fingerprint_is_conjunctive_over_every_unconditional_field() {
+        let base = bare_value(&parked_continuation_fixture(None));
+
+        // Paired positive reach-guard, asserted FIRST: with ALL three absent this
+        // payload family IS refused. Without it the three greens below would be
+        // vacuous — they would pass for a payload the guard could never fire on.
+        let error = serde_json::from_value::<PersistedGameState>(without_keys(
+            base.clone(),
+            FINGERPRINT_FIELDS,
+        ))
+        .expect_err("a fully absent fingerprint must be refused")
+        .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the reach-guard must be refused as a projection, got {error}"
+        );
+
+        for present in FINGERPRINT_FIELDS.iter().copied() {
+            let others: Vec<&str> = FINGERPRINT_FIELDS
+                .iter()
+                .copied()
+                .filter(|field| *field != present)
+                .collect();
+            let decoded =
+                serde_json::from_value::<PersistedGameState>(without_keys(base.clone(), &others))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "a payload still carrying {present} is not a mechanical \
+                             client-wire redaction and must decode, got {error}"
+                        )
+                    });
+            assert!(
+                matches!(decoded, PersistedGameState::Raw(_)),
+                "a payload still carrying {present} must decode through the raw ingress"
+            );
+        }
+    }
+
+    /// V19. The boundary §5.3 deliberately did NOT widen: an unversioned payload
+    /// WITHOUT `resolution_stack` keeps its legacy v1 treatment even when it
+    /// bears the full redaction fingerprint. Those payloads decode today, their
+    /// exposure predates the wire inference, and refusing them would be a real
+    /// availability regression for a defect this ingress did not introduce.
+    ///
+    /// Mutation — drop the `object.contains_key("resolution_stack") &&` conjunct
+    /// from the guard. The no-frames payload then bears the fingerprint and is
+    /// refused. Reddens at the subject's `unwrap_or_else`.
+    #[test]
+    fn unversioned_payload_without_a_frame_stack_keeps_its_legacy_v1_treatment() {
+        // Paired positive reach-guard, asserted FIRST: the SAME fingerprint
+        // removal applied to a payload that DOES carry a frame stack is refused.
+        // So the only difference between the two payloads below is the frame
+        // stack, which is exactly the conjunct under test.
+        let with_frames = without_keys(
+            bare_value(&parked_continuation_fixture(None)),
+            FINGERPRINT_FIELDS,
+        );
+        let error = serde_json::from_value::<PersistedGameState>(with_frames)
+            .expect_err("the frame-stack sibling must be refused as a projection")
+            .to_string();
+        assert!(
+            error.contains(CLIENT_WIRE_PROJECTION_REFUSAL),
+            "the reach-guard must be refused as a projection, got {error}"
+        );
+
+        let bare = bare_value(&GameState::new_two_player(42));
+        assert!(
+            bare.get("resolution_stack").is_none(),
+            "an empty frame stack is omitted by skip_serializing_if, which is what \
+             routes this payload to the legacy v1 branch — without that this row \
+             would pass for the wrong reason"
+        );
+
+        let decoded =
+            serde_json::from_value::<PersistedGameState>(without_keys(bare, FINGERPRINT_FIELDS))
+                .expect("a payload with no frame stack keeps its legacy v1 treatment");
+        assert!(
+            matches!(decoded, PersistedGameState::Raw(_)),
+            "the no-frames payload must still decode through the raw ingress"
+        );
+    }
+
     /// CR 109.5 + CR 611.2a: a restored restriction still carrying the raw
     /// `SourceController` placeholder (which `add_restriction` always lowers to
     /// `SpecificPlayer` at creation, so it can only appear in a corrupt or forged
@@ -28370,7 +29658,8 @@ mod tests {
         for persisted in [raw, trusted] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("restriction fixture restores")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
 
             assert!(
                 !restored.restrictions.iter().any(|restriction| matches!(
@@ -28420,7 +29709,7 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("v1 fixture conservatively restores unlabelled trigger carriers")
-            .into_game_state();
+            .into_game_state_unchecked();
 
         assert_eq!(
             restored.pending_trigger_firing,
@@ -28475,7 +29764,7 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("legacy continuation event reconciles after frame projection")
-            .into_game_state();
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("legacy continuation projects into the canonical frame stack")
@@ -28521,7 +29810,7 @@ mod tests {
         erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
         let restored = serde_json::from_value::<PersistedGameState>(persisted)
             .expect("v2 frame event reconciles before materialization")
-            .into_game_state();
+            .into_game_state_unchecked();
         let GameEvent::ZoneChanged { record, .. } = &restored
             .active_ability_continuation()
             .expect("v2 frame restores as an active continuation")
@@ -29669,7 +30958,7 @@ mod tests {
         ));
     }
 
-    /// T-loop (§4 Condition 2): the all-zone incarnation bump advances a source's
+    /// T-loop: the all-zone incarnation bump advances a source's
     /// epoch every time it changes zones, so a mandatory loop that cycles its
     /// source's zones would carry a growing `TriggerSourceContext` into loop equality
     /// and never confirm a CR 104.4b draw. `normalize_for_loop` canonicalizes source
@@ -30069,7 +31358,10 @@ mod tests {
         let mut b = a.clone();
         b.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         // Sanity: the populated field really does differ between the two states.
         assert_ne!(
@@ -30315,7 +31607,10 @@ mod tests {
         );
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
 
@@ -30356,7 +31651,10 @@ mod tests {
         state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
 
         let collapsed = state
@@ -30710,7 +32008,10 @@ mod tests {
         );
         state.register_pending_materialization(
             PlayerId(0),
-            PersistentAxisMaterialization::Tokens(dummy_copiable_profile("Saproling")),
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: dummy_copiable_profile("Saproling"),
+                per_cycle_delta: 1,
+            })),
         );
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         // Non-vacuity: the pre-state really holds both axes + pile + stash.
@@ -33536,7 +34837,8 @@ mod tests {
         ] {
             let restored = serde_json::from_value::<PersistedGameState>(persisted)
                 .expect("legacy null source ID is the source-less choice mode")
-                .into_game_state();
+                .into_game_state()
+                .expect("persisted test snapshot satisfies the checked restore contract");
             assert!(matches!(
                 restored.waiting_for,
                 WaitingFor::NamedChoice {
@@ -33563,7 +34865,10 @@ mod tests {
 
         let restored = serde_json::from_value::<PersistedGameState>(v1)
             .expect("persistence boundary supplies the v1 discriminator");
-        let resumed = restored.clone().into_game_state();
+        let resumed = restored
+            .clone()
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             resumed.active_draw_sequence().map(|frame| frame.remaining),
             Some(2)
@@ -33600,7 +34905,8 @@ mod tests {
 
         let mut restored = serde_json::from_value::<PersistedGameState>(raw)
             .expect("legacy bare PlayerId extra turn must deserialize")
-            .into_game_state();
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
         assert_eq!(
             restored.extra_turns,
             vec![ExtraTurn {
@@ -35070,5 +36376,100 @@ mod tests {
         let legacy: ResolveAllConsentRun =
             serde_json::from_value(legacy_wire).expect("legacy run without the new field loads");
         assert_eq!(legacy.auto_pass_baseline, None);
+    }
+
+    /// **The BATCHABILITY split is load-bearing, not decorative:** every axis a batched `Tokens`
+    /// / `Counters` / `Life` item can produce through [`GameState::scheduled_collapse_axes`] is
+    /// `DeferredAccrual`, and `LoopCollapseAxis::from_resource_axis` returns `Some` for exactly
+    /// those.
+    ///
+    /// REVERT PROBE: flip `TokensCreated` to `StandingCapability` in
+    /// `ResourceAxis::unbounded_mark_kind` ⇒ RED. VACUOUS-UNIVERSAL GUARD: the claim is a `∀`
+    /// over the produced set, which an EMPTY set satisfies trivially — the non-empty assertion
+    /// below forbids that, and also reds this row when a FOURTH batched variant produces an axis
+    /// no materialization is accountable for.
+    #[test]
+    fn every_batched_item_axis_is_deferred_accrual_and_batchable() {
+        use crate::analysis::resource::UnboundedMarkKind;
+        use crate::game::printed_cards::intrinsic_copiable_values;
+
+        let mut state = GameState::new_two_player(7);
+        let bearer = create_object(
+            &mut state,
+            CardId(9001),
+            PlayerId(0),
+            "Counter Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        let profile_host = create_object(
+            &mut state,
+            CardId(9002),
+            PlayerId(0),
+            "Fodder Profile".to_string(),
+            Zone::Battlefield,
+        );
+        let profile = intrinsic_copiable_values(
+            state
+                .objects
+                .get(&profile_host)
+                .expect("the just-created profile host is in `objects`"),
+        );
+
+        // One item of EACH batched kind — the three arms `scheduled_collapse_axes` can take that
+        // are not `DriveSequence`.
+        let batched = [
+            PersistentAxisMaterialization::Tokens(Box::new(TokenGrowth {
+                profile: Box::new(profile),
+                per_cycle_delta: 1,
+            })),
+            PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+                object: bearer,
+                counter: CounterType::Plus1Plus1,
+                per_cycle_delta: 1,
+            }]),
+            PersistentAxisMaterialization::Life {
+                player: PlayerId(0),
+                per_cycle_delta: 1,
+            },
+        ];
+
+        let produced = state.scheduled_collapse_axes(&batched);
+        assert_eq!(
+            produced.len(),
+            3,
+            "reach-guard (vacuous-universal): the three batched kinds must produce three distinct \
+             axes, or the ∀ below is satisfied by an empty set. Got {produced:?}"
+        );
+
+        for axis in &produced {
+            assert_eq!(
+                axis.unbounded_mark_kind(),
+                UnboundedMarkKind::DeferredAccrual,
+                "CR 732.2c: an axis a BATCHED item delivers is by definition growth the collapse \
+                 performs, so it must be DeferredAccrual — otherwise the batched route would \
+                 deliver growth for a mark no materialization is accountable for. Got {axis:?}"
+            );
+            assert!(
+                LoopCollapseAxis::from_resource_axis(*axis).is_some(),
+                "the batchability ledger must carry a prompt label for every axis a batched item \
+                 produces; a `None` here means `from_materializations` would silently fold it into \
+                 `Mixed`. Got {axis:?}"
+            );
+        }
+
+        // The CONVERSE, so this is a partition rather than a one-way implication: the standing
+        // axis is the one the batched items never produce, and it is exactly the one
+        // `from_resource_axis` has no label for.
+        assert_eq!(
+            ResourceAxis::Mana(ManaType::Colorless).unbounded_mark_kind(),
+            UnboundedMarkKind::StandingCapability,
+            "the two classifiers answer DIFFERENT questions, and this is the axis where they \
+             visibly diverge from 'batchable'"
+        );
+        assert!(
+            !produced.contains(&ResourceAxis::Mana(ManaType::Colorless)),
+            "no batched item can schedule a mana axis — which is why a batched collapse preserved \
+             mana by construction long before the DriveSequence route did"
+        );
     }
 }

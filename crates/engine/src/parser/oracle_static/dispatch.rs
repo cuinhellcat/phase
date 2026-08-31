@@ -945,6 +945,31 @@ pub(crate) fn parse_static_line_inner(
                     return Some(def);
                 }
             }
+            // CR 509.1b + CR 604.1 (#7454): the symmetric conjunction "<subject>
+            // can't block or be blocked by <object>" under a LEADING gate. ONE
+            // printed object serves TWO opposite-direction restrictions, which one
+            // `StaticDefinition` cannot carry, so the shape is owned by
+            // `parse_symmetric_block_conjunction_static` on the multi-static path
+            // (it binds one condition-gated definition per direction) and this
+            // single-return path must DECLINE. Reaching the generic fallback below
+            // instead produced mode `Continuous`, `modifications: []`, `affected:
+            // SelfRef` and only the gate — every printed semantic dropped, yet
+            // indistinguishable from a supported line to any consumer that counts
+            // statics, so a card in this class could allow illegal blocks while
+            // reading as parsed.
+            //
+            // Scoped to the SPLIT EFFECT CLAUSE via the shared marker, never to the
+            // whole line: the other printed lines that legitimately reach this
+            // fallback do not carry the marker in their effect clause, so their
+            // exact prior lowering is untouched.
+            if nom_primitives::scan_preceded(
+                &split.effect_text.to_lowercase(),
+                parse_cant_block_or_be_blocked_by_marker,
+            )
+            .is_some()
+            {
+                return None;
+            }
             // Rewrite succeeded (we cleanly separated condition from effect), but the
             // recursed parser could not model the effect clause. Produce a generic
             // Continuous static whose condition is typed via `parse_static_condition`
@@ -2217,24 +2242,71 @@ pub(crate) fn parse_static_line_inner(
                 }
             }
 
-            let condition = if after_blocked.is_empty() {
-                None
-            } else {
-                // CR 509.1h: parse_condition handles "as long as " prefix via nom combinator
-                nom_condition::parse_condition(after_blocked)
-                    .ok()
-                    .and_then(|(r, c)| r.trim().is_empty().then_some(c))
-                    .or_else(|| {
-                        Some(StaticCondition::Unrecognized {
-                            text: after_blocked.to_string(),
-                        })
+            // CR 509.1b + CR 604.1 + CR 611.3a: an evasion restriction's trailing
+            // gate is the SAME grammar as the attack/block restrictions' ("can't
+            // attack" / "can't block", below) — "unless <cond>" / "as long as
+            // <cond>" / "if <cond>". CR 509.1b is the rule that governs it: it
+            // names evasion abilities explicitly ("A restriction may be created by
+            // an evasion ability (a static ability an attacking creature has that
+            // restricts what can block it)"). The check happens when blockers are
+            // declared; CR 509.1b adds that an attacking creature gaining or losing
+            // an evasion ability AFTER a legal block has been declared does not
+            // affect that block.
+            //
+            // This branch is the FALLBACK in a two-authority series:
+            // `parse_subject_rule_static` (dispatch.rs, above → evasion.rs's
+            // `cant_be_blocked_mode`) classifies the same grammar first, and
+            // control only arrives here when that declines — either because the
+            // subject did not parse (a flavor-word prefix) or because the gate did
+            // not type under `nom_condition::parse_condition`. Route the fallback
+            // through the shared trio rather than calling `parse_condition` a
+            // second time, so the branch that catches what the cheap authority
+            // drops inherits (a) every arm `parse_static_condition` adds over
+            // `parse_inner_condition`, (b) the affected-scoped source-anaphor
+            // binding, and (c) the ONE `unless` polarity rule
+            // (`nom_condition::parse_unless_condition`). Calling `parse_condition`
+            // here previously dropped the `unless` negation on failure, leaving a
+            // bare `Unrecognized` that evaluates TRUE — making the restriction
+            // unconditional (CR 604.1: a static is "simply true", and an `unless`
+            // static is simply true precisely when its condition is FALSE).
+            // Graxiplon was permanently unblockable.
+            let self_ref = TargetFilter::SelfRef;
+            let gate_affected = Some(&self_ref);
+            let condition = parse_unless_static_condition(&tp, gate_affected)
+                .or_else(|| parse_as_long_as_static_condition(&tp, gate_affected))
+                .or_else(|| parse_if_static_condition(&tp, gate_affected))
+                .or_else(|| {
+                    // The trio all declined. A non-empty tail is an honest gap and
+                    // must keep its `Unrecognized` marker; an EMPTY tail means the
+                    // line is a bare "<subject> can't be blocked." that reached
+                    // this fallback only because its subject did not parse upstream
+                    // (a flavor-word prefix: Canoptek Wraith's "Wraith Form — ",
+                    // Ghost, Spectral Saboteur's "Intangibility — ", Wraith,
+                    // Vicious Vigilante's "Fear Gas — "). Those rows have NO gate,
+                    // so emitting `Unrecognized{""}` would invent a condition — and
+                    // under the layer system's fail-open arm it would read as an
+                    // always-true gate on a restriction that is unconditional by
+                    // print. Keep `None`.
+                    (!after_blocked.is_empty()).then(|| StaticCondition::Unrecognized {
+                        text: after_blocked.to_string(),
                     })
-            };
+                });
             let mut def = StaticDefinition::new(StaticMode::CantBeBlocked)
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string());
             if let Some(c) = condition {
-                def.condition = Some(c);
+                // CR 509.1b + CR 118.12a: this fallback reaches the SAME
+                // `CantBeBlocked` mode as the evasion route above, so it must
+                // clear the same enforcement-point bar. `parse_unless_static_
+                // condition` passes an `UnlessPay` leaf through RAW, and no
+                // payment is ever offered at block declaration against an evasion
+                // static (CR 509.1c's tax is offered only for `CantAttack` /
+                // `CantBlock` / `CantAttackOrBlock`; see
+                // `combat::combat_tax_mode_matches`). Assigning `def.condition`
+                // directly here would report such a gate as fully supported while
+                // no player can satisfy it, so route it through the single
+                // acceptance authority like every other gated site.
+                attach_gated_condition(&mut def, c, after_blocked);
             }
             return Some(def);
         }
@@ -2323,6 +2395,29 @@ pub(crate) fn parse_static_line_inner(
     if nom_primitives::scan_contains(tp.lower, "can't block")
         && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
     {
+        // CR 509.1b: the symmetric conjunction "<subject> can't block or be
+        // blocked by <object>" is TWO opposite-direction restrictions sharing one
+        // printed object; a single `StaticDefinition` cannot carry both. It is
+        // owned by `parse_symmetric_block_conjunction_static` on the multi-static
+        // path (`shared.rs`). Decline here — on the PHRASE alone, via the shared
+        // marker, so an object that grammar cannot yet express ALSO declines —
+        // rather than lowering the inverse blanket restriction, which both invents
+        // a restriction the card lacks and drops the one it has. Mirrors the
+        // subject-scoped defer in the "can't attack" arm below.
+        //
+        // This guard covers only the lines that REACH this arm. The other
+        // single-return production that consumes a bare `can't block` as its own
+        // predicate — `parse_subject_combat_rule_static`, dispatched above at the
+        // combat-rule family — carries its own positional copy of this decline,
+        // because its trailing-`unless` fallback accepts a failed object parse and
+        // would emit the inverse restriction before ever reaching here (#7454
+        // round 2). Both guards are load-bearing; see the marker's doc comment for
+        // why this one may scan the whole line and that one may not.
+        if nom_primitives::scan_preceded(tp.lower, parse_cant_block_or_be_blocked_by_marker)
+            .is_some()
+        {
+            return None;
+        }
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
@@ -2331,12 +2426,12 @@ pub(crate) fn parse_static_line_inner(
         // attach whichever is present. "as long as" is tried before "if" to match
         // `split_trailing_gate_condition`'s precedence. (CR 509.1b is the block
         // *restriction* rule — "a creature can't block" — not 509.1c, which is
-        // block *requirements*.)
-        if let Some(condition) = parse_unless_static_condition(&tp)
-            .or_else(|| parse_as_long_as_static_condition(&tp))
-            .or_else(|| parse_if_static_condition(&tp))
-        {
-            def.condition = Some(condition);
+        // block *requirements*.) Whichever branch produced the condition, an
+        // unenforceable one is deferred to the inert gap marker
+        // (`static_helpers::unenforceable_gate_marker`), so the restriction is
+        // never switched on by a gate the engine cannot evaluate.
+        if let Some(condition) = parse_trailing_gate_condition(&tp, def.affected.as_ref()) {
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -2380,11 +2475,8 @@ pub(crate) fn parse_static_line_inner(
         // attach whichever is present. "as long as" is tried before "if" to match
         // `split_trailing_gate_condition`'s precedence (Seer of the Bright Side:
         // "... can't attack or block as long as it has a stun counter on it.").
-        if let Some(condition) = parse_unless_static_condition(&tp)
-            .or_else(|| parse_as_long_as_static_condition(&tp))
-            .or_else(|| parse_if_static_condition(&tp))
-        {
-            def.condition = Some(condition);
+        if let Some(condition) = parse_trailing_gate_condition(&tp, def.affected.as_ref()) {
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -2470,8 +2562,13 @@ pub(crate) fn parse_static_line_inner(
         })
         .affected(TargetFilter::SelfRef)
         .description(text.to_string());
-        if let Some(condition) = parse_unless_static_condition(&tp) {
-            def.condition = Some(condition);
+        if let Some(condition) = parse_unless_static_condition(&tp, def.affected.as_ref()) {
+            // CR 602.5 + CR 118.12a: the prohibition is enforced when a player
+            // "can't begin to activate an ability that's prohibited from being
+            // activated" — a legality check at activation, which runs no
+            // CR 118.12a payment round-trip. So an `UnlessPay` gate here is
+            // deferred rather than accepted (see `attach_gated_condition`).
+            attach_gated_condition(&mut def, condition, tp.original);
         }
         return Some(def);
     }
@@ -3293,8 +3390,16 @@ pub(crate) fn parse_static_line_inner(
         // gates the restriction. If the rider is present but its condition is
         // NOT recognized, leave the whole line unsupported (return None) rather
         // than marking it a CantPlayLand enforced unconditionally.
+        // CR 118.12a: an unenforceable gate declines the same way an unparsed
+        // one does — `accept_enforceable_condition` is the fail-closed sibling
+        // of the deferral gate, for exactly this "positive gap marker would
+        // enforce unconditionally" reason.
         return match split_trailing_gate_condition(tp.lower) {
-            Some(condition_text) => Some(def.condition(parse_static_condition(condition_text)?)),
+            Some(condition_text) => {
+                let condition = parse_static_condition(condition_text)?;
+                let condition = accept_enforceable_condition(&def.mode, condition)?;
+                Some(def.condition(condition))
+            }
             None => Some(def),
         };
     }
@@ -3366,7 +3471,12 @@ pub(crate) fn parse_static_line_inner(
     }
     if let Some((body, condition_text)) = split_trailing_gate_condition_with_body(&tp) {
         if let Some(mut def) = parse_extra_blockers_static(body) {
-            def.condition = Some(parse_static_condition(condition_text)?);
+            // CR 118.12a: same fail-closed acceptance bar as the `CantPlayLand`
+            // arm above — a gate this mode's enforcement point can never satisfy
+            // declines the line rather than granting the extra block behind an
+            // always-true marker.
+            let condition = parse_static_condition(condition_text)?;
+            def.condition = Some(accept_enforceable_condition(&def.mode, condition)?);
             return Some(def);
         }
     }

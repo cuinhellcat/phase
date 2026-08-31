@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
@@ -17,6 +17,7 @@ import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
+import { IntegerField } from "../components/ui/IntegerField";
 import { ModalPanelShell } from "../components/ui/ModalPanelShell";
 import {
   getRepresentativeDeckVisual,
@@ -83,6 +84,7 @@ export function GameSetupPage() {
   // Format picker modal -- opened by the hero chip below the title. Mobile
   // gets a full-screen sheet via <ModalPanelShell>; desktop centers it.
   const [formatPickerOpen, setFormatPickerOpen] = useState(false);
+  const formatPickerTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Format & config state
   const [selectedFormat, setSelectedFormat] = useState<GameFormat | null>(null);
@@ -202,7 +204,7 @@ export function GameSetupPage() {
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
-      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig });
     }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
@@ -210,8 +212,14 @@ export function GameSetupPage() {
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
+    // The URL carries the format NAME only, so the edited config (starting
+    // life) has to ride along out-of-band or GamePage re-derives it from
+    // `FORMAT_DEFAULTS` and silently discards the edit. Router state — the
+    // same channel `useBroker` uses — rather than a URL param, because the
+    // native-engine route above deliberately writes no resume pointer.
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      { state: { formatConfig } },
     );
   };
 
@@ -276,6 +284,7 @@ export function GameSetupPage() {
           return (
             <div className="flex justify-center">
               <button
+                ref={formatPickerTriggerRef}
                 type="button"
                 onClick={() => setFormatPickerOpen(true)}
                 aria-haspopup="dialog"
@@ -481,11 +490,11 @@ export function GameSetupPage() {
                 <div className="flex flex-col gap-3">
                   <label className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">{t("gameSetup.config.startingLife")}</span>
-                    <input
-                      type="number"
+                    <IntegerField
                       value={formatConfig.starting_life}
-                      onChange={(e) =>
-                        setFormatConfig({ ...formatConfig, starting_life: Number(e.target.value) })
+                      min={1}
+                      onCommit={(starting_life) =>
+                        setFormatConfig({ ...formatConfig, starting_life })
                       }
                       className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
                     />
@@ -657,6 +666,7 @@ export function GameSetupPage() {
         title={t("gameSetup.formatPicker.title")}
         subtitle={t("gameSetup.formatPicker.subtitle")}
         onClose={() => setFormatPickerOpen(false)}
+        returnFocusRef={formatPickerTriggerRef}
         maxWidthClassName="max-w-3xl"
         bodyClassName="overflow-y-auto px-4 pt-4 lg:px-6 lg:pt-6"
       >

@@ -95,6 +95,8 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  36 — Resolution-time optional fixed sacrifice payments add a typed
+ *       replacement-resumable continuation to GameState.
  *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
  *       replaced in GameState snapshots by the canonical
  *       QuantityRef.PropertyAggregate tag with a validated source object. New
@@ -203,7 +205,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 35 as const;
+export const WIRE_PROTOCOL_VERSION = 36 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

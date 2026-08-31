@@ -52870,6 +52870,57 @@ scryfall_oracle_id = "a1c2af93-83c0-4974-b4db-abf95981d4e3"
 preset_id = "3fe9b9d3-4117-51b3-a5eb-5cfd3f851e15"
 
 [[token]]
+id = "3ffa938a-a3fa-5abb-b52d-3e325cd043e2"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["The Theorist, Jace Beleren"]
+set_code = "FRA"
+set_name = "Reality Fracture"
+collector_number = "4"
+released_at = "2026-10-02"
+type_line = "Token Creature — Illusion"
+
+[token.body]
+display_name = "Illusion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "The Theorist, Jace Beleren"
+scryfall_oracle_id = "89a6e876-0b00-4671-9652-766fd7ef9bf2"
+scryfall_id = "8bcdda05-4d27-4da7-9fdb-064195aca568"
+
+[[token.source_card_refs]]
+card_name = "The Theorist, Jace Beleren"
+scryfall_oracle_id = "89a6e876-0b00-4671-9652-766fd7ef9bf2"
+scryfall_id = "20bb8c55-4b0b-425f-8201-b54fa2fdde86"
+
+[[token.source_card_refs]]
+card_name = "The Theorist, Jace Beleren"
+scryfall_oracle_id = "89a6e876-0b00-4671-9652-766fd7ef9bf2"
+scryfall_id = "707f6fbb-94f6-459b-8a21-bec360b7b668"
+
+[[token.source_card_refs]]
+card_name = "The Theorist, Jace Beleren"
+scryfall_oracle_id = "89a6e876-0b00-4671-9652-766fd7ef9bf2"
+scryfall_id = "326894e1-469d-4586-b823-9d5038315078"
+
+[[token.source_card_refs]]
+card_name = "The Theorist, Jace Beleren"
+scryfall_oracle_id = "89a6e876-0b00-4671-9652-766fd7ef9bf2"
+scryfall_id = "29a7f3e8-efcd-42bb-b315-9e9c0794dddb"
+
+[token.token_image_ref]
+scryfall_id = "7bda0b63-fd0f-495d-9eb0-20057571c0ee"
+scryfall_oracle_id = "58a1e3c9-a718-4413-b14e-d8d6257567bf"
+preset_id = "3ffa938a-a3fa-5abb-b52d-3e325cd043e2"
+
+[[token]]
 id = "40127fba-2bcb-55f9-ad23-9d2b375c5933"
 category = "Creature"
 fidelity = "Full"
@@ -150304,6 +150355,11 @@ scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
 scryfall_id = "38d09b91-d4da-4e8f-a6ef-09482e09842d"
 
 [[token.source_card_refs]]
+card_name = "An Offer You Can't Refuse"
+scryfall_oracle_id = "234a734b-ba28-4f1b-9d01-3c3e7d516590"
+scryfall_id = "c3d1624a-a031-4871-b9d7-7efbe507d979"
+
+[[token.source_card_refs]]
 card_name = "Xorn"
 scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
 scryfall_id = "09b82084-87c9-4131-b604-d595d38d045a"
@@ -151239,6 +151295,11 @@ keywords = []
 card_name = "Kazuul, Tyrant of the Cliffs"
 scryfall_oracle_id = "f8bf3d91-cb50-48ce-88c6-cdcb37b64b57"
 scryfall_id = "721df547-d777-4247-b130-a4e247445b04"
+
+[[token.source_card_refs]]
+card_name = "Kazuul, Tyrant of the Cliffs"
+scryfall_oracle_id = "f8bf3d91-cb50-48ce-88c6-cdcb37b64b57"
+scryfall_id = "bfa000bd-f3cf-4e95-949d-a3f083b42624"
 
 [token.token_image_ref]
 scryfall_id = "4959b8ed-391c-4b77-bbc1-e32c2b27aa22"
@@ -189502,6 +189563,11 @@ scryfall_id = "227276da-caa5-4b24-a534-48a7ca650c2b"
 [[token.source_card_refs]]
 card_name = "Endrek Sahr, Master Breeder"
 scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
+scryfall_id = "a6436a6b-82ce-4609-bb1e-acedc7594bcc"
+
+[[token.source_card_refs]]
+card_name = "Endrek Sahr, Master Breeder"
+scryfall_oracle_id = "47a0079f-3544-45bc-a32a-bd93844c8c43"
 scryfall_id = "123490fb-5908-45f2-b376-7959ccdf9c3e"
 
 [token.token_image_ref]
@@ -208241,6 +208307,11 @@ subtypes = ["Shark"]
 supertypes = []
 colors = ["Blue"]
 keywords = ["Flying"]
+
+[[token.source_card_refs]]
+card_name = "Shark Typhoon"
+scryfall_oracle_id = "8c0520fa-276b-4d21-b4a9-dce1fce59f6b"
+scryfall_id = "04e52df3-6674-4ee4-b5e0-e113e1b32e68"
 
 [[token.source_card_refs]]
 card_name = "Shark Typhoon"

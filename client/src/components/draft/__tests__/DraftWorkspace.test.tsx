@@ -16,7 +16,7 @@ import { useMultiplayerDraftStore } from "../../../stores/multiplayerDraftStore"
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { HostControls } from "../HostControls";
 import { CompactSideboard } from "../workspace/CompactSideboard";
-import { DraftWorkspace } from "../workspace/DraftWorkspace";
+import { DraftWorkspace, shouldShowDraftWorkspaceDeck } from "../workspace/DraftWorkspace";
 import {
   useDraftWorkspaceDrag,
   type DraftWorkspaceDragController,
@@ -246,6 +246,8 @@ function StatefulWorkspace({
   poolGroups,
   interactionLocked = false,
   dragController,
+  responsiveLayout,
+  responsiveContext,
 }: {
   cards: readonly DraftCardInstance[];
   initialWorkspace: DraftWorkspaceState;
@@ -256,6 +258,8 @@ function StatefulWorkspace({
   poolGroups?: DraftPoolGroups;
   interactionLocked?: boolean;
   dragController?: DraftWorkspaceDragController;
+  responsiveLayout?: "phone-portrait" | "phone-landscape" | "tablet-portrait" | "tablet-landscape" | "desktop";
+  responsiveContext?: "draft" | "builder";
 }) {
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const [workspacePreferences, setPreferences] = useState(initialPreferences);
@@ -267,6 +271,8 @@ function StatefulWorkspace({
       preferences={workspacePreferences}
       interactionLocked={interactionLocked}
       dragController={dragController}
+      responsiveLayout={responsiveLayout}
+      responsiveContext={responsiveContext}
       onWorkspaceChange={(next) => {
         workspaceChanges(next);
         setWorkspace(next);
@@ -316,6 +322,63 @@ function TouchDragWorkspace({
 }
 
 describe("draft workspace shell", () => {
+  it("uses a separate fifteen-column cap for the tablet visual builder", () => {
+    const cards = [card("deck-card")];
+    const preferenceChanges = vi.fn();
+    render(
+      <StatefulWorkspace
+        cards={cards}
+        initialWorkspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        initialPreferences={preferences({
+          tabletDeckVisualColumnCaps: { portrait: 12, landscape: 14 },
+        })}
+        preferenceChanges={preferenceChanges}
+        responsiveLayout="tablet-landscape"
+        responsiveContext="builder"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Layout" }));
+    const increase = screen.getByRole("button", { name: "Increase max columns per row" });
+    const decrease = screen.getByRole("button", { name: "Decrease max columns per row" });
+    expect(increase).toHaveClass("h-11", "w-11");
+    expect(decrease).toHaveClass("h-11", "w-11");
+    fireEvent.click(increase);
+    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
+      phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 12, landscape: 15 },
+    }));
+    expect(increase).toBeDisabled();
+  });
+
+  it("persists the tablet portrait visual-builder column cap without changing phone caps", () => {
+    const cards = [card("deck-card")];
+    const preferenceChanges = vi.fn();
+    render(
+      <StatefulWorkspace
+        cards={cards}
+        initialWorkspace={state({ "deck-card": { zone: "deck", row: 0, column: 0, order: 0 } })}
+        initialPreferences={preferences({
+          tabletDeckVisualColumnCaps: { portrait: 14, landscape: 12 },
+        })}
+        preferenceChanges={preferenceChanges}
+        responsiveLayout="tablet-portrait"
+        responsiveContext="builder"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Layout" }));
+    const increase = screen.getByRole("button", { name: "Increase max columns per row" });
+    fireEvent.click(increase);
+
+    expect(screen.getByRole("group", { name: "Max columns per row" })).toHaveTextContent("15");
+    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({
+      phoneDeckVisualColumnCaps: { portrait: 3, landscape: 5 },
+      tabletDeckVisualColumnCaps: { portrait: 15, landscape: 12 },
+    }));
+    expect(increase).toBeDisabled();
+  });
+
   it("uses the draft visual preview setting without showing a workspace control", () => {
     const cards = [card("deck-card"), card("side-card")];
     const preferenceChanges = vi.fn();
@@ -953,7 +1016,7 @@ describe("draft workspace shell", () => {
     expect(tinyCardHeight).toBeLessThanOrEqual(1);
   });
 
-  it("keeps_only_live_width_breakpoints_and_cleans_them_up", async () => {
+  it("keeps_the_desktop_board_visible_across_width_changes_and_cleans_them_up", async () => {
     const harness = installBrowserHarness({ width: 1023 });
     const windowAdd = vi.spyOn(window, "addEventListener");
     const windowRemove = vi.spyOn(window, "removeEventListener");
@@ -970,7 +1033,7 @@ describe("draft workspace shell", () => {
 
     expect(screen.queryByRole("group", { name: "Workspace view" })).not.toBeInTheDocument();
     expect(screen.queryByText("Build your deck")).not.toBeInTheDocument();
-    expect(screen.queryByRole("toolbar", { name: "Board layout" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Show sideboard (0 cards)" })).toBeInTheDocument();
     expect(container.querySelector('[data-safe-area-probe="true"]')).not.toBeInTheDocument();
     expect(screen.queryByRole("separator")).not.toBeInTheDocument();
@@ -980,10 +1043,10 @@ describe("draft workspace shell", () => {
 
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1024 });
     harness.mediaQueries.get("(min-width: 1024px)")!.dispatchEvent(new Event("change"));
-    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" }).length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1));
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1023 });
     harness.mediaQueries.get("(min-width: 1024px)")!.dispatchEvent(new Event("change"));
-    await waitFor(() => expect(screen.queryAllByRole("toolbar", { name: "Board layout" })).toHaveLength(0));
+    await waitFor(() => expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1));
 
     const resizeRegistration = windowAdd.mock.calls.find(([type]) => type === "resize")!;
     unmount();
@@ -1097,10 +1160,12 @@ describe("draft workspace shell", () => {
     );
 
     const first = container.querySelector<HTMLElement>('[data-instance-id="shared-a"]')!;
-    fireEvent.click(within(first).getByRole("button", { name: "Move Shared Name to Sideboard" }));
+    fireEvent.keyDown(within(first).getByRole("button", { name: "Inspect Shared Name" }), {
+      key: "ArrowDown",
+      ctrlKey: true,
+      shiftKey: true,
+    });
     expect(screen.getByText("Deck (1 card)")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Compact sideboard" }))
-      .getByText("Sideboard (1 card)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sideboard (1 card)" })).toBeInTheDocument();
     expect(lastWorkspaceChange(workspaceChanges).placements["shared-a"].zone).toBe("sideboard");
     expect(lastWorkspaceChange(workspaceChanges).placements["shared-b"].zone).toBe("deck");
@@ -1188,7 +1253,7 @@ describe("draft workspace shell", () => {
     expect(within(summary).getByLabelText("1 Creature")).toBeInTheDocument();
   });
 
-  it("preserves_compact_deck_and_board_deck_while_expanded_sideboard_stays_complete", () => {
+  it("keeps_the_desktop_board_visible_when_a_compact_preference_is_restored", () => {
     const cards = [card("one")];
     const workspaceChanges = vi.fn();
     const workspace = state({ one: { zone: "deck", row: 0, column: 0, order: 0 } });
@@ -1207,10 +1272,156 @@ describe("draft workspace shell", () => {
     );
 
     expect(screen.queryByRole("group", { name: "Workspace view" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(1);
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
     rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "board" })} />);
     expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
     expect(workspaceChanges).not.toHaveBeenCalled();
+  });
+
+  it("switches_builder_phone_compact_and_visual_views_without_a_compact_landscape_sideboard", () => {
+    const preferenceChanges = vi.fn();
+    const props = {
+      pool: [card("one")],
+      poolGroups: groups([card("one")]),
+      workspace: state({ one: { zone: "deck", row: 0, column: 0, order: 0 } }),
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: preferenceChanges,
+      compactDeckControls: <button type="button">Add Lands</button>,
+      responsiveLayout: "phone-landscape" as const,
+      responsiveContext: "builder" as const,
+    };
+    const { container, rerender } = render(
+      <DraftWorkspace {...props} preferences={preferences({ explicitView: null })} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
+    const phonePrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    expect(within(phonePrimary).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["Group", "Add Lands", "Visual builder"]);
+    expect(phonePrimary.children[2]).toHaveAttribute("data-deck-type-counts");
+    expect(container.querySelector("[data-compact-pool-trailing-controls]")).toHaveClass("ml-auto");
+    expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-[0.65625rem]");
+    expect(screen.queryByRole("region", { name: "Compact sideboard" })).not.toBeInTheDocument();
+    expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-hidden");
+    fireEvent.click(screen.getByRole("button", { name: "Visual builder" }));
+    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "board" }));
+
+    rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "board" })} />);
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("ml-auto", "min-h-11");
+    expect(screen.getByRole("region", { name: "Compact sideboard" })).toBeInTheDocument();
+    expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-y-auto", "overscroll-contain");
+    fireEvent.click(screen.getByRole("button", { name: "Text builder" }));
+    expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "compact" }));
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="desktop"
+      preferences={preferences({ explicitView: "compact" })}
+    />);
+    expect(screen.queryByRole("button", { name: "Visual builder" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("toolbar", { name: "Board layout" })).toHaveLength(2);
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="phone-portrait"
+      preferences={preferences({ explicitView: "compact" })}
+    />);
+    expect(screen.queryByRole("region", { name: "Compact sideboard" })).not.toBeInTheDocument();
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="phone-portrait"
+      preferences={preferences({ explicitView: "board" })}
+    />);
+    expect(screen.getByRole("region", { name: "Compact sideboard" })).toBeInTheDocument();
+    expect(screen.getByRole("toolbar", { name: "Board layout" })).toHaveClass("px-2");
+    expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-[0.65625rem]");
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="tablet-portrait"
+      preferences={preferences({ explicitView: "compact" })}
+    />);
+    const tabletPrimary = container.querySelector<HTMLElement>("[data-compact-pool-primary-controls]")!;
+    expect(within(tabletPrimary).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["Group", "Add Lands", "Visual builder"]);
+    expect(within(tabletPrimary).getByRole("button", { name: "Visual builder" })).toHaveClass("min-h-11");
+    expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
+    expect(container.querySelector<HTMLElement>("[data-zone='deck']")).toHaveClass("overflow-hidden");
+    expect(container.querySelector("[data-workspace-composition='collapsed']"))
+      .toHaveClass("flex", "h-full", "min-h-0", "flex-col", "overflow-hidden");
+    expect(screen.queryByRole("heading", { name: "Deck (1 card)", level: 2 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Compact sideboard" })).not.toBeInTheDocument();
+    fireEvent.click(within(tabletPrimary).getByRole("button", { name: "Group" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Color" }));
+    expect(within(tabletPrimary).getByRole("button", { name: "Group" })).toBeInTheDocument();
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="tablet-portrait"
+      preferences={preferences({ explicitView: "board" })}
+    />);
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("min-h-11");
+    expect(screen.getByRole("toolbar", { name: "Board layout" })).toHaveClass("px-4");
+    expect(container.querySelector("[data-deck-type-counts]")).toHaveClass("text-sm");
+
+    rerender(<DraftWorkspace
+      {...props}
+      responsiveLayout="tablet-landscape"
+      preferences={preferences({ explicitView: "board" })}
+    />);
+    expect(screen.getByRole("button", { name: "Text builder" })).toHaveClass("min-h-11");
+  });
+
+  it.each(["tablet-portrait", "tablet-landscape"] as const)(
+    "keeps builder compact content reachable after collapsing the %s visual deck",
+    (responsiveLayout) => {
+      const preferenceChanges = vi.fn();
+      const props = {
+        pool: [card("one")],
+        poolGroups: groups([card("one")]),
+        workspace: state({ one: { zone: "deck", row: 0, column: 0, order: 0 } }),
+        onWorkspaceChange: vi.fn(),
+        onPreferencesChange: preferenceChanges,
+        compactDeckControls: <button type="button">Add Lands</button>,
+        responsiveLayout,
+        responsiveContext: "builder" as const,
+      };
+      expect(shouldShowDraftWorkspaceDeck(true, true)).toBe(true);
+      const { rerender } = render(
+        <DraftWorkspace {...props} preferences={preferences({ explicitView: "board" })} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Text builder" }));
+      expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "compact" }));
+
+      rerender(<DraftWorkspace {...props} preferences={preferences({ explicitView: "compact" })} />);
+      expect(screen.getByRole("button", { name: "Group" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add Lands" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Visual builder" })).toBeInTheDocument();
+      expect(screen.getByText("one")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Visual builder" }));
+      expect(preferenceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ explicitView: "board" }));
+    },
+  );
+
+  it("uses_a_responsive_collapsed_sideboard_width_only_for_desktop_draft", () => {
+    const props = {
+      pool: [] as DraftCardInstance[],
+      poolGroups: groups([]),
+      workspace: state({}),
+      preferences: preferences({ explicitView: "compact", sideboardCollapsed: true }),
+      onWorkspaceChange: vi.fn(),
+      onPreferencesChange: vi.fn(),
+      responsiveLayout: "desktop" as const,
+    };
+    const { container, rerender } = render(<DraftWorkspace {...props} />);
+    expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style
+      .getPropertyValue("--collapsed-sideboard-card-width")).toContain("clamp(");
+
+    rerender(<DraftWorkspace {...props} responsiveContext="builder" />);
+    expect(container.querySelector<HTMLElement>("[data-workspace-composition='collapsed']")!.style
+      .getPropertyValue("--collapsed-sideboard-card-width")).toBe("240.89999999999998px");
   });
 
   it("renders_collapsed_sideboard_cards_with_preview_empty_state_and_move_to_deck", () => {
@@ -1256,8 +1467,9 @@ describe("draft workspace shell", () => {
           { basic: { zone: "sideboard", row: 0, column: 0, order: 0 } },
           [{ instanceId: "basic", name: "Island" }],
         )}
-        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: true })}
+        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: false })}
         workspaceChanges={workspaceChanges}
+        responsiveLayout="phone-landscape"
         preferenceChanges={vi.fn()}
       />,
     );
@@ -1419,8 +1631,9 @@ describe("draft workspace shell", () => {
       <StatefulWorkspace
         cards={cards}
         initialWorkspace={state({ moving: { zone: "deck", row: 0, column: 0, order: 0 } })}
-        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: true })}
+        initialPreferences={preferences({ explicitView: "compact", sideboardCollapsed: false })}
         workspaceChanges={workspaceChanges}
+        responsiveLayout="phone-landscape"
       />,
     );
 

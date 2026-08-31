@@ -18,6 +18,7 @@ interface PopoverMenuStyle {
   top: number | "auto";
   bottom: number | "auto";
   left: number;
+  width: number;
   maxHeight: number;
 }
 
@@ -45,8 +46,9 @@ interface PopoverMenuProps {
   /** Notified when the menu opens/closes — e.g. to dismiss a hover preview
    *  that would otherwise sit behind the portaled menu. */
   onOpenChange?: (open: boolean) => void;
-  /** Render the menu items; call `close` after an action runs. */
-  children: (close: () => void) => ReactNode;
+  /** Render the menu items; call `close` after an action runs. `focusTrigger`
+   *  provides a stable return target before an action opens another surface. */
+  children: (close: () => void, focusTrigger: () => void) => ReactNode;
 }
 
 /**
@@ -73,6 +75,7 @@ export function PopoverMenu({
     top: 0,
     bottom: "auto",
     left: 0,
+    width: menuWidthPx,
     maxHeight: 320,
   });
 
@@ -89,6 +92,9 @@ export function PopoverMenu({
     if (variant === "dialog") restoreFocusAfterCloseRef.current = true;
     changeOpen(false);
   }, [changeOpen, variant]);
+  const focusTrigger = useCallback(() => {
+    if (triggerRef.current?.isConnected) triggerRef.current.focus();
+  }, []);
   const toggle = useCallback(
     (event: MouseEvent) => {
       event.stopPropagation();
@@ -102,11 +108,15 @@ export function PopoverMenu({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
+    const width = Math.min(
+      menuWidthPx,
+      Math.max(0, window.innerWidth - MENU_VIEWPORT_PADDING_PX * 2),
+    );
     const left = Math.max(
       MENU_VIEWPORT_PADDING_PX,
       Math.min(
-        rect.right - menuWidthPx,
-        window.innerWidth - menuWidthPx - MENU_VIEWPORT_PADDING_PX,
+        rect.right - width,
+        window.innerWidth - width - MENU_VIEWPORT_PADDING_PX,
       ),
     );
     const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP_PX - MENU_VIEWPORT_PADDING_PX;
@@ -116,6 +126,7 @@ export function PopoverMenu({
       top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
       bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
       left,
+      width,
       maxHeight: Math.max(120, openUp ? spaceAbove : spaceBelow),
     });
   }, [menuWidthPx]);
@@ -131,9 +142,9 @@ export function PopoverMenu({
     }
     if (!open && restoreFocusAfterCloseRef.current) {
       restoreFocusAfterCloseRef.current = false;
-      if (triggerRef.current?.isConnected) triggerRef.current.focus();
+      focusTrigger();
     }
-  }, [open, variant]);
+  }, [focusTrigger, open, variant]);
 
   useEffect(() => {
     if (!open) return;
@@ -145,7 +156,7 @@ export function PopoverMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         close();
-        if (variant === "menu") triggerRef.current?.focus();
+        if (variant === "menu") focusTrigger();
       }
     };
     window.addEventListener("pointerdown", onPointerDown, true);
@@ -158,7 +169,7 @@ export function PopoverMenu({
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [open, close, position, variant]);
+  }, [open, close, focusTrigger, position, variant]);
 
   return (
     <>
@@ -204,12 +215,12 @@ export function PopoverMenu({
               top: style.top,
               bottom: style.bottom,
               left: style.left,
-              width: menuWidthPx,
+              width: style.width,
               maxHeight: style.maxHeight,
             }}
             className="fixed z-[120] flex flex-col overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"
           >
-            {children(close)}
+            {children(close, focusTrigger)}
           </div>,
           document.body,
         )}

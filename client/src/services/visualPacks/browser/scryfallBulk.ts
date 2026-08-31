@@ -1,12 +1,26 @@
+import { Gunzip } from "fflate";
+
+import { VisualPackBackendError } from "../backend.ts";
 import { cardBackCandidate, cardCandidateGroups, setIconCandidate } from "../candidateKeys.ts";
-import { assetKey, catalogRoot, packId, type AssetKey, type CandidateKey, type CatalogRoot, type InstallSelector, type PackId, type VisualPackMedia } from "../types.ts";
+import { curatedDescriptors } from "../curatedPack.ts";
+import { planDeckLibraryPack } from "../deckLibraryPack.ts";
+import { assetKey, catalogRoot, packId, type CatalogRoot, type CatalogScanProgress, type InstallSelector, type PackId } from "../types.ts";
+import { descriptor, englishDescriptors } from "./descriptors.ts";
+import type { CardIdentity, ScryfallAssetDescriptor } from "./descriptors.ts";
 import { CARD_BACK_URL } from "../../scryfall.ts";
 
+// `ScryfallAssetDescriptor` moved to `descriptors.ts` alongside the builders
+// that produce it; re-exported so existing importers of this module are
+// unaffected by the extraction.
+export type { ScryfallAssetDescriptor };
+
 const BULK_INDEX_URL = "https://api.scryfall.com/bulk-data";
+const GZIP_INPUT_CHUNK_BYTES = 1024 * 1024;
+const JSONL_INPUT_CHUNK_BYTES = 1024 * 1024;
 
 export class ScryfallBulkError extends Error {
-  constructor(readonly kind: "network" | "storage" | "unsupported") {
-    super(`Scryfall bulk source failed: ${kind}`);
+  constructor(readonly kind: "network" | "storage" | "unsupported", detail?: string) {
+    super(detail ? `Scryfall bulk source failed: ${kind}: ${detail}` : `Scryfall bulk source failed: ${kind}`);
     this.name = "ScryfallBulkError";
   }
 }
@@ -16,14 +30,6 @@ export interface ScryfallBulkSource {
   readonly downloadUrl: string;
   readonly updatedAt: string;
   readonly compressedBytes: number;
-}
-
-export interface ScryfallAssetDescriptor {
-  readonly packId: PackId;
-  readonly assetKey: AssetKey;
-  readonly candidateKeys: readonly CandidateKey[];
-  readonly sourceUrl: string;
-  readonly media: VisualPackMedia;
 }
 
 interface BulkRecord {
@@ -49,23 +55,29 @@ interface ScryfallCard {
   readonly card_faces?: unknown;
 }
 
-interface CardIdentity {
-  readonly id: string;
-  readonly oracleId: string;
-  readonly set: string;
-  readonly collector: string;
-  readonly name: string;
-  readonly faces: readonly { readonly name: string; readonly images: Record<string, string> }[];
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function errorDetail(error: unknown): string | undefined {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  if (typeof error === "string" && error) return error;
+  return undefined;
+}
+
+function completeUtf8Length(bytes: Uint8Array): number {
+  let start = bytes.byteLength - 1;
+  while (start >= 0 && (bytes[start] & 0xc0) === 0x80) start -= 1;
+  if (start < 0) return 0;
+  const first = bytes[start];
+  const expectedLength = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : first < 0xf8 ? 4 : 1;
+  return bytes.byteLength - start < expectedLength ? start : bytes.byteLength;
 }
 
 function sourceError(error: unknown): ScryfallBulkError {
   if (error instanceof ScryfallBulkError) return error;
   if (error instanceof DOMException && error.name === "QuotaExceededError") return new ScryfallBulkError("storage");
-  return new ScryfallBulkError("network");
+  return new ScryfallBulkError("network", errorDetail(error));
 }
 
 async function sha256(value: string): Promise<CatalogRoot> {
@@ -102,42 +114,6 @@ function identityKey(card: CardIdentity): string {
   return `${card.oracleId}:${card.set}:${card.collector}`;
 }
 
-function descriptor(
-  selectedPack: PackId,
-  card: CardIdentity,
-  faceIndex: number,
-  variant: "full_card" | "art_crop",
-  rung: "small" | "normal" | "art_crop",
-  sourceUrl: string,
-  candidates: CandidateKey[],
-): ScryfallAssetDescriptor {
-  const asset = assetKey(`asset:v1:exact_printing:${card.id}-${faceIndex}-${variant}-${rung}`);
-  return { packId: selectedPack, assetKey: asset, candidateKeys: candidates, sourceUrl, media: "image/jpeg" };
-}
-
-function englishDescriptors(selectedPack: PackId, card: CardIdentity): ScryfallAssetDescriptor[] {
-  return card.faces.flatMap((face, faceIndex) => {
-    const result: ScryfallAssetDescriptor[] = [];
-    const add = (variant: "full_card" | "art_crop", rung: "small" | "normal" | "art_crop", url: string | undefined) => {
-      if (!url) return;
-      const candidates = cardCandidateGroups({
-        englishPrintingId: card.id,
-        oracleId: card.oracleId,
-        englishAliases: [card.name, face.name],
-        oracleAliases: [card.name, face.name],
-        faceIndex,
-        variant,
-        rung,
-      }).flatMap((group) => group.keys);
-      result.push(descriptor(selectedPack, card, faceIndex, variant, rung, url, candidates));
-    };
-    add("full_card", "small", face.images.small);
-    add("full_card", "normal", face.images.normal);
-    add("art_crop", "art_crop", face.images.art_crop);
-    return result;
-  });
-}
-
 function localizedDescriptors(selectedPack: PackId, english: CardIdentity, localized: CardIdentity, language: string): ScryfallAssetDescriptor[] {
   return localized.faces.flatMap((face, faceIndex) => {
     const englishFace = english.faces[faceIndex];
@@ -160,6 +136,17 @@ function localizedDescriptors(selectedPack: PackId, english: CardIdentity, local
     add("art_crop", "art_crop", face.images.art_crop);
     return result;
   });
+}
+
+function imageCount(card: CardIdentity, faceLimit = card.faces.length): number {
+  let count = 0;
+  for (const [index, face] of card.faces.entries()) {
+    if (index >= faceLimit) break;
+    if (face.images.small) count += 1;
+    if (face.images.normal) count += 1;
+    if (face.images.art_crop) count += 1;
+  }
+  return count;
 }
 
 function coreDescriptors(): ScryfallAssetDescriptor[] {
@@ -219,27 +206,83 @@ async function bulkResponse(source: ScryfallBulkSource, signal: AbortSignal, fet
   return response;
 }
 
-async function* jsonLines(response: Response, signal: AbortSignal): AsyncGenerator<unknown> {
-  if (typeof DecompressionStream === "undefined") throw new ScryfallBulkError("unsupported");
+async function scanJsonLines(
+  response: Response,
+  signal: AbortSignal,
+  visit: (value: unknown) => Promise<void> | void,
+  onCompressedBytesRead?: (bytes: number) => void,
+): Promise<void> {
   if (!response.body) throw new ScryfallBulkError("network");
-  const reader = response.body.pipeThrough(new DecompressionStream("gzip")).pipeThrough(new TextDecoderStream()).getReader();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  const gunzip = new Gunzip((chunk) => chunks.push(chunk));
   let trailing = "";
+  let trailingUtf8 = new Uint8Array();
+  let lineNumber = 0;
+  let compressedBytesRead = 0;
+  let lastYieldAt = performance.now();
+  let stage = "reading the bulk response";
+  const yieldToUi = async () => {
+    if (performance.now() - lastYieldAt < 16) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    lastYieldAt = performance.now();
+  };
+  const visitLine = (line: string): Promise<void> | void => {
+    lineNumber += 1;
+    if (!line) return;
+    let value: unknown;
+    try { value = JSON.parse(line); } catch (error) {
+      throw new ScryfallBulkError("network", `JSONL record ${lineNumber}: ${errorDetail(error) ?? "invalid JSON"}`);
+    }
+    return visit(value);
+  };
   try {
     while (true) {
       if (signal.aborted) return;
       const next = await reader.read();
-      if (next.done) break;
-      const lines = `${trailing}${next.value}`.split("\n");
-      trailing = lines.pop() ?? "";
-      for (const line of lines) {
-        if (signal.aborted) return;
-        if (!line) continue;
-        try { yield JSON.parse(line); } catch { throw new ScryfallBulkError("network"); }
+      const input = next.done ? new Uint8Array() : next.value;
+      for (let offset = 0; offset < input.byteLength || (next.done && offset === 0); offset += GZIP_INPUT_CHUNK_BYTES) {
+        const end = Math.min(offset + GZIP_INPUT_CHUNK_BYTES, input.byteLength);
+        chunks.length = 0;
+        stage = `decompressing bytes ${offset}-${end}`;
+        gunzip.push(input.slice(offset, end), next.done && end === input.byteLength);
+        onCompressedBytesRead?.(compressedBytesRead + end);
+        for (const chunk of chunks) {
+          for (let outputOffset = 0; outputOffset < chunk.byteLength; outputOffset += JSONL_INPUT_CHUNK_BYTES) {
+            stage = `decoding JSONL after byte ${end}`;
+            const outputEnd = Math.min(outputOffset + JSONL_INPUT_CHUNK_BYTES, chunk.byteLength);
+            const inputBytes = chunk.subarray(outputOffset, outputEnd);
+            let bytes = inputBytes;
+            if (trailingUtf8.byteLength > 0) {
+              bytes = new Uint8Array(trailingUtf8.byteLength + inputBytes.byteLength);
+              bytes.set(trailingUtf8);
+              bytes.set(inputBytes, trailingUtf8.byteLength);
+            }
+            const completeLength = completeUtf8Length(bytes);
+            trailingUtf8 = bytes.slice(completeLength);
+            const lines = `${trailing}${new TextDecoder().decode(bytes.subarray(0, completeLength))}`.split("\n");
+            trailing = lines.pop() ?? "";
+            for (const line of lines) {
+              if (signal.aborted) return;
+              const pending = visitLine(line);
+              if (pending) await pending;
+            }
+            await yieldToUi();
+          }
+        }
+        await yieldToUi();
       }
+      compressedBytesRead += input.byteLength;
+      if (next.done) break;
     }
+    stage = "finishing JSONL decoding";
+    trailing += new TextDecoder().decode(trailingUtf8);
     if (trailing) {
-      try { yield JSON.parse(trailing); } catch { throw new ScryfallBulkError("network"); }
+      const pending = visitLine(trailing);
+      if (pending) await pending;
     }
+  } catch (error) {
+    throw new ScryfallBulkError("network", `${stage}: ${errorDetail(error) ?? "unknown error"}`);
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
@@ -250,42 +293,147 @@ export async function forEachScryfallAsset(
   source: ScryfallBulkSource,
   selector: InstallSelector,
   signal: AbortSignal,
-  visit: (descriptor: ScryfallAssetDescriptor) => Promise<void>,
+  visit: (descriptor: ScryfallAssetDescriptor) => Promise<void> | void,
   fetcher: typeof fetch = globalThis.fetch,
 ): Promise<void> {
   if (selector.kind === "core") {
-    for (const value of coreDescriptors()) await visit(value);
+    for (const value of coreDescriptors()) {
+      const pending = visit(value);
+      if (pending) await pending;
+    }
+    return;
+  }
+  // The curated membership is planned from local data, so `source` is unused
+  // here and the multi-gigabyte bulk stream is never opened.
+  if (selector.kind === "curated") {
+    for (const value of await curatedDescriptors(selector.membershipDigest)) {
+      if (signal.aborted) return;
+      const pending = visit(value);
+      if (pending) await pending;
+    }
+    return;
+  }
+  // Deck-library membership is likewise planned from local data. Its digest
+  // must still name the current plan before any objects can be written under
+  // it, so stale selectors fail without opening the bulk archive.
+  if (selector.kind === "deck_library") {
+    const membership = await planDeckLibraryPack(packId("deck_library"));
+    if (membership.membershipDigest !== selector.membershipDigest) throw new VisualPackBackendError("conflict");
+    for (const value of membership.descriptors) {
+      if (signal.aborted) return;
+      const pending = visit(value);
+      if (pending) await pending;
+    }
     return;
   }
   try {
     const selectedPack = selector.kind === "complete" ? packId("complete")
       : selector.kind === "printing" ? packId(`printing:${selector.set}`)
         : packId(`locale:${selector.language}:${selector.set}`);
-    if (selector.kind === "printing") await visit(setIconDescriptor(selectedPack, selector.set));
+    if (selector.kind === "printing") {
+      const pending = visit(setIconDescriptor(selectedPack, selector.set));
+      if (pending) await pending;
+    }
     const english = new Map<string, CardIdentity>();
     const localized = new Map<string, CardIdentity>();
-    for await (const value of jsonLines(await bulkResponse(source, signal, fetcher), signal)) {
+    await scanJsonLines(await bulkResponse(source, signal, fetcher), signal, (value) => {
       if (signal.aborted) return;
       const raw = value as ScryfallCard;
       const card = cardIdentity(raw);
-      if (!card) continue;
+      if (!card) return;
       if (selector.kind === "locale") {
-        if (raw.set !== selector.set) continue;
+        if (raw.set !== selector.set) return;
         if (raw.lang === "en") english.set(identityKey(card), card);
         if (raw.lang === selector.language) localized.set(identityKey(card), card);
       } else if (selected(selector, raw)) {
-        for (const descriptorValue of englishDescriptors(selectedPack, card)) await visit(descriptorValue);
+        let pending: Promise<void> | undefined;
+        for (const descriptorValue of englishDescriptors(selectedPack, card)) {
+          if (pending) {
+            pending = pending.then(() => visit(descriptorValue));
+          } else {
+            const next = visit(descriptorValue);
+            if (next) pending = next;
+          }
+        }
+        return pending;
       }
-    }
+    });
     if (selector.kind === "locale") {
       for (const [key, local] of localized) {
         const base = english.get(key);
         if (!base) continue;
-        for (const descriptorValue of localizedDescriptors(selectedPack, base, local, selector.language)) await visit(descriptorValue);
+        for (const descriptorValue of localizedDescriptors(selectedPack, base, local, selector.language)) {
+          const pending = visit(descriptorValue);
+          if (pending) await pending;
+        }
       }
     }
   } catch (error) {
     if (error instanceof Error && error.name === "VisualPackBackendError") throw error;
+    throw sourceError(error);
+  }
+}
+
+export async function countScryfallAssets(
+  source: ScryfallBulkSource,
+  selector: InstallSelector,
+  signal: AbortSignal,
+  onProgress?: (progress: CatalogScanProgress) => void,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<number> {
+  if (selector.kind === "core") return coreDescriptors().length;
+  if (selector.kind === "curated") return (await curatedDescriptors(selector.membershipDigest)).length;
+  if (selector.kind === "deck_library") {
+    const membership = await planDeckLibraryPack(packId("deck_library"));
+    if (membership.membershipDigest !== selector.membershipDigest) throw new VisualPackBackendError("conflict");
+    return membership.descriptors.length;
+  }
+  try {
+    let count = selector.kind === "printing" ? 1 : 0;
+    let compressedBytesRead = 0;
+    let recordsScanned = 0;
+    let lastReportedAt = 0;
+    const report = (force = false) => {
+      const now = performance.now();
+      if (!force && now - lastReportedAt < 100) return;
+      lastReportedAt = now;
+      onProgress?.({
+        compressedBytesRead: Math.min(compressedBytesRead, source.compressedBytes),
+        compressedBytesTotal: source.compressedBytes,
+        recordsScanned,
+        assetRecords: count,
+      });
+    };
+    const english = new Map<string, CardIdentity>();
+    const localized = new Map<string, CardIdentity>();
+    await scanJsonLines(await bulkResponse(source, signal, fetcher), signal, (value) => {
+      if (signal.aborted) return;
+      recordsScanned += 1;
+      const raw = value as ScryfallCard;
+      const card = cardIdentity(raw);
+      if (!card) return;
+      if (selector.kind === "locale") {
+        if (raw.set !== selector.set) return;
+        if (raw.lang === "en") english.set(identityKey(card), card);
+        if (raw.lang === selector.language) localized.set(identityKey(card), card);
+      } else if (selected(selector, raw)) {
+        count += imageCount(card);
+      }
+      report();
+    }, (bytes) => {
+      compressedBytesRead = bytes;
+      report();
+    });
+    if (signal.aborted) return count;
+    if (selector.kind === "locale") {
+      for (const [key, local] of localized) {
+        const base = english.get(key);
+        if (base) count += imageCount(local, base.faces.length);
+      }
+    }
+    report(true);
+    return count;
+  } catch (error) {
     throw sourceError(error);
   }
 }

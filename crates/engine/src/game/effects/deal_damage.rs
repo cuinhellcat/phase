@@ -151,6 +151,10 @@ fn resolve_effect_recipients(
     // targets while still referring to an earlier slot (Self-Destruct class).
     if let TargetFilter::ParentTargetSlot { index } = target_filter {
         return crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index)
+            .filter(|target| match target {
+                TargetRef::Object(id) => ability.target_pin_is_current(*id, state),
+                TargetRef::Player(_) => true,
+            })
             .into_iter()
             .collect();
     }
@@ -7090,7 +7094,7 @@ mod tests {
         assert_eq!(state.objects[&opp_b_pw].loyalty, Some(2));
     }
 
-    /// CR 120.3 + CR 119.3a: Pyrohemia / Pestilence runtime behavior — when
+    /// CR 120.3a + CR 120.3e: Pyrohemia / Pestilence runtime behavior — when
     /// `DamageAll { player_filter: Some(PlayerFilter::All) }` resolves, every
     /// creature on the battlefield (including the controller's own) takes
     /// damage AND every player (including the controller) loses life. This

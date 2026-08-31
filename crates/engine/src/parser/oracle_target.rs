@@ -1272,7 +1272,7 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    // CR 608.2k / CR 603.7c: "the spell you cast" / bare "the spell" is an
+    // CR 608.2k: "the spell you cast" / bare "the spell" is an
     // untargeted anaphor to the triggering spell object on a cast trigger
     // (Taigam, Master Opportunist: "exile the spell you cast"). It maps to
     // TriggeringSource, mirroring the bare-"that spell" arm above. Disambiguate
@@ -5885,7 +5885,10 @@ fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp,
     Some((prop, text.len() - rest.len()))
 }
 
-fn superlative_property_filter_prop(
+/// Canonical object-membership predicate for a superlative aggregate. Shared
+/// by target noun phrases and condition candidate filters so both use exact
+/// equality, including ties.
+pub(crate) fn superlative_property_filter_prop(
     function: AggregateFunction,
     property: ObjectProperty,
     filter: TargetFilter,

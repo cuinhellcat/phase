@@ -1796,7 +1796,10 @@ export type CastOfferKind =
   | {
       type: "FreeCastWindow";
       candidates: ObjectId[];
-      remaining_casts: number;
+      // CR 601.2: absent for the UNBOUNDED "any number of spells" window — the
+      // engine field is `Option<u8>` with `skip_serializing_if = "is_none"`, so
+      // `None` omits the key rather than sending a sentinel cap.
+      remaining_casts?: number;
       remaining_mv_budget?: number;
       filter: TargetFilter;
       zones: Zone[];
@@ -2647,6 +2650,10 @@ export type GameEvent =
   // partial shape here would assert a contract nothing checks.
   | { type: "SagaChapterAbilityResolved"; data: { saga: unknown; controller: PlayerId; chapter: number; final_chapter: number } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
+  // CR 701.17a: the mill keyword action. `to` is CR 701.17c's "the zone it moved
+  // to from the library" — the post-replacement destination, so a diverted mill
+  // reports where the card actually landed.
+  | { type: "Milled"; data: { player_id: PlayerId; object_id: ObjectId; to: Zone } }
   | { type: "EnduringStoryGained"; data: { player_id: PlayerId } }
   | { type: "DamageCleared"; data: { object_id: ObjectId } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }

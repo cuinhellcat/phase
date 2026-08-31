@@ -177,6 +177,14 @@ function dataFileDefines(mode: string): Record<string, string> {
     // compiles to a permanent no-op and nothing is ever sent anywhere.
     __TELEMETRY_URL__: JSON.stringify(process.env.TELEMETRY_URL || ""),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
+    // Operator status message. Deliberately NOT manifest-driven: the deploy
+    // workflow's upload loop reads data-files.json and (a) hard-errors when a
+    // listed file was not generated into client/public/, and (b) re-uploads
+    // whatever it finds on EVERY deploy — which would clobber a live status
+    // message the maintainer published out of band. It is published and cleared
+    // by scripts/publish-status.sh alone; no CI job ever touches the object.
+    // Same explicit, non-manifest shape as __CARD_DATA_URL__ above.
+    __STATUS_URL__: JSON.stringify(base ? `${base}/status.json` : "/status.json"),
     // Per-locale content-i18n sidecar URL template ({lng} replaced at runtime).
     // The sidecars are listed in data-files.json, so on deploy they are uploaded
     // to `${DATA_BASE_URL}/card-data.<lng>.json` and stripped from the Pages
@@ -453,6 +461,16 @@ export default defineConfig(({ mode }) => ({
   // hit Caddy rather than the bare :5173 dev server. Both are gated on a
   // hostname presence check so plain `pnpm dev` on localhost still works.
   server: {
+    // Every consumer of this dev server pins :5173 as a literal it cannot
+    // re-resolve — tauri.conf.json's `devUrl`, the Caddyfile's reverse_proxy
+    // upstreams, the Tiltfile's link. `strictPort` is the enforcement: vite
+    // defaults it to false and on EADDRINUSE drifts to ++port, announced only
+    // by an info line that scrolls past inside `tauri dev`, leaving the shell
+    // on a dead URL painting a blank white document. `port` declares the pin;
+    // `strictPort` is what holds it. `vite preview` inherits strictPort from
+    // here (its own port stays 4173), so `pnpm preview` refuses.
+    port: 5173,
+    strictPort: true,
     allowedHosts: ["local.phase-rs.dev", ".local.phase-rs.dev"],
     hmr: process.env.CADDY_PROXY === "1"
       ? { protocol: "wss", host: "local.phase-rs.dev", clientPort: 443 }
