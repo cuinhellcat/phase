@@ -661,7 +661,8 @@ const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn.
 
 /// The one shape the parser can emit that no prune owned: a play permission
 /// whose stated duration names the UNTAP step. No printed card prints it —
-/// measured over `client/public/card-data.json`, 35798 cards — so the wording is
+/// measured over the parsed corpus (the card-data snapshot ages separately from
+/// the code, so no count is pinned here) — so the wording is
 /// assembled here from two productions the grammar already has: the
 /// turn-agnostic step deadline ("until the next untap step",
 /// `oracle_nom::duration::parse_until_next_step`) and an impulse play grant.
@@ -1090,10 +1091,13 @@ fn a_lifetime_already_over_at_grant_time_produces_no_permission() {
 /// the duration for every effect that wording produces, and the class is much
 /// larger than the permission cards that motivated it.
 ///
-/// This is CR 611.2b's own example, run as a production regression: Master
-/// Thief's "gain control of target artifact for as long as you control this
-/// creature". When Master Thief changes hands the duration ends, so control of
-/// the artifact reverts. Before the split the wording lowered to
+/// This is the duration class of CR 611.2b's own example, run as a production
+/// regression: Master Thief's "gain control of target artifact for as long as
+/// you control this creature". The printed rule illustrates that wording from
+/// the other end — a duration already over BEFORE the ability resolves, so the
+/// effect does nothing — while this test drives the end that a live effect
+/// reaches: Master Thief changes hands, the duration ends, control of the
+/// artifact reverts. Before the split the wording lowered to
 /// `UntilHostLeavesPlay`, a battlefield-exit test, and the thief kept the
 /// artifact.
 ///

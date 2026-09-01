@@ -2233,31 +2233,37 @@ mod tests {
              filter must be selective, not a blanket drop"
         );
     }
-    /// CR 611.2a fail-closed at the install seam: a host-bound duration
-    /// (`WhileControllingHost` / `UntilHostLeavesPlay` /
-    /// `WhileHostOnBattlefield`) on an `AddTargetReplacement` whose
-    /// replacement the control gate cannot enforce — anything but the bare
-    /// untap-prevention rider — must REFUSE the install. Before the guard,
-    /// such a def landed with `expiry: None` and no condition — no lifetime
-    /// the engine can end correctly: in `pending_damage_replacements` (whose
-    /// prunes key on `expiry` only) it outlives its printed window, and on an
-    /// object it lands live-only and is wiped at the next CR 613.1 layer
-    /// reseed, far too early. Either way the printed duration is dropped.
+    /// CR 611.2a at the install seam, both halves of the refusal.
     ///
-    /// No parser path emits this shape today (full-corpus parse census: every
-    /// host-duration `AddTargetReplacement` is the bare untap rider), so this
-    /// drives the production resolver (`add_target_replacement::resolve`)
-    /// with a constructed ability — the guard exists precisely so parser
-    /// evolution cannot turn the dropped duration into an immortal effect.
+    /// **Which durations the seam represents.** Only
+    /// `Duration::WhileControllingHost` has an enforceable lifetime here: the
+    /// gate it promises is `ReplacementCondition::ControllerControlsSource`,
+    /// which ends on a control change. The presence reading
+    /// (`WhileHostOnBattlefield`) and the event deadline
+    /// (`UntilHostLeavesPlay`) both SURVIVE a control change while their source
+    /// stays on the battlefield, so wearing that gate would end them early —
+    /// a window shorter than printed, which CR 611.2a forbids exactly as much
+    /// as a longer one. Both therefore classify `Unsupported` and are refused,
+    /// on every replacement form including the bare untap rider.
     ///
-    /// REVERT-PROBE (measured): restore `GateControlled => {}` (drop the
-    /// `host_gate_enforceable` check) → the run fails at the FIRST zero-count
-    /// assert, the object-target one; the floating and player arms sit behind
-    /// it on the same seam and are reasoned, not separately measured (their
-    /// pushes are unconditional once the seam returns `Some`). All three call
-    /// sites of `replacement_with_ability_expiry` are exercised. The positive
-    /// control (same duration, bare untap rider) guards against a vacuous
-    /// "refuses everything".
+    /// **How the refusal is delivered.** As a hard `EffectError`, not a
+    /// successful no-op. The previous revision returned `None` here and every
+    /// resolver arm turned that into `Ok(())` / `continue`, so a printed
+    /// replacement resolved into nothing while the card reported as supported.
+    /// The `unwrap_err` assertions below are the pin against that regressing:
+    /// an `unwrap()` here would pass again the moment the seam goes quiet.
+    ///
+    /// All three call sites of `replacement_with_ability_expiry` are driven
+    /// (floating `TargetFilter::None`, object target, player target), through
+    /// the production resolver `add_target_replacement::resolve`.
+    ///
+    /// REVERT-PROBES (measured, see the PR table): mapping the two non-control
+    /// durations back onto `GateControlled` reds the bare-untap-rider block;
+    /// restoring `Ok(())`/`continue` in the resolver arms reds every
+    /// `unwrap_err`; dropping the `host_gate_enforceable` check reds the
+    /// non-untap block. The positive control (control wording, bare untap
+    /// rider, installs WITH the gate) guards against a vacuous "refuses
+    /// everything".
     #[test]
     fn host_duration_on_non_untap_replacement_fails_closed() {
         use crate::types::ability::{Duration, Effect, ReplacementCondition, ResolvedAbility};
@@ -2268,7 +2274,7 @@ mod tests {
             Duration::WhileHostOnBattlefield,
         ];
 
-        for duration in host_durations {
+        for duration in &host_durations {
             let mut state = GameState::new_two_player(42);
             let bear = create_object(
                 &mut state,
@@ -2300,7 +2306,10 @@ mod tests {
                 &install,
                 &mut Vec::new(),
             )
-            .unwrap();
+            .expect_err(
+                "an unenforceable host-bound duration must FAIL the resolution, \
+                 not succeed with no effect",
+            );
             assert_eq!(
                 state.objects[&bear]
                     .replacement_definitions
@@ -2333,7 +2342,7 @@ mod tests {
                 &float_install,
                 &mut Vec::new(),
             )
-            .unwrap();
+            .expect_err("the floating call site must fail loudly too");
             assert!(
                 state.pending_damage_replacements.is_empty(),
                 "{duration:?}: a floating rider with an unenforceable host-bound \
@@ -2359,7 +2368,7 @@ mod tests {
                 &player_install,
                 &mut Vec::new(),
             )
-            .unwrap();
+            .expect_err("the player-target call site must fail loudly too");
             assert!(
                 state.pending_damage_replacements.is_empty(),
                 "{duration:?}: a player-target rider with an unenforceable \
@@ -2367,8 +2376,54 @@ mod tests {
             );
         }
 
-        // Positive control: the bare untap-prevention rider under the SAME
-        // duration installs, carrying the control gate (not refused).
+        // CR 611.2a, the duration axis on its own: the bare untap rider — the
+        // ONE form the control gate can carry — is still refused under the two
+        // NON-control host wordings, because the gate would end them at a
+        // control change they are printed to survive.
+        for duration in [
+            Duration::UntilHostLeavesPlay,
+            Duration::WhileHostOnBattlefield,
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let bear = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Test Bear".to_string(),
+                Zone::Battlefield,
+            );
+            let untap_rider = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Untap,
+            );
+            let mut install = ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(untap_rider),
+                    target: TargetFilter::Any,
+                },
+                vec![TargetRef::Object(bear)],
+                ObjectId(0),
+                PlayerId(0),
+            );
+            install.duration = Some(duration.clone());
+            crate::game::effects::add_target_replacement::resolve(
+                &mut state,
+                &install,
+                &mut Vec::new(),
+            )
+            .expect_err("a non-control host wording must not be admitted through the CONTROL gate");
+            assert_eq!(
+                state.objects[&bear]
+                    .replacement_definitions
+                    .iter_all()
+                    .count(),
+                0,
+                "{duration:?}: the bare untap rider must not install under a \
+                 non-control host wording"
+            );
+        }
+
+        // Positive control: the bare untap-prevention rider under the CONTROL
+        // wording installs, carrying the control gate (not refused).
         let mut state = GameState::new_two_player(42);
         let bear = create_object(
             &mut state,

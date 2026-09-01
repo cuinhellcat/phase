@@ -105,7 +105,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       (b) `Duration` gained the `WhileControllingHost` ("for as long as
  *           you control ~") and `WhileHostOnBattlefield` ("for as long as ~
  *           remains on the battlefield") variants (CR 611.2b). Each new tag
- *           is a PARSE BREAK in the v37 -> v36 direction, in the same shape
+ *           is a PARSE BREAK in the v38 -> v37 direction, in the same shape
  *           as the full-game bump at entry 46 (new tag emitted, old peer
  *           cannot parse it; the break runs ONE way, unlike entry 32's
  *           two-way break): a v37 peer deserializing a snapshot that contains

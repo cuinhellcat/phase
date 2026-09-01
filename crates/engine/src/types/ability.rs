@@ -3545,9 +3545,10 @@ pub enum Duration {
     /// reading and the event reading have in common.
     WhileHostOnBattlefield,
     /// CR 611.2b: "for as long as you control ~" — the host-lifetime reading
-    /// that ALSO ends when control of the host changes. CR 611.2b works exactly
-    /// this case through in its own Master Thief example, so the two host
-    /// readings are separate variants rather than one: conflating them either
+    /// that ALSO ends when control of the host changes. CR 611.2b's own Master
+    /// Thief example is this duration CLASS — it illustrates the duration failing
+    /// to START rather than this end, which is read off the wording — so the two
+    /// host readings are separate variants rather than one: conflating them either
     /// keeps a permission alive after its grantor was stolen, or revokes
     /// Intet's presence-bound permission on a control change that CR 611.2a
     /// leaves untouched.

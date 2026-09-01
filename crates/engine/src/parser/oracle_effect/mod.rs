@@ -2919,10 +2919,16 @@ pub(crate) fn parse_optional_period_and_end(input: &str) -> Option<()> {
 ///
 /// The CR 611.2b "for as long as you control ~" duration is NOT encoded here:
 /// the clause shell peels that trailing duration onto the sub-ability frame
-/// (`Duration::UntilHostLeavesPlay`), and the `AddTargetReplacement` install
+/// (`Duration::WhileControllingHost`), and the `AddTargetReplacement` install
 /// chokepoint translates it into a `ControllerControlsSource` gate stamped with
 /// the real originating source/controller. A bare "can't become untapped" with
 /// no duration installs the permanent prohibition (no gate).
+///
+/// The two NON-control host wordings peel here just as readily
+/// (`WhileHostOnBattlefield`, `UntilHostLeavesPlay`), and that chokepoint
+/// REFUSES both: they survive a control change the gate would end them on, so
+/// the line is demoted to `Effect::Unimplemented` at
+/// `parser::oracle::demote_unenforceable_replacement_lifetimes`.
 fn try_parse_cant_become_untapped_target_rider(lower: &str) -> Option<Effect> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that creature"),

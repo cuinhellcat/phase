@@ -484,9 +484,10 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         // CR 611.2b: "you control [subject]" → the CONTROL-bound host lifetime.
         // Kept distinct from the presence-bound reading below because the two
         // end at different moments and both are printed: a control change with
-        // the permanent still on the battlefield ends this one (CR 611.2b works
-        // that case through in its own Master Thief example) and leaves the
-        // other running.
+        // the permanent still on the battlefield ends this one (CR 611.2b's own
+        // Master Thief example is this duration CLASS — it illustrates the
+        // duration failing to START, not this end, which is read off the
+        // wording) and leaves the other running.
         value(
             Duration::WhileControllingHost,
             preceded(tag("you control "), rest),

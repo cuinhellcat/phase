@@ -46,6 +46,9 @@ const SOWER_ORACLE: &str = "Flying\nWhen this creature enters, gain control of \
 const BANISHER_PRIEST_ORACLE: &str = "When this creature enters, exile target \
     creature an opponent controls until this creature leaves the battlefield.";
 
+const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that \
+     creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
+
 #[test]
 fn sowers_steal_ends_on_phase_out_and_does_not_revive_on_phase_in() {
     let mut scenario = GameScenario::new();
@@ -168,5 +171,88 @@ fn banisher_priests_event_deadline_exile_survives_its_phase_out() {
         runner.state().objects.get(&bear).unwrap().controller,
         P1,
         "the returned creature is back under its owner's control"
+    );
+}
+
+/// CR 611.2b, the counter-direction of the split this PR turns on: a control
+/// change of the HOST must NOT end a presence-bound effect.
+///
+/// The whole reason `Duration::WhileControllingHost` may wear
+/// `ReplacementCondition::ControllerControlsSource` — and the two other host
+/// wordings may not — is that the control gate ends on a control change while
+/// the presence reading survives it. Every other presence test in the tree
+/// measures a PHASE-OUT or a battlefield exit, both of which the control gate
+/// would also end; only a control change discriminates the two readings. So
+/// without this test, re-pointing the `WhileHostOnBattlefield` arm at
+/// `controller_controls_source_gate` stays green.
+///
+/// The authority is CR 611.2a — an effect lasts as long as STATED, and the
+/// stated duration here is a presence condition, not a control one, so a control
+/// change does not reach it. (CR 702.26d is not in play: nothing phases.
+/// CR 611.2c is a different question — it fixes WHICH objects the effect
+/// affects, not when it ends — so it is not cited as the reason.) Gaining
+/// control of Sower therefore does not hand over the creature it took.
+///
+/// Revert-probe: pointing the presence arm of the host-bound lapse pass at the
+/// control gate reds the final assertion (the bear returns to P1 the moment
+/// P0 stops controlling Sower). The pre-steal reach-guard rules out the vacuous
+/// opposite (no steal in force at all).
+#[test]
+fn sowers_steal_survives_a_control_change_of_its_own_host() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sower = scenario
+        .add_creature_to_hand_from_oracle(P0, "Sower of Temptation", 2, 2, SOWER_ORACLE)
+        .id();
+    let bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let steal = scenario
+        .add_spell_to_hand_from_oracle(P1, "Act of Treason", false, ACT_OF_TREASON)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    // Both libraries must be non-empty: an empty-library draw is its own
+    // state-based ending and would confound the measurement.
+    scenario.with_library_top(P0, &["Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest"]);
+    let mut runner = scenario.build();
+
+    runner.cast(sower).target_object(bear).resolve();
+    assert_eq!(
+        runner.state().objects.get(&bear).unwrap().controller,
+        P0,
+        "reach-guard: the resolved ETB steal must be in force before the control change"
+    );
+
+    // Act of Treason is a sorcery, so P1 needs their own main phase.
+    runner.advance_to_upkeep();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(
+        runner.state().objects.get(&bear).unwrap().controller,
+        P0,
+        "reach-guard: the steal must survive the turn boundary too — otherwise a \
+         turn-scoped expiry, not the control change, is what the final assertion \
+         would be measuring"
+    );
+
+    runner.cast(steal).target_object(sower).resolve();
+    assert_eq!(
+        runner.state().objects.get(&sower).unwrap().controller,
+        P1,
+        "reach-guard: Act of Treason must actually move control of Sower"
+    );
+    assert_eq!(
+        runner.state().objects.get(&sower).unwrap().zone,
+        Zone::Battlefield,
+        "reach-guard: and Sower must still be on the battlefield — that is the \
+         whole difference from the phase-out sibling"
+    );
+
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects.get(&bear).unwrap().controller,
+        P0,
+        "CR 611.2a: 'for as long as ~ remains on the battlefield' is a PRESENCE \
+         condition. Sower changed controller but never left, so the duration has \
+         not ended and the stolen creature stays with the effect's controller"
     );
 }
