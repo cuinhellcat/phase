@@ -3045,6 +3045,7 @@ export class P2PDraftHost {
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
         pick_status: "NotDrafting",
+        active_pack_count: 0,
         face_up_draft_cards: [],
       });
     }
@@ -3072,6 +3073,7 @@ export class P2PDraftHost {
       // placeholder that disagrees with the real view is the [G6] defect class
       // this run has already paid for once.
       required_pick_count: 0,
+      pick_selection_mode: this.procedure?.pick_selection_mode ?? "Direct",
       pool: [],
       draft_effects: [],
       pool_groups: EMPTY_DRAFT_POOL_GROUPS,

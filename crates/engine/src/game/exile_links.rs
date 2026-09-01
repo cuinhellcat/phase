@@ -336,6 +336,7 @@ mod tests {
             "Play grant",
             CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilSourceExilesAnotherCard,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -347,6 +348,7 @@ mod tests {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
         );
@@ -510,6 +512,7 @@ mod tests {
     fn play_from_exile_permission(duration: Duration, source_id: ObjectId) -> CastingPermission {
         CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
             duration,
             granted_to: PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -520,6 +523,7 @@ mod tests {
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
         }

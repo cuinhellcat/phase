@@ -3780,6 +3780,7 @@ fn junk_ability() -> AbilityDefinition {
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
                 frequency: CastFrequency::Unlimited,
@@ -3791,6 +3792,7 @@ fn junk_ability() -> AbilityDefinition {
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
             target: TargetFilter::TrackedSet {

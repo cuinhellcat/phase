@@ -37,6 +37,8 @@ export interface PackDropAdmission {
 
 interface PackDropSourceCommon {
   readonly authorityId: string;
+  /** The rendered pack card which originated this drag, distinct from effect authority. */
+  readonly sourceInstanceId: string;
   readonly cards: readonly DraftCardInstance[];
   readonly sourceIndices: readonly number[];
   readonly interactionGeneration: number;
@@ -54,7 +56,10 @@ export type PackDropSource = PackDropSourceCommon & (
 export interface PackCompatibilityActivation {
   readonly kind: "click" | "double-click";
   readonly detail: number;
+  readonly pointerId: number | null;
   readonly pointerType?: string;
+  readonly surface: "pack" | "workspace";
+  readonly sourceInstanceId: string;
 }
 
 export interface PackDragController {
@@ -70,9 +75,20 @@ export interface PackDragController {
   consumeCompatibilityActivation(activation: PackCompatibilityActivation): boolean;
 }
 
-function compatibilityActivation(event: ReactMouseEvent<HTMLElement>, kind: PackCompatibilityActivation["kind"]): PackCompatibilityActivation {
-  const pointerType = (event.nativeEvent as MouseEvent & { readonly pointerType?: string }).pointerType;
-  return { kind, detail: event.detail, ...(pointerType === undefined ? {} : { pointerType }) };
+function compatibilityActivation(
+  event: ReactMouseEvent<HTMLElement>,
+  kind: PackCompatibilityActivation["kind"],
+  sourceInstanceId: string,
+): PackCompatibilityActivation {
+  const pointerEvent = event.nativeEvent as MouseEvent & { readonly pointerId?: number; readonly pointerType?: string };
+  return {
+    kind,
+    detail: event.detail,
+    pointerId: pointerEvent.pointerId ?? null,
+    ...(pointerEvent.pointerType === undefined ? {} : { pointerType: pointerEvent.pointerType }),
+    surface: "pack",
+    sourceInstanceId,
+  };
 }
 
 export interface WorkspacePackController {
@@ -154,7 +170,7 @@ const cardInfo = (card: DraftCardInstance): CardHoverInfo => ({
 });
 
 function PackCard({
-  card, state, width, locked, local, doubleTapPickEnabled, allowTouchPackDrag, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
+  card, state, width, locked, local, doubleTapPickEnabled, doubleClickPickEnabled, allowTouchPackDrag, desktopLayout, onSelect, onDestination, onDoubleClickPick, onHover, makeDropSource,
 }: {
   card: DraftCardInstance;
   state: CardVisualState;
@@ -162,7 +178,9 @@ function PackCard({
   locked: boolean;
   local: LocalWorkspaceController | null;
   doubleTapPickEnabled: boolean;
+  doubleClickPickEnabled: boolean;
   allowTouchPackDrag: boolean;
+  desktopLayout: boolean;
   onSelect(): void;
   onDestination(destination: DraftPickDestination): void;
   onDoubleClickPick(): void;
@@ -186,7 +204,7 @@ function PackCard({
     <motion.div
       data-instance-id={card.instance_id}
       data-visual-state={state}
-      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 transition-all duration-150 ${locked ? "" : "cursor-pointer hover:scale-[1.02]"} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_4px_2px_rgb(3,139,6)]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
+      className={`relative shrink-0 select-none overflow-visible rounded-md caret-transparent ring-1 ${state === "selected" ? "transition-transform" : "transition-all"} duration-150 ${locked ? "" : `cursor-pointer ${desktopLayout ? "hover:scale-[1.08]" : ""}`} ${state === "selected" ? "z-10 ring-2 ring-[rgb(3,139,6)] shadow-[0_0_7px_3px_rgb(3,139,6)] motion-safe:animate-[draft-pack-selected-glow_4.8s_ease-in-out_infinite]" : state === "failure-restored" ? "ring-red-300" : "ring-white/15 hover:ring-white/20"} ${state === "submitting" || state === "waiting" ? "opacity-55 grayscale" : ""}`}
       style={{ width, flexBasis: width, aspectRatio: "488 / 680" }}
       onMouseEnter={() => onHover(cardInfo(card))}
       onMouseLeave={() => onHover(null)}
@@ -200,7 +218,6 @@ function PackCard({
             if (source !== null) local?.dragController.handlePointerDown(event, source, true);
           }
         } else {
-          if (!locked && event.isPrimary && event.button === 0) onSelect();
           const source = makeDropSource();
           if (source !== null) local?.dragController.handlePointerDown(event, source);
         }
@@ -261,7 +278,7 @@ function PackCard({
       onDoubleClick={(event) => {
         const target = event.target as HTMLElement;
         if (target !== event.currentTarget && target.closest("[data-pack-card-activation]") === null) return;
-        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click")) && local?.doubleClickPick) onDoubleClickPick();
+        if (!local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "double-click", card.instance_id)) && doubleClickPickEnabled) onDoubleClickPick();
       }}
     >
       <button
@@ -270,7 +287,7 @@ function PackCard({
         disabled={locked}
         onClick={(event) => {
           if (Date.now() < ignoreCompatibilityClickUntil.current) return;
-          if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click"))) onSelect();
+          if (!longPress.firedRef.current && !local?.dragController.consumeCompatibilityActivation(compatibilityActivation(event, "click", card.instance_id))) onSelect();
         }}
         className="block h-full w-full overflow-hidden rounded-md disabled:cursor-not-allowed"
       >
@@ -377,6 +394,7 @@ export function PackDisplay({
   const pack = view?.current_pack ?? [];
   const draftEffects = view?.draft_effects ?? [];
   const local = controller.kind === "local-workspace" ? controller : null;
+  const isOrderedSelection = view?.pick_selection_mode === "Ordered";
 
   useEffect(() => {
     const live = new Set(controller.view?.current_pack?.map((card) => card.instance_id) ?? []);
@@ -499,9 +517,11 @@ export function PackDisplay({
         break;
     }
   };
-  const selectedCards = selectedCard === null
-    ? []
-    : pack.filter((card) => card.instance_id === selectedCard || additionalCards.includes(card.instance_id));
+  const selectedIds = selectedCard === null ? [] : [selectedCard, ...additionalCards];
+  const selectedCards = selectedIds.flatMap((id) => {
+    const card = pack.find((candidate) => candidate.instance_id === id);
+    return card === undefined ? [] : [card];
+  });
   const requiredCount = activeEffect === null ? Math.max(1, view.required_pick_count) : 2;
   const chosenCards = (fallback: DraftCardInstance): readonly DraftCardInstance[] => {
     if (activeEffect === null && requiredCount === 1) return [fallback];
@@ -533,7 +553,26 @@ export function PackDisplay({
       delete next[id];
       return next;
     });
-    if (activeEffect === null && requiredCount <= 1) controller.selectCard(id);
+    if (isOrderedSelection) {
+      if (selectedCard === null) {
+        controller.selectCard(id);
+        setAdditionalCards([]);
+      } else if (selectedCard === id) {
+        if (additionalCards.length === 0) {
+          controller.selectCard(null);
+        } else {
+          controller.selectCard(additionalCards[0]);
+          setAdditionalCards((current) => current.slice(1));
+        }
+      } else if (additionalCards.includes(id)) {
+        setAdditionalCards((current) => current.filter((cardId) => cardId !== id));
+      } else if (additionalCards.length === 0) {
+        setAdditionalCards([id]);
+      } else {
+        controller.selectCard(additionalCards[0]);
+        setAdditionalCards([id]);
+      }
+    } else if (activeEffect === null && requiredCount <= 1) controller.selectCard(id);
     else if (selectedCard === id) {
       if (requiredCount <= 1) controller.selectCard(null);
     } else if (additionalCards.includes(id)) {
@@ -659,7 +698,7 @@ export function PackDisplay({
               ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
               : responsiveLayout === "tablet-landscape"
                 ? "grid min-h-0 flex-1 content-start gap-2 overflow-auto pt-2"
-                : "flex flex-wrap justify-center gap-3 overflow-visible"}
+                : "flex flex-wrap justify-center gap-[23px] overflow-visible"}
       >
         <AnimatePresence initial={false}>
           {slots.map((slot) => {
@@ -681,8 +720,10 @@ export function PackDisplay({
               width={width}
               locked={locked}
               local={local}
-              doubleTapPickEnabled={local?.doubleClickPick ?? false}
+              doubleTapPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
+              doubleClickPickEnabled={!isOrderedSelection && (local?.doubleClickPick ?? false)}
               allowTouchPackDrag={responsiveLayout === "tablet-portrait" || responsiveLayout === "tablet-landscape"}
+              desktopLayout={responsiveLayout === "desktop"}
               onSelect={() => select(card.instance_id)}
               onDestination={(destination) => void request(chosenCards(card), destination)}
               onDoubleClickPick={() => {
@@ -702,6 +743,7 @@ export function PackDisplay({
                 return {
                   kind: cards.length === 2 ? "draft-effect" : "pick",
                   authorityId: cards.length === 2 ? activeEffect! : ids[0],
+                  sourceInstanceId: card.instance_id,
                   instanceIds: cards.length === 2 ? [ids[0], ids[1]] : [ids[0]],
                   cards,
                   sourceIndices: indices,

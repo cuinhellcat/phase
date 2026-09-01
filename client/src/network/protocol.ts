@@ -95,7 +95,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
- *  37 — Casting permissions gained a typed lifetime. Two parts, with different
+ *  38 — Casting permissions gained a typed lifetime. Two parts, with different
  *       compatibility consequences:
  *       (a) `CastingPermission::ExileWithAltAbilityCost` gained `duration`
  *           and `source_id`; `::ExileWithAltCost` gained `source_id` beside the
@@ -108,10 +108,21 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *           is a PARSE BREAK in the v37 -> v36 direction, in the same shape
  *           as the full-game bump at entry 46 (new tag emitted, old peer
  *           cannot parse it; the break runs ONE way, unlike entry 32's
- *           two-way break): a v36 peer deserializing a snapshot that contains
+ *           two-way break): a v37 peer deserializing a snapshot that contains
  *           either new tag fails on an unknown variant. There is no serde
  *           default that can rescue it, which is why the handshake must
  *           refuse the pairing rather than degrade.
+ *  37 — FormatConfig gained default_deck_copy_limit, the resolved per-format
+ *       deck-copy ceiling (CR 100.2a / CR 100.2b / CR 903.5b) max_deck_copies
+ *       and the deck-compatibility admission path now both read. The field
+ *       is optional and still parses on an older peer, but silently falls
+ *       back to the fail-closed UpTo(1) singleton cap instead of the
+ *       format's real declared limit — a silent capability loss like 24, not
+ *       a parse break. game_setup and reconnect_ack both carry the full
+ *       GameState, so this P2P track is broken by the same change as the
+ *       full-game PROTOCOL_VERSION track (see
+ *       crates/lobby-broker/src/protocol.rs entry 48) and must bump in
+ *       lockstep with it.
  *  36 — Resolution-time optional fixed sacrifice payments add a typed
  *       replacement-resumable continuation to GameState.
  *  35 — QuantityRef.Aggregate and QuantityRef.TrackedSetAggregate were
@@ -222,7 +233,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 37 as const;
+export const WIRE_PROTOCOL_VERSION = 38 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

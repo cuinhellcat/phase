@@ -13207,13 +13207,18 @@ fn try_parse_chosen_kind_filter(filter_text: &str) -> Option<TargetFilter> {
 /// way") and Memory Vessel ("players may play cards they exiled this way")
 /// without enumerating the permutations. The mandatory " they exiled this way"
 /// suffix keeps the grant class scoped to exactly those two cards.
-fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, ()> {
+fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, CardPlayMode> {
     let (i, _) = alt((tag("each player "), tag("players "))).parse(i)?;
-    let (i, _) = alt((tag("may play "), tag("may cast "))).parse(i)?;
+    let (i, mode) = alt((
+        value(CardPlayMode::Play, tag("may play ")),
+        value(CardPlayMode::Cast, tag("may cast ")),
+    ))
+    .parse(i)?;
     let (i, _) = opt(tag("the ")).parse(i)?;
     // Longest-first so "cards" wins over the "card" prefix.
     let (i, _) = alt((tag("cards"), tag("card"))).parse(i)?;
-    value((), tag(" they exiled this way")).parse(i)
+    let (i, _) = tag(" they exiled this way").parse(i)?;
+    Ok((i, mode))
 }
 
 /// CR 611.2a + CR 108.3: Parse per-grantee grant clauses that follow a
@@ -13234,6 +13239,9 @@ fn parse_per_owner_exiled_this_way(i: &str) -> OracleResult<'_, ()> {
 fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let lower = tp.lower;
 
+    let per_owner_mode = parse_per_owner_exiled_this_way(lower)
+        .ok()
+        .map(|(_, mode)| mode);
     let grantee = if alt((
         tag::<_, _, OracleError<'_>>("for each of those cards, its owner may play it"),
         tag("for each of those cards, its owner may cast it"),
@@ -13289,6 +13297,27 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     } else {
         return None;
     };
+    let mode = per_owner_mode.unwrap_or_else(|| {
+        if alt((
+            tag::<_, _, OracleError<'_>>("for each of those cards, its owner may cast it"),
+            tag("its owner may cast it"),
+            tag("may cast that card"),
+            tag("may cast that spell"),
+            tag("may cast those cards"),
+            tag("may cast it"),
+            tag("they may cast those cards"),
+            tag("they may cast them"),
+            tag("they may cast that card"),
+            tag("they may cast that spell"),
+        ))
+        .parse(lower)
+        .is_ok()
+        {
+            CardPlayMode::Cast
+        } else {
+            CardPlayMode::Play
+        }
+    });
 
     // CR 400.7i + CR 611.2a: "for as long as it remains exiled" persists until
     // the exile-scoped permission is cleared on zone exit
@@ -13307,6 +13336,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             // Placeholder — `grant_permission::resolve` normalizes per-iteration.
             granted_to: crate::types::player::PlayerId(0),
@@ -13318,6 +13348,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13442,6 +13473,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: CardPlayMode::Cast,
             // Duration is a placeholder; `with_clause_duration` patches this
             // when a leading "Until end of turn, " or trailing "... this turn"
             // is stripped. CR 611.2a + CR 514.2: the duration governs prune
@@ -13458,6 +13490,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             single_use_group: None,
             single_use,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13484,11 +13517,12 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     // Night Minister) binds to the parent player target via `ParentTargetController`
     // and the tracked exile set. First-person forms keep the legacy `Any` target
     // (rebound to TrackedSet by the chain parser when chained after an exile).
-    let (rest, grantee, target) = if let Ok((rest, _)) =
+    let (rest, mode, grantee, target) = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they may play ").parse(tp.lower)
     {
         (
             rest,
+            CardPlayMode::Play,
             crate::types::ability::PermissionGrantee::ParentTargetController,
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -13497,23 +13531,31 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they may cast ").parse(tp.lower) {
         (
             rest,
+            CardPlayMode::Cast,
             crate::types::ability::PermissionGrantee::ParentTargetController,
             TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
             },
         )
     } else {
-        let (rest, _) = alt((
-            tag::<_, _, OracleError<'_>>("you may look at and play "),
-            tag("you may play "),
-            tag("you may cast "),
-            tag("look at and play "),
-            tag("play "),
-            tag("cast "),
+        let (rest, mode) = alt((
+            value(
+                CardPlayMode::Play,
+                alt((
+                    tag::<_, _, OracleError<'_>>("you may look at and play "),
+                    tag("you may play "),
+                    tag("look at and play "),
+                    tag("play "),
+                )),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((tag("you may cast "), tag("cast "))),
+            ),
         ))
         .parse(tp.lower)
         .ok()?;
-        (rest, Default::default(), TargetFilter::Any)
+        (rest, mode, Default::default(), TargetFilter::Any)
     };
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("that card"),
@@ -13547,6 +13589,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration: Duration::Permanent,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -13557,6 +13600,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -13628,23 +13672,29 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // cards" path (the with-mana form is handled earlier by
     // `try_parse_exile_play_grant_with_any_mana`).
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
-        value(
-            (),
-            alt((
-                tag("you may look at and play "),
-                tag("you may look at and cast "),
-                tag("you may play "),
-                tag("you may cast "),
-            )),
-        )
+        alt((
+            value(
+                CardPlayMode::Play,
+                alt((tag("you may look at and play "), tag("you may play "))),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((tag("you may look at and cast "), tag("you may cast "))),
+            ),
+        ))
         .parse(input)
     })
-    .map(|((), rest_orig)| {
+    .map(|(mode, rest_orig)| {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        TextPair::new(rest_orig, rest_lower)
+        (mode, TextPair::new(rest_orig, rest_lower))
     });
 
-    if let Some(rest) = full_rest {
+    let mut mode = full_rest
+        .as_ref()
+        .map(|(mode, _)| *mode)
+        .unwrap_or(CardPlayMode::Play);
+
+    if let Some((_, rest)) = full_rest {
         // Full form: rest must start with a card reference
         // CR 400.7i + CR 603.7: "(the) cards exiled this way" is the impulse-set
         // anaphor used by Escape to the Wilds — semantically identical to "those
@@ -13676,6 +13726,25 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             return None;
         }
     } else {
+        mode = alt((
+            value(
+                CardPlayMode::Play,
+                alt((
+                    tag::<_, _, OracleError<'_>>("look at and play "),
+                    tag("play "),
+                )),
+            ),
+            value(
+                CardPlayMode::Cast,
+                alt((
+                    tag::<_, _, OracleError<'_>>("look at and cast "),
+                    tag("cast "),
+                )),
+            ),
+        ))
+        .parse(tp.lower)
+        .map(|(_, mode)| mode)
+        .unwrap_or(mode);
         // Bare form (after "you may" was stripped by parse_effect_chain).
         if scan_contains_phrase(tp.lower, "without paying") {
             return None;
@@ -13766,6 +13835,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     let clause = parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             // Placeholder — `grant_permission::resolve` rewrites this to the
             // ability's controller at grant time (CR 611.2a/b).
@@ -13778,6 +13848,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation,
         },
@@ -13803,10 +13874,14 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 }
 
 fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
-    let ((duration, mana_spend_permission), rest_orig) =
+    let ((mode, duration, mana_spend_permission), rest_orig) =
         nom_on_lower(tp.original, tp.lower, |input| {
             let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
-            let (input, _) = alt((tag("play "), tag("cast "))).parse(input)?;
+            let (input, mode) = alt((
+                value(CardPlayMode::Play, tag("play ")),
+                value(CardPlayMode::Cast, tag("cast ")),
+            ))
+            .parse(input)?;
             // "the exiled nonland card" generalizes the bare "the exiled card"
             // referent — the optional "nonland " qualifier (Black Widow, Super
             // Spy) selects the same tracked exile set, so the grant is identical.
@@ -13834,7 +13909,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 ),
             ))
             .parse(input)?;
-            Ok((input, (duration, mana_spend_permission)))
+            Ok((input, (mode, duration, mana_spend_permission)))
         })?;
     if !rest_orig.trim().is_empty() {
         return None;
@@ -13843,6 +13918,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
             provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode,
             duration,
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
@@ -13853,6 +13929,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             single_use_group: None,
             single_use: false,
             cast_cost_raise: None,
+            alt_ability_cost: None,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
         },
@@ -14018,6 +14095,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: CardPlayMode::Play,
                 duration: Duration::Permanent,
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
@@ -14028,6 +14106,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 single_use_group: None,
                 single_use: false,
                 cast_cost_raise: None,
+                alt_ability_cost: None,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
             },
@@ -15589,26 +15668,65 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 static_abilities,
                 enter_with_counters,
                 count: _,
-            } => Effect::Token {
-                name,
-                power,
-                toughness,
-                types,
-                colors,
-                keywords,
-                tapped,
-                owner,
-                attach_to,
-                enters_attacking,
-                supertypes,
-                static_abilities,
-                enter_with_counters,
+            } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
                 // so an "each player creates … for each … in their graveyard"
                 // iteration counts each player's OWN zone.
-                count: token::scope_token_for_each_to_iterating_player(quantity),
-            },
+                let scoped_count = token::scope_token_for_each_to_iterating_player(quantity);
+                // CR 608.2c + CR 400.7: this dispatcher builds the Token's
+                // base (name/P/T/types) from `base_tp` — the text BEFORE "for
+                // each" — so `try_parse_token`'s own "this way" dispatch never
+                // sees the "for each" clause here; `scoped_count` above, from
+                // this function's OWN `quantity`, is the only count this path
+                // ever produces. That `quantity` comes from the context-free
+                // `parse_for_each_clause_expr_with_context`, which correctly
+                // keeps a bare "card put into a graveyard this way" on the
+                // unfiltered `TrackedSetSize` by default — the right answer
+                // for a single-pile producer with no complementary partition
+                // to disambiguate from (Pinnacle Starcage's "put each card
+                // exiled with this artifact into its owner's graveyard, then
+                // create ... for each card put into a graveyard this way" —
+                // every exiled card lands in the SAME graveyard pile via
+                // `ChangeZoneAll`, not a Dig split). Only re-resolve through
+                // the dedicated `PutIntoGraveyard`-cause parser when a REAL
+                // Dig split precedes this chunk (`ctx.nearest_dig_rest_zone`)
+                // AND its rest destination matches the zone this clause
+                // names — Dihada, Binder of Wills's -3: "Create a Treasure
+                // token for each card put into your graveyard this way",
+                // where the preceding Dig puts the rest into Graveyard.
+                // Every other Token for-each count, and every bare-graveyard
+                // clause with no preceding Dig split, is unaffected.
+                let count = if matches!(
+                    scoped_count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    }
+                ) && ctx.nearest_dig_rest_zone == Some(Zone::Graveyard)
+                {
+                    token::parse_bare_graveyard_this_way_token_count(reference_clause)
+                        .map(|qty| QuantityExpr::Ref { qty })
+                        .unwrap_or(scoped_count)
+                } else {
+                    scoped_count
+                };
+                Effect::Token {
+                    name,
+                    power,
+                    toughness,
+                    types,
+                    colors,
+                    keywords,
+                    tapped,
+                    owner,
+                    attach_to,
+                    enters_attacking,
+                    supertypes,
+                    static_abilities,
+                    enter_with_counters,
+                    count,
+                }
+            }
             other => other,
         };
         return Some(parsed_clause(effect));
@@ -21348,6 +21466,39 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
 /// succeeds at the originating typed clause. It stops at the first clause that is
 /// conditional or is neither typed nor a `ParentTarget` carrier, so it never
 /// reaches across an unrelated referent.
+///
+/// CR 603.12 + CR 608.2c carve-out: a `WhenYouDo` clause does NOT bail the walk,
+/// even though it carries a `condition` — it is still inspected as a possible
+/// typed introducer before the walk gives up. Grishnákh, Brash Instigator:
+/// "When ~ enters, amass Orcs 2. **When you do**, until end of turn, gain
+/// control of target nonlegendary creature an opponent controls with power
+/// less than or equal to the amassed Army's power. Untap that creature. It
+/// gains haste until end of turn." The `WhenYouDo`-conditioned `GainControl`
+/// clause IS the typed introducer for the trailing "It gains haste" anaphor two
+/// clauses later; the old unconditional bail never got far enough back to see
+/// it, leaving "It" to fall back to `SelfRef` (the source, Grishnákh itself)
+/// instead of the stolen creature (issue #8145).
+///
+/// This carve-out is intentionally narrower than the identical-looking one on
+/// the sibling walk `chain_prior_referent_is_created_token` below, which also
+/// admits `EffectOutcome::OptionalEffectPerformed` ("if you do" tied to a
+/// separately-declinable optional action) behind an additional
+/// `gated_publisher_reaches` prediction — that extra machinery exists there
+/// because a declined inline "if you do" gate can leave `resolve_ability_chain`
+/// still descending into an independent `SequentialSibling` instruction with no
+/// referent ever having been produced (a stale-bind hazard for the
+/// game-lifetime `last_created_token_ids` ledger the sibling reads).
+/// `WhenYouDo` has no such hazard: `game::effects::consume_reflexive_creation_gate`
+/// treats `WhenYouDo` as a whole-body membership marker for a CR 603.12
+/// reflexive triggered ability and materializes it as a genuinely separate
+/// stack object (`build_reflexive_pending_trigger`) only when the antecedent
+/// action actually occurred; that object chooses its own targets at the time
+/// it is put on the stack (CR 603.3d, which applies CR 601.2c's target-choice
+/// process to triggered abilities), so if this walk ever reaches a
+/// `WhenYouDo` clause, that reflexive ability necessarily fired with real
+/// targets recorded — there is no "gate false, chain still descends" case to
+/// guard against. Extending this carve-out to `OptionalEffectPerformed` needs
+/// its own hostile-fixture proof and is deliberately left out of this fix.
 fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: bool) -> bool {
     // CR 608.2c: An `Otherwise` else-branch anaphor ("... and it's a 3/3 Robot ...")
     // binds to the referent that was in scope BEFORE the paired conditional it is the
@@ -21359,12 +21510,22 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     // reaches the originating `Choose target artifact card`. A SECOND conditional
     // still bails (never walk across an unrelated conditional). Default `false`
     // preserves the byte-for-byte behavior of the non-else callers.
+    //
+    // The `WhenYouDo` carve-out above shares this same one-shot allowance
+    // bookkeeping rather than bypassing it: the FIRST conditional encountered —
+    // `WhenYouDo` or not — always consumes `skipped_conditional`, so a `WhenYouDo`
+    // clause standing in the `Otherwise` pairing slot doesn't leave the allowance
+    // unspent for some unrelated SECOND conditional further back to steal (which
+    // would let an `Otherwise` anaphor bind across a conditional it was never
+    // paired with). Only once the allowance is already spent does a `WhenYouDo`
+    // clause additionally never bail on its own account, matching every other
+    // caller's unconditional carve-out.
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+        if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
-            } else {
+            } else if *cond != AbilityCondition::WhenYouDo {
                 return false;
             }
         }
@@ -28222,6 +28383,54 @@ fn classify_latest_bare_card_publisher_in_clause(
         .or_else(|| classify_bare_card_aggregate_publisher(&clause.effect))
 }
 
+/// CR 608.2c + CR 400.7: The REST-partition zone of `effect`, only when it is
+/// an `Effect::Dig` whose kept and rest destinations actually differ — a
+/// genuine reveal/split with a non-selected partition to disambiguate from
+/// (Dihada, Binder of Wills's "... into your hand and the rest into your
+/// graveyard"). A same-zone Dig (a plain "look at the top N, put them all in
+/// Y" with no real split) has no complementary partition and returns `None`.
+fn dig_rest_zone(effect: &Effect) -> Option<Zone> {
+    let Effect::Dig {
+        destination,
+        rest_destination,
+        ..
+    } = effect
+    else {
+        return None;
+    };
+    let kept = destination.unwrap_or(Zone::Hand);
+    let rest = rest_destination.unwrap_or(Zone::Graveyard);
+    (kept != rest).then_some(rest)
+}
+
+fn nearest_dig_rest_zone_in_ability(def: &AbilityDefinition) -> Option<Zone> {
+    dig_rest_zone(&def.effect).or_else(|| {
+        def.sub_ability
+            .as_deref()
+            .and_then(nearest_dig_rest_zone_in_ability)
+    })
+}
+
+/// CR 608.2c + CR 400.7: Lookback counterpart to
+/// `classify_latest_bare_card_publisher_in_clause`, scanning the SAME
+/// `builder.clauses()` history for the nearest already-parsed `Effect::Dig`
+/// split. Feeds `ParseContext::nearest_dig_rest_zone` so a downstream Token's
+/// bare "for each card put into a/your/their graveyard this way" count
+/// (`try_parse_for_each_effect`) can tell a Dig-split's rest partition apart
+/// from a single-pile producer's whole set (Pinnacle Starcage's "put each
+/// card exiled with this artifact into its owner's graveyard, then create ...
+/// for each card put into a graveyard this way" — every exiled card lands in
+/// the SAME graveyard pile via `ChangeZoneAll`, not a Dig, so this returns
+/// `None` and the bare `TrackedSetSize` default stays correct there).
+fn nearest_dig_rest_zone_in_clause(clause: &ParsedEffectClause) -> Option<Zone> {
+    dig_rest_zone(&clause.effect).or_else(|| {
+        clause
+            .sub_ability
+            .as_deref()
+            .and_then(nearest_dig_rest_zone_in_ability)
+    })
+}
+
 /// CR 608.2c: Re-anchor a batched set-anaphor aggregate to the CHAIN-published
 /// set.
 ///
@@ -34075,6 +34284,15 @@ pub(crate) fn parse_effect_chain_ir(
             | Some(BareCardAggregatePublisher::TerminalUnsupported)
             | None => None,
         };
+        // CR 608.2c + CR 400.7: mirrors `nearest_bare_card_publisher` above —
+        // the nearest already-parsed Dig split, feeding
+        // `ParseContext::nearest_dig_rest_zone` for the Token "for each"
+        // dispatch (see `dig_rest_zone`/`nearest_dig_rest_zone_in_clause`).
+        let nearest_dig_rest_zone = builder
+            .clauses()
+            .iter()
+            .rev()
+            .find_map(|clause| nearest_dig_rest_zone_in_clause(&clause.parsed));
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             object_pronoun_ref: prior_typed_referent.then_some(TargetFilter::ParentTarget),
@@ -34215,6 +34433,7 @@ pub(crate) fn parse_effect_chain_ir(
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
             bare_card_aggregate_source,
+            nearest_dig_rest_zone,
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single
@@ -36498,7 +36717,11 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     // spell's controller by `counter_unless_pay_modifier` at the call site, so
     // rewriting the recognized subject does not affect resolution.
     let normalized = normalize_counter_unless_subject(after_unless)?;
+    // The payer the subject names is discarded here on purpose: the counter
+    // path pins the payer to the targeted spell's controller at the call site
+    // (`counter_unless_pay_modifier`), per the normalization note above.
     crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(&normalized)
+        .map(|alt_cost| alt_cost.cost)
 }
 
 /// CR 117.3 + CR 107.14: Parse the mana / energy / dynamic-{X} forms of an
@@ -36828,7 +37051,7 @@ fn extract_resolution_unless_pay_modifier(
                 }),
             );
         }
-        if let Some(cost) =
+        if let Some(alt_cost) =
             crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
         {
             // Strip the entire " unless ..." tail from the cleaned effect
@@ -36842,21 +37065,32 @@ fn extract_resolution_unless_pay_modifier(
             // preceding word. The mask preserves byte length, so `.len()` indexes
             // the original text exactly.
             let cleaned = text[..before_unless.len()].trim().to_string();
-            // CR 118.12a + CR 608.2f: select the payer for "they X". A
-            // permanent's controller in the pre-"unless" text (Fade Away)
-            // takes precedence. Otherwise, when this chunk carries a
-            // `player_scope` ("each opponent/each player ... unless they X"),
-            // the payer is the per-iteration scoped player (`ScopedPlayer`,
-            // bound by the fan-out) rather than a chosen player target.
-            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
-            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
-                TargetFilter::ParentTargetController
-            } else if player_scope.is_some() {
-                TargetFilter::ScopedPlayer
-            } else {
-                TargetFilter::Player
-            };
-            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+            // CR 508.5 + CR 118.12a + CR 608.2f: select the payer. A subject
+            // that NAMES its payer ("defending player" — Ogre Marauder) is
+            // authoritative; the fallbacks below only exist to find the
+            // referent of an anaphoric pronoun. A permanent's controller in
+            // the pre-"unless" text (Fade Away) takes precedence there.
+            // Otherwise, when this chunk carries a `player_scope` ("each
+            // opponent/each player ... unless they X"), the payer is the
+            // per-iteration scoped player (`ScopedPlayer`, bound by the
+            // fan-out) rather than a chosen player target. Non-scoped
+            // punishers (Tergrid's Lantern) keep `Player`.
+            let payer = alt_cost.payer.unwrap_or_else(|| {
+                if nom_primitives::scan_contains(before_unless, "controller") {
+                    TargetFilter::ParentTargetController
+                } else if player_scope.is_some() {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Player
+                }
+            });
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: alt_cost.cost,
+                    payer,
+                }),
+            );
         }
     }
 

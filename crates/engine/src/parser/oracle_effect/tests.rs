@@ -23925,6 +23925,7 @@ fn parse_play_from_exile_this_turn() {
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     duration: Duration::UntilEndOfTurn,
+                    mode: Play,
                     ..
                 },
                 ..
@@ -23985,6 +23986,7 @@ fn parse_impulse_play_that_card_this_turn_stays_play_from_exile() {
             permission:
                 CastingPermission::PlayFromExile {
                     duration: Duration::UntilEndOfTurn,
+                    mode: Play,
                     ..
                 },
             target,
@@ -24023,7 +24025,7 @@ fn parse_exile_until_nonland_play_that_card_stays_play_from_exile() {
         .expect("exile-until chain must produce a permission sub-ability");
     match &*sub.effect {
         Effect::GrantCastingPermission {
-            permission: CastingPermission::PlayFromExile { .. },
+            permission: CastingPermission::PlayFromExile { mode: Cast, .. },
             target,
             ..
         } => {
@@ -24061,6 +24063,7 @@ fn parse_play_the_exiled_card_this_turn_targets_tracked_set() {
         permission,
         CastingPermission::PlayFromExile {
             duration: Duration::UntilEndOfTurn,
+            mode: Play,
             ..
         }
     ));
@@ -24348,6 +24351,7 @@ fn parse_daxos_shape_emits_play_from_exile_with_tracked_set() {
                     permission,
                     CastingPermission::PlayFromExile {
                         duration: Duration::UntilEndOfTurn,
+                        mode: Cast,
                         ..
                     }
                 ),
@@ -24390,6 +24394,7 @@ fn parse_act_on_impulse_targets_tracked_set() {
                     permission,
                     CastingPermission::PlayFromExile {
                         duration: Duration::UntilEndOfTurn,
+                        mode: Play,
                         ..
                     }
                 ),
@@ -45546,12 +45551,14 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     let CastingPermission::PlayFromExile {
         frequency,
         mana_spend_permission,
+        mode,
         ..
     } = permission
     else {
         panic!("expected PlayFromExile permission, got {permission:?}");
     };
     assert_eq!(*frequency, CastFrequency::OncePerTurn);
+    assert_eq!(*mode, CardPlayMode::Play);
     assert_eq!(
         *mana_spend_permission,
         Some(ManaSpendPermission::AnyTypeOrColor)
@@ -57729,6 +57736,136 @@ fn replacement_shield_between_installer_and_continuation_stays_a_sibling() {
         continuation.placement,
         ClausePlacement::Sibling,
         "an emitted replacement shield breaks the relocation run"
+    );
+}
+
+/// Inside Information (HOB): "Exile the top X cards of target opponent's
+/// library. You may play those cards this turn. If you cast a spell this
+/// way, pay life equal to its mana value rather than pay its mana cost."
+///
+/// CR 601.2b + CR 115: X is announced as part of the casting cost (the card's
+/// mana cost is `{X}{B}{B}`); the exile source is a TARGETED opponent's
+/// library, not the caster's own. CR 701.18b: "play" (not "cast")
+/// authorizes both spells and lands, so the grant is a plain
+/// `PlayFromExile`, not a spell-only `CastFromZone`. CR 118.9 + CR 119.4: the
+/// trailing "pay life ... rather than pay its mana cost" rider is a
+/// non-mana alternative cost that replaces the mana cost for a spell cast
+/// via the grant; because the grant also authorizes land plays (which have
+/// no mana cost to replace), the rider folds onto a dedicated
+/// `PlayFromExile::alt_ability_cost` field instead of converting the grant
+/// to a spell-only `CastFromZone` — see `attach_alt_ability_cost_to_previous_play_from_exile`.
+#[test]
+fn inside_information_exiles_x_grants_play_with_pay_life_alt_cost() {
+    let parsed = parse_oracle_text(
+        "Exile the top X cards of target opponent's library. You may play those cards this \
+         turn. If you cast a spell this way, pay life equal to its mana value rather than pay \
+         its mana cost.",
+        "Inside Information",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    assert_eq!(
+        parsed.triggers.len(),
+        0,
+        "Inside Information has no triggered abilities, got {:?}",
+        parsed.triggers
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "Inside Information's spell ability must be a single chain, got {:?}",
+        parsed.abilities
+    );
+    let root = &parsed.abilities[0];
+    crate::parser::test_support::assert_no_unimplemented(root);
+
+    // Head: CR 601.2b + CR 115 — exile X cards from a TARGETED opponent's
+    // library (not `ControllerRef::You`).
+    let Effect::ExileTop {
+        player,
+        count,
+        position,
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!("head effect must be ExileTop, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *position,
+        LibraryPosition::Top,
+        "\"the top X cards\" must exile from the top of the library"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string()
+            }
+        },
+        "count must read the announced X value"
+    );
+    match player {
+        TargetFilter::Typed(typed) => assert_eq!(
+            typed.controller,
+            Some(ControllerRef::Opponent),
+            "\"target opponent's library\" must scope to an opponent, not the caster"
+        ),
+        other => panic!("player filter must be a targeted-opponent Typed filter, got {other:?}"),
+    }
+
+    // Sub-ability: CR 701.18b — a plain `PlayFromExile` grant (not a
+    // spell-only `CastFromZone`), carrying the folded alt-cost rider.
+    let sub = root
+        .sub_ability
+        .as_deref()
+        .expect("must chain a GrantCastingPermission sub-ability");
+    let Effect::GrantCastingPermission {
+        permission, target, ..
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "sub-ability effect must be GrantCastingPermission, got {:?}",
+            sub.effect
+        );
+    };
+    assert!(
+        matches!(target, TargetFilter::TrackedSet { .. }),
+        "the grant must target the tracked exile set published by ExileTop, got {target:?}"
+    );
+    match permission {
+        CastingPermission::PlayFromExile {
+            duration,
+            alt_ability_cost,
+            ..
+        } => {
+            assert_eq!(
+                *duration,
+                Duration::UntilEndOfTurn,
+                "\"you may play those cards this turn\" must be an until-end-of-turn grant"
+            );
+            assert_eq!(
+                *alt_ability_cost,
+                Some(AbilityCost::PayLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::SelfManaValue
+                    }
+                }),
+                "the rider must fold onto the grant as pay-life-equal-to-mana-value, not be \
+                 swallowed"
+            );
+        }
+        other => panic!("permission must be PlayFromExile, got {other:?}"),
+    }
+
+    // No further sub-ability: the rider is absorbed into the grant, not
+    // emitted as its own sibling clause.
+    assert!(
+        sub.sub_ability.is_none(),
+        "the alt-cost rider must be folded into the PlayFromExile grant, not emitted as a \
+         separate sibling clause: {:?}",
+        sub.sub_ability
     );
 }
 
