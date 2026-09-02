@@ -95,6 +95,21 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  40 — DerivedViews.room_half_identities publishes both halves of every
+ *       battlefield Room in printed order, resolved through the COPIED halves
+ *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
+ *       special action's offer names the half it would unlock and shows that
+ *       half's cost (CR 709.5e) from this map: an enter-as-copy recipient
+ *       carries neither on its own printed card (its `back_face` is empty and
+ *       its printed name is its own), and printed order is engine work
+ *       besides — `room::live_face_door` reads `modal_back_face`, the
+ *       CR 709.5d mapping. Face-down permanents are absent (CR 708.2a). The
+ *       field is additive behind a serde default, but this client renders the
+ *       map directly rather than deriving halves from raw state; a v39 host
+ *       would silently label every offered door "Tap for Mana" again, which is
+ *       the defect this bump exists to fix. Since game_setup and reconnect_ack
+ *       carry GameState, first contact rejects the version skew rather than
+ *       allowing that capability loss.
  *  39 — DerivedViews.storm_count publishes the engine-owned number of copies a
  *       current Storm trigger will create, or a newly cast Storm spell would
  *       create. The field is additive, but this client renders the scalar
@@ -239,7 +254,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 39 as const;
+export const WIRE_PROTOCOL_VERSION = 40 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
