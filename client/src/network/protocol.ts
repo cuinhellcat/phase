@@ -14,6 +14,7 @@ import type { InteractionSubmission, ViewerInteraction } from "../adapter/genera
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 import type { P2PAuthorityStamp, P2PSessionKey } from "../services/p2pSession";
 import type { P2PTerminalResult } from "../services/p2pTerminalResult";
+import { decodeJsonEnvelope, encodeJsonEnvelope } from "./wireEnvelope";
 
 /**
  * The stable session identity is carried on reconnect so a resumed host can
@@ -412,39 +413,11 @@ export function validateMessage(raw: unknown): P2PMessage {
 // ~20-byte header would inflate sub-100-byte payloads. Ping/pong and small
 // control messages take the raw path; state broadcasts take the gzip path.
 
-const FORMAT_RAW = 0x00;
-const FORMAT_GZIP = 0x01;
-const COMPRESSION_THRESHOLD = 256;
-
 export async function encodeWireMessage(msg: P2PMessage): Promise<Uint8Array> {
-  const json = JSON.stringify(msg);
-  const jsonBytes = new TextEncoder().encode(json);
-  if (jsonBytes.length < COMPRESSION_THRESHOLD) {
-    const out = new Uint8Array(1 + jsonBytes.length);
-    out[0] = FORMAT_RAW;
-    out.set(jsonBytes, 1);
-    return out;
-  }
-  const stream = new Blob([jsonBytes]).stream().pipeThrough(new CompressionStream("gzip"));
-  const gzipped = new Uint8Array(await new Response(stream).arrayBuffer());
-  const out = new Uint8Array(1 + gzipped.length);
-  out[0] = FORMAT_GZIP;
-  out.set(gzipped, 1);
-  return out;
+  return encodeJsonEnvelope(JSON.stringify(msg));
 }
 
 export async function decodeWireMessage(bytes: Uint8Array): Promise<P2PMessage> {
-  if (bytes.length < 1) throw new Error("empty wire message");
-  const version = bytes[0];
-  const payload = bytes.subarray(1);
-  let json: string;
-  if (version === FORMAT_RAW) {
-    json = new TextDecoder().decode(payload);
-  } else if (version === FORMAT_GZIP) {
-    const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream("gzip"));
-    json = await new Response(stream).text();
-  } else {
-    throw new Error(`unknown wire format version: 0x${version.toString(16)}`);
-  }
+  const json = await decodeJsonEnvelope(bytes);
   return validateMessage(JSON.parse(json));
 }

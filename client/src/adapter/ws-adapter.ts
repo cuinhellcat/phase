@@ -32,6 +32,7 @@ import {
   commitFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../services/fullTerminalResult";
+import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
@@ -465,6 +466,8 @@ export interface ServerInfo {
   /** Public base URL the server advertises for `<code>@<host>` join strings
    * (a tunnel/proxy URL), or undefined when the server has none to share. */
   publicUrl?: string;
+  /** Optional binary JSON envelopes understood by this server. */
+  wireFormats?: WireFormat[];
 }
 
 /**
