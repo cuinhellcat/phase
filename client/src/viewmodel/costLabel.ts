@@ -626,7 +626,7 @@ export function abilityChoiceLabel(
     if (half == null) {
       // No published halves (face-down, CR 708.2a, or an older host): stay
       // honest rather than name a half we were not told about.
-      return { label: "Unlock this door" };
+      return { label: i18n.t("game:gamePage.abilityChoice.unlockThisDoor") };
     }
     // No description: the label already carries the only two things the player
     // chooses between, and CR 709.5e's timing ("as a sorcery, main phase, empty
@@ -636,7 +636,12 @@ export function abilityChoiceLabel(
       .map((shard) => `{${shard}}`)
       .join("");
     return {
-      label: costSymbols ? `Unlock ${half.name} (${costSymbols})` : `Unlock ${half.name}`,
+      label: costSymbols
+        ? i18n.t("game:gamePage.abilityChoice.unlockHalfWithCost", {
+          name: half.name,
+          cost: costSymbols,
+        })
+        : i18n.t("game:gamePage.abilityChoice.unlockHalf", { name: half.name }),
     };
   }
   return { label: "Tap for Mana" };
