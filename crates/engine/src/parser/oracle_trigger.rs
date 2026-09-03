@@ -7568,6 +7568,13 @@ fn try_extract_mana_spent_comparison_condition(
         preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
     })?;
 
+    // CR 603.4: only an "if" immediately after the trigger event is an
+    // intervening-if. A later clause qualifies the resolving effect and must
+    // remain available to effect-chain parsing.
+    if !before.trim().is_empty() {
+        return None;
+    }
+
     let rest_trimmed = rest.trim_start();
     if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
     {

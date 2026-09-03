@@ -23389,6 +23389,16 @@ fn extract_mana_spent_comparison_condition_greater_than() {
     );
 }
 
+/// CR 603.4: a mana-spent condition after an effect is not an intervening-if;
+/// it remains part of the resolving effect rather than suppressing the trigger.
+#[test]
+fn trailing_mana_spent_comparison_is_not_hoisted_to_the_trigger() {
+    let text = "put a +1/+1 counter on ~ if the amount of mana spent to cast that spell was greater than its mana value";
+    let (cleaned, condition) = extract_if_condition(text);
+    assert_eq!(cleaned, text);
+    assert_eq!(condition, None);
+}
+
 // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to
 // be at the start of the text. Covers the same positional flexibility the
 // word-form Adamant extractor already relies on.
