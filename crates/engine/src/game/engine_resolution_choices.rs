@@ -4732,7 +4732,7 @@ pub(super) fn handle_resolution_choice(
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
                 if let Some(snapshot) = counter_kind_choice {
-                    if let crate::types::ability::Effect::ChooseCounterKind { target } =
+                    if let crate::types::ability::Effect::ChooseCounterKind { target, .. } =
                         &mut cont.chain.effect
                     {
                         *target = crate::types::ability::TargetFilter::SpecificObject {

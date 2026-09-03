@@ -9481,6 +9481,8 @@ mod tests {
             ResolvedAbility::new(
                 Effect::ChooseCounterKind {
                     target: TargetFilter::ParentTargetSlot { index },
+                    domain: Default::default(),
+                    chooser: Default::default(),
                 },
                 vec![TargetRef::Object(second)],
                 source,

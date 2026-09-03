@@ -13662,6 +13662,49 @@ pub struct ChosenCounterCountCondition {
     pub rhs: QuantityExpr,
 }
 
+/// CR 608.2d: Where a `ChooseCounterKind` instruction gets its legal kinds.
+///
+/// Two populations, and the card text says which: "choose a counter ON IT"
+/// reads what the object already carries, while "from among <list>" prints its
+/// own closed set. Modelled as a domain rather than a flag so a new population
+/// is a compile error at every reader instead of a silently-taken default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CounterKindDomain {
+    /// The distinct kinds already on the resolved target (The Caves of
+    /// Androzani II/III, Aven Courier).
+    #[default]
+    OnTarget,
+    /// A closed list printed on the card. `excluding_kinds_on_target` carries
+    /// the "that this creature doesn't have on it" clause (Crystalline Giant),
+    /// which narrows the CHOICE and not the placement: CR 608.2d forbids
+    /// choosing an option the instruction excludes, and a random draw from the
+    /// unnarrowed list would otherwise land on a kind already present and then
+    /// place nothing.
+    Printed {
+        kinds: Vec<CounterType>,
+        #[serde(default)]
+        excluding_kinds_on_target: bool,
+    },
+}
+
+/// CR 608.2d: Who makes a `ChooseCounterKind` selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CounterKindChooser {
+    /// The ability's controller, through the interactive named-choice seam.
+    #[default]
+    Controller,
+    /// The GAME draws uniformly from the seeded `state.rng`; no prompt and no
+    /// player decision. The Comprehensive Rules define no general "at random"
+    /// choice — CR 608.2d says only WHEN the choice is announced and that an
+    /// impossible option can't be taken; the card's own wording is what moves
+    /// the decision off the player, the way CR 701.9b lets an effect require a
+    /// random discard instead of the default player choice. Mirrors the random
+    /// axis `random_select_modal_indices` already provides for modes.
+    Random,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -14863,6 +14906,12 @@ pub enum Effect {
     ChooseCounterKind {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 608.2d: which kinds are legal to choose from.
+        #[serde(default)]
+        domain: CounterKindDomain,
+        /// CR 608.2d: who picks. `Random` skips the prompt entirely.
+        #[serde(default)]
+        chooser: CounterKindChooser,
     },
     /// CR 122.1 + CR 122.6: "put an additional counter of that kind on that
     /// permanent" — read the resolution-local counter-kind choice and add
@@ -32470,6 +32519,37 @@ mod tests {
                 attacker: None,
                 duration: Duration::UntilEndOfTurn,
             }
+        );
+    }
+
+    /// The protocol bump that ships `domain`/`chooser` calls both fields
+    /// serde-additive; this is what pins that claim. A payload written before
+    /// they existed must read as the on-target/controller form it always meant,
+    /// not as a random draw from an empty printed list.
+    #[test]
+    fn choose_counter_kind_serde_reads_pre_domain_payloads_as_on_target() {
+        let legacy = r#"{"type":"ChooseCounterKind","target":{"type":"ParentTarget"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Effect>(legacy).expect("deserialize legacy counter-kind choice"),
+            Effect::ChooseCounterKind {
+                target: TargetFilter::ParentTarget,
+                domain: CounterKindDomain::OnTarget,
+                chooser: CounterKindChooser::Controller,
+            }
+        );
+
+        let printed = Effect::ChooseCounterKind {
+            target: TargetFilter::SelfRef,
+            domain: CounterKindDomain::Printed {
+                kinds: vec![CounterType::Plus1Plus1],
+                excluding_kinds_on_target: true,
+            },
+            chooser: CounterKindChooser::Random,
+        };
+        let json = serde_json::to_string(&printed).expect("serialize printed counter-kind choice");
+        assert_eq!(
+            serde_json::from_str::<Effect>(&json).expect("round-trip printed counter-kind choice"),
+            printed
         );
     }
 

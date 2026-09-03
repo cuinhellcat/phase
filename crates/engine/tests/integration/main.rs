@@ -169,6 +169,7 @@ mod crime_tracking;
 mod cross_line_instead_override_branch;
 mod cross_slot_target_binding;
 mod crossway_troublemakers_attacking_keywords;
+mod crystalline_giant_random_counter_kind;
 mod culling_scales_lowest_mana_value_target;
 mod cultivate_split_destination;
 mod culvert_ambusher_turn_face_up_force_block;

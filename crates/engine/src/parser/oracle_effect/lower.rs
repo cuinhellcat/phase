@@ -1799,7 +1799,7 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             return TargetChoiceTiming::Resolution;
         }
     }
-    if let Effect::ChooseCounterKind { target } = &clause_ir.parsed.effect {
+    if let Effect::ChooseCounterKind { target, .. } = &clause_ir.parsed.effect {
         let lower = clause_ir
             .source
             .fragment()

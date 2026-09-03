@@ -101,6 +101,13 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  45 — Effect.ChooseCounterKind gained domain and chooser, carried inside
+ *       GameObject.abilities and trigger definitions on every GameState frame
+ *       (CR 608.2d). Additive behind serde defaults; a v44 peer has no field to
+ *       receive the printed list or the random chooser into and silently reads
+ *       both as an on-target prompt, placing no counter. Since game_setup and
+ *       reconnect_ack carry GameState, first contact rejects the version skew.
+ *       Bumped in lockstep with PROTOCOL_VERSION 61.
  *  44 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *       may cast whose player chooses a spell face at cast time (a split card
  *       such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
@@ -315,7 +322,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 44 as const;
+export const WIRE_PROTOCOL_VERSION = 45 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

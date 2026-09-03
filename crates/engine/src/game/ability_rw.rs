@@ -3182,7 +3182,7 @@ fn legacy_effect(x: &Effect) -> bool {
                     } => source_filters.iter().any(|filter| legacy_target_filter(filter)),
                 }
         }
-        Effect::ChooseCounterKind { target } => legacy_target_filter(target),
+        Effect::ChooseCounterKind { target, .. } => legacy_target_filter(target),
         Effect::PutChosenCounter {
             target,
             count,
@@ -4552,7 +4552,7 @@ fn rw_effect(
         // resolution-local, per-iteration binding consumed by a later
         // PutChosenCounter. No board WRITE: placement is the separate
         // PutChosenCounter.
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             let mut p = if target.is_context_ref() {
                 reads_board_of(StateKind::ObjectCounters)
             } else {

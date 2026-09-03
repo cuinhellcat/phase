@@ -207,6 +207,14 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 61 — Effect.ChooseCounterKind gained domain and chooser (CR 608.2d): the
+ *      population a counter-kind choice draws from, and whether the game draws
+ *      one at random instead of prompting. Serde-additive, so an older payload
+ *      reads as the on-target/controller form; the other direction drops the
+ *      printed list and the random draw silently, which is the #7796 defect
+ *      itself. Abilities ride inside GameObject, so every GameState frame
+ *      carries the shape. The full handshake refuses stale peers. Lobby
+ *      messages are unchanged.
  * 60 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *      may cast whose player chooses a spell face at cast time (a split card
  *      such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
@@ -428,7 +436,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 60;
+export const PROTOCOL_VERSION = 61;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

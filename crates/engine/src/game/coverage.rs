@@ -19,16 +19,16 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     CoinFlipResult, CommanderOwnership, Comparator, ContinuousModification, ControllerRef,
-    CountScope, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
-    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LibraryPosition, ManaProduction, ObjectProperty,
-    ObjectScope, ObjectSelectionCardinality, ObjectSelectionEligibility, ParsedCondition,
-    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter,
-    TypedFilter, VoteSubject, ZoneRef,
+    CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
+    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LibraryPosition,
+    ManaProduction, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
+    ObjectSelectionEligibility, ParsedCondition, PerpetualModification, PlayerFilter,
+    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, VoteSubject, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3602,8 +3602,50 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 ));
             }
         }
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind {
+            target,
+            domain,
+            chooser,
+        } => {
             d.push(("target".into(), fmt_target(target)));
+            // Both axes belong in the signature: the parse-diff report is what
+            // tells a reviewer which cards a parser change moved, and a domain
+            // or chooser that flipped without the target moving would otherwise
+            // be invisible there.
+            match domain {
+                CounterKindDomain::OnTarget => {
+                    d.push(("kinds".into(), "on target".into()));
+                }
+                CounterKindDomain::Printed {
+                    kinds,
+                    excluding_kinds_on_target,
+                } => {
+                    d.push((
+                        "kinds".into(),
+                        format!(
+                            "printed {}{}",
+                            kinds
+                                .iter()
+                                .map(|kind| kind.as_str().into_owned())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                            if *excluding_kinds_on_target {
+                                ", excluding kinds on target"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ));
+                }
+            }
+            d.push((
+                "chooser".into(),
+                match chooser {
+                    CounterKindChooser::Controller => "controller",
+                    CounterKindChooser::Random => "at random",
+                }
+                .into(),
+            ));
         }
         Effect::PutChosenCounter {
             target,

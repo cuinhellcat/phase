@@ -38,6 +38,20 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 61 — `Effect::ChooseCounterKind` gained `domain: CounterKindDomain` and
+///      `chooser: CounterKindChooser` — the population a counter-kind choice
+///      draws its legal kinds from, and whether the GAME draws one at random
+///      instead of prompting the controller (CR 608.2d). Both carry
+///      `#[serde(default)]`, so a v60 payload reads as the on-target/controller
+///      form it always meant. The break is the other direction: a v60 peer has
+///      no field to receive `Printed`/`Random` into and sets no
+///      `deny_unknown_fields` to reject them, so it reads Crystalline Giant's
+///      printed-list random draw as an on-target choice, finds no counters on a
+///      fresh Giant, and places nothing — the exact defect this bump ships the
+///      fix for (#7796). Abilities and trigger definitions ride inside
+///      `GameObject`, so every full-GameState frame carries the shape. Full-game
+///      floors are exact-match on both sides, so the pairing is refused at the
+///      handshake. Lobby messages are unchanged.
 /// 60 — `DerivedViews::back_face_spell_costs` publishes, for each card the
 ///      viewer may cast whose player chooses a spell face at cast time (a split
 ///      card such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the
@@ -303,7 +317,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 60;
+pub const PROTOCOL_VERSION: u32 = 61;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1049,12 +1063,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 60);
+        assert_eq!(PROTOCOL_VERSION, 61);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 59);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 60);
     }
 
     #[test]

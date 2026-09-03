@@ -5,12 +5,12 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ChosenCounterCountCondition, ControlWindow, ControllerRef,
-    CopyRetargetPermission, CounterAdjustment, CounterSourceRider, DigRestOrder, DoorLockOp,
-    Duration, Effect, EffectScope, FaceDownProfile, ForceBlockAttackerRef, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter, ThisWayCause,
+    CopyRetargetPermission, CounterAdjustment, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
+    ForceBlockAttackerRef, LibraryPosition, ManaProduction, ManaSpendRestriction, ManaTargetRole,
+    ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr,
+    SearchDestinationSplit, SearchSelectionConstraint, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, ThisWayCause,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1530,8 +1530,16 @@ pub(crate) enum ChooseImperativeAst {
     /// of the distinct counter kinds present on the anaphoric object (The Caves
     /// of Androzani II/III). Lowered to `Effect::ChooseCounterKind`. `target` is
     /// the anaphor (`ParentTarget` for the per-iteration object).
+    ///
+    /// `domain` and `chooser` carry the second surface form of the same
+    /// instruction — "a kind of counter at random ... from among <list>"
+    /// (Crystalline Giant), whose population is printed on the card and whose
+    /// pick is made by the game. Both default to the on-target/controller
+    /// reading, so the anaphoric form above is unchanged.
     CounterKind {
         target: TargetFilter,
+        domain: CounterKindDomain,
+        chooser: CounterKindChooser,
     },
 }
 

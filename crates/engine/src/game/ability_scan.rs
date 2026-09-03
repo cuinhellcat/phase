@@ -733,7 +733,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -8455,7 +8455,14 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
-        census(&Effect::ChooseCounterKind { target: f() }, true);
+        census(
+            &Effect::ChooseCounterKind {
+                target: f(),
+                domain: Default::default(),
+                chooser: Default::default(),
+            },
+            true,
+        );
         // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
         // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
         // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).

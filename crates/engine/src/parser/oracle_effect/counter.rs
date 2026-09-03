@@ -473,9 +473,10 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 /// on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
 /// Caves of Androzani); declared typed recipients use the shared target parser
-/// (Aven Courier). A source-self recipient remains unsupported because its
-/// producer may be a random counter-kind choice that is not yet bound to
-/// resolution state (Crystalline Giant). The optional suffix becomes an
+/// (Aven Courier). A source-self recipient IS supported: its producer — the
+/// printed-population random choice — now binds a concrete kind into
+/// resolution state before this clause runs (Crystalline Giant), which is the
+/// binding the earlier strict gap was waiting for. The optional suffix becomes an
 /// explicit EQ-zero predicate over each resolved target's count of the chosen
 /// kind. Combinator-based and fully consuming; `input` has already had the
 /// leading "put " stripped.
@@ -498,7 +499,10 @@ pub(super) fn try_parse_put_chosen_counter(input: &str) -> Option<Effect> {
         (TargetFilter::ParentTarget, remainder)
     } else {
         let (target, remainder) = parse_target(recipient_text);
-        if matches!(target, TargetFilter::Any | TargetFilter::SelfRef) {
+        // `Any` is this parser's "no recipient recognized", not a legal
+        // recipient. `SelfRef` is a real one — "on ~" — and its kind is bound
+        // by the preceding choice like every other producer's.
+        if matches!(target, TargetFilter::Any) {
             return None;
         }
         (target, remainder)
@@ -1778,15 +1782,23 @@ mod tests {
         ));
     }
 
-    /// Crystalline Giant's random counter-kind producer is not represented by
-    /// `ChoiceType::CounterKind`, so its source-self consumer must stay outside
-    /// the supported `PutChosenCounter` grammar until that binding exists.
+    /// CR 608.2c: Crystalline Giant's source-self consumer. This was a
+    /// deliberate strict gap for as long as its producer — the printed-list
+    /// random choice — could not bind a kind into resolution state. That
+    /// binding now exists (`CounterKindDomain::Printed` +
+    /// `CounterKindChooser::Random`), so "on ~" is an ordinary recipient and
+    /// the gap is closed rather than merely widened.
     #[test]
-    fn put_chosen_counter_rejects_unbound_source_self_consumer() {
-        assert!(
-            try_parse_put_chosen_counter("a counter of that kind on ~.").is_none(),
-            "an unbound random counter kind must remain a strict parser gap"
-        );
+    fn put_chosen_counter_accepts_source_self_consumer() {
+        let effect = try_parse_put_chosen_counter("a counter of that kind on ~.")
+            .expect("source-self recipient is supported once the producer binds a kind");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
     }
 
     /// CR 115.1d + CR 608.2c + CR 608.2d: Full-card reach guard for Aven
@@ -1834,6 +1846,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Permanent]
                 && filter.controller == Some(ControllerRef::You)
         ));
@@ -1917,6 +1930,7 @@ mod tests {
             choose.effect.as_ref(),
             Effect::ChooseCounterKind {
                 target: TargetFilter::Typed(filter),
+                ..
             } if filter.type_filters == vec![crate::types::ability::TypeFilter::Creature]
                 && filter.controller == Some(ControllerRef::You)
         ));

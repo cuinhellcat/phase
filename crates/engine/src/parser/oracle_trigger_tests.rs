@@ -98,6 +98,75 @@ fn liberator_mana_spent_intervening_if_survives_the_pipeline() {
     );
 }
 
+/// CR 608.2d + CR 122.1b: Crystalline Giant's combat trigger lowers into a real
+/// choice, not `Unimplemented`. Both halves have to land: the producer (a random
+/// pick from the ten PRINTED kinds, minus the ones already on it) and the
+/// consumer ("put a counter of that kind on ~"), whose source-self recipient was
+/// a deliberate strict gap until exactly this producer existed.
+#[test]
+fn crystalline_giant_random_counter_kind_lowers_to_a_real_choice() {
+    use crate::types::ability::{CounterKindChooser, CounterKindDomain};
+    use crate::types::counter::CounterType;
+
+    let parsed = parse_oracle_text(
+        "At the beginning of combat on your turn, choose a kind of counter at random that this \
+         creature doesn't have on it from among flying, first strike, deathtouch, hexproof, \
+         lifelink, menace, reach, trample, vigilance, and +1/+1. Put a counter of that kind on \
+         this creature.",
+        "Crystalline Giant",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Golem".to_string()],
+    );
+
+    let trigger = parsed.triggers.first().expect("begin-combat trigger");
+    let choose = trigger.execute.as_deref().expect("choice effect");
+    let Effect::ChooseCounterKind {
+        target,
+        domain,
+        chooser,
+    } = choose.effect.as_ref()
+    else {
+        panic!("expected ChooseCounterKind, got {:?}", choose.effect);
+    };
+    assert_eq!(*target, TargetFilter::SelfRef);
+    assert_eq!(
+        *chooser,
+        CounterKindChooser::Random,
+        "\"at random\" is the game's draw, not a player decision"
+    );
+    let CounterKindDomain::Printed {
+        kinds,
+        excluding_kinds_on_target,
+    } = domain
+    else {
+        panic!("expected the printed list, got {domain:?}");
+    };
+    assert!(
+        *excluding_kinds_on_target,
+        "\"that this creature doesn't have on it\" must narrow the CHOICE, not the placement"
+    );
+    assert_eq!(kinds.len(), 10, "ten printed kinds, got {kinds:?}");
+    assert!(kinds.contains(&CounterType::Plus1Plus1));
+
+    // The consumer: the counter goes on the Giant itself.
+    let put = choose
+        .sub_ability
+        .as_deref()
+        .expect("put-counter continuation");
+    assert!(
+        matches!(
+            put.effect.as_ref(),
+            Effect::PutChosenCounter {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected PutChosenCounter on ~, got {:?}",
+        put.effect
+    );
+}
+
 /// CR 608.2c + CR 119.3: Palantir's final life loss reduces the exact cards
 /// milled by its preceding clause and applies to the opponent targeted when the
 /// trigger was put on the stack.

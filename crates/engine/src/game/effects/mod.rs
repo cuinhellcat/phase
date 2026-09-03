@@ -11,8 +11,8 @@ use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CardTypeSetSource,
     CastFromZoneDriver, ChosenAttribute, CommanderOwnership, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, DetachedRemainder, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
+    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, EachDamageRecipient, Effect,
+    EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, FilterProp,
     ForEachCategoryAction, ForwardedResultContext, ManaProduction, ObjectSelectionCardinality,
     OpponentMayScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
@@ -12598,7 +12598,7 @@ fn resolve_chain_body(
     // here would be wrong (and untested against that resolver's semantics).
     let needs_resolution_object_choice = match &ability.effect {
         Effect::PutCounter { .. } => ability.targets.is_empty(),
-        Effect::ChooseCounterKind { target } => {
+        Effect::ChooseCounterKind { target, .. } => {
             !matches!(target, TargetFilter::SpecificObject { .. })
         }
         _ => false,
@@ -12607,7 +12607,7 @@ fn resolve_chain_body(
         && needs_resolution_object_choice
         && ability.distribution.is_none()
     {
-        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target } =
+        if let Effect::PutCounter { target, .. } | Effect::ChooseCounterKind { target, .. } =
             &ability.effect
         {
             if !target.contains_source_attachment_host() {
@@ -12620,17 +12620,33 @@ fn resolve_chain_body(
                         filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
                     })
                     .filter(|id| {
-                        !matches!(ability.effect, Effect::ChooseCounterKind { .. })
-                            || state.objects.get(id).is_some_and(|object| {
-                                object.counters.values().any(|count| *count > 0)
-                            })
+                        // CR 608.2d: "a player can't choose an impossible
+                        // option" — an object with no counters offers nothing
+                        // to an ON-TARGET choice, so it is not a legal subject.
+                        // A PRINTED list carries its own options and this test
+                        // does not apply to it. No printed-list card reaches
+                        // here today: the only one parses to `SelfRef`, a
+                        // context reference, which `target_choice_timing_for_clause`
+                        // never gives `Resolution` timing. The predicate names
+                        // the domain rather than the effect so that it stays
+                        // true if one ever does.
+                        !matches!(
+                            ability.effect,
+                            Effect::ChooseCounterKind {
+                                domain: CounterKindDomain::OnTarget,
+                                ..
+                            }
+                        ) || state
+                            .objects
+                            .get(id)
+                            .is_some_and(|object| object.counters.values().any(|count| *count > 0))
                     })
                     .collect();
                 match legal.len() {
                     0 => {}
                     1 => {
                         let mut bound = ability.clone();
-                        if let Effect::ChooseCounterKind { target } = &mut bound.effect {
+                        if let Effect::ChooseCounterKind { target, .. } = &mut bound.effect {
                             *target = TargetFilter::SpecificObject { id: legal[0] };
                             if let Some(object) = state.objects.get(&legal[0]) {
                                 bound.set_effect_context_object_recursive(
