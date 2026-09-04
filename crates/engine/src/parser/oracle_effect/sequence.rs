@@ -4786,7 +4786,9 @@ pub(super) fn apply_clause_continuation(
                     additional_zones: Vec::new(),
                     zone_owner: crate::types::ability::ZoneOwner::Controller,
                     filter: None,
-                    chooser,
+                    chooser: chooser.into(),
+                    candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                    reciprocal_role: None,
                     up_to: false,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     constraint: None,
@@ -8593,7 +8595,7 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint};
+    use crate::types::ability::{QuantityExpr, SearchSelectionConstraint, ZoneChoiceChooser};
 
     #[test]
     fn face_down_pile_is_dig_lookback_transparent() {
@@ -11841,7 +11843,7 @@ mod tests {
         );
         assert_eq!(
             *chooser,
-            Chooser::Controller,
+            ZoneChoiceChooser::Controller,
             "the spell's controller chooses"
         );
         let filter = filter
@@ -12271,7 +12273,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: crate::types::ability::ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Opponent,
+            chooser: Chooser::Opponent.into(),
+            candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             constraint: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -12298,7 +12302,9 @@ mod tests {
             additional_zones: Vec::new(),
             zone_owner: crate::types::ability::ZoneOwner::Controller,
             filter: None,
-            chooser: Chooser::Opponent,
+            chooser: Chooser::Opponent.into(),
+            candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: false,
             constraint: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,

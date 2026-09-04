@@ -7414,6 +7414,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: ObjectId(100),
+            reciprocal_role: None,
         };
 
         let actions = candidate_actions_broad(&state);

@@ -12931,6 +12931,7 @@ mod tests {
                 up_to: false,
                 constraint: None,
                 source_id: source,
+                reciprocal_role: None,
             }
         });
         push("DiscardChoice", &|state| {
@@ -13394,6 +13395,7 @@ mod tests {
             up_to: true,
             constraint: None,
             source_id: source,
+            reciprocal_role: None,
         };
 
         assert_eq!(

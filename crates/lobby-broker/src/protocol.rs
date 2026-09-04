@@ -38,15 +38,37 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 59 — `DerivedViews::back_face_spell_costs` publishes, for each card the
+/// 60 — `DerivedViews::back_face_spell_costs` publishes, for each card the
 ///      viewer may cast whose player chooses a spell face at cast time (a split
 ///      card such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the
 ///      live cost of the OTHER face; `spell_costs` reports the live face only.
 ///      The cost badge renders both faces from this map. Serde-additive, but
-///      the client renders the map directly; a v58 host would silently show a
+///      the client renders the map directly; a v59 host would silently show a
 ///      Room's single-face badge again, on top of the second half's printed
 ///      cost. Full-game handshakes must refuse that capability mismatch. Lobby
 ///      messages are unchanged.
+/// 59 — `InteractionResponseSpec::Shortcut::preview` changed from
+///      `Option<InteractionShortcutPreview>` to `Vec<InteractionShortcutPreview>`,
+///      one element per offerable count, and each element gained
+///      `allocation: Vec<AmountAssignment>`, the declaration's shape over that
+///      element's count. The retype is the break; `allocation` is not — it carries
+///      `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, neither type
+///      sets `deny_unknown_fields`, and it parses in both directions. A PARSE bump
+///      like 23, 36 and 42, not a capability bump like 24 — and an ASYMMETRIC one,
+///      so both directions are stated. v58 → v59 fails on EVERY shortcut offer: the
+///      old field carried no `skip_serializing_if`, so a v58 peer always emits the
+///      key, and neither `null` nor an object deserializes into a sequence.
+///      v59 → v58 fails only on an offer that actually carries a preview, because
+///      an empty list omits the key and a v58 peer's `Option` field reads that as
+///      `None`. The retype breaks the declared Rust types, but no production Rust
+///      code deserializes `ServerMessage` — the browser half is what decodes those
+///      frames, with `JSON.parse` and no validation, which is why the handshake is
+///      the only place the pairing is refusable. No shim ships
+///      — no `deserialize_with`, no dual-parse path, no version-conditional branch —
+///      and full-game floors are exact-match on both sides
+///      (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`, and
+///      `MIN_SUPPORTED_SERVER_PROTOCOL` in `client/src/adapter/ws-adapter.ts`), so
+///      the pair is refused before it sends the frame. Lobby messages are unchanged.
 /// 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
 ///      commander designation count. The client renders designation controls
 ///      from this required field rather than inferring them from `DraftKind`;
@@ -281,7 +303,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 59;
+pub const PROTOCOL_VERSION: u32 = 60;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1027,12 +1049,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 59);
+        assert_eq!(PROTOCOL_VERSION, 60);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 58);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 59);
     }
 
     #[test]

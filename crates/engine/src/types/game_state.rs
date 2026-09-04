@@ -11962,6 +11962,20 @@ pub struct ResolutionOptionalPaymentOption {
     pub cost: AbilityCost,
 }
 
+/// Why a controller is selecting an opponent for a zone choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZoneOpponentChooserPurpose {
+    #[default]
+    Ordinary,
+    BindReciprocalConsume,
+}
+
+impl ZoneOpponentChooserPurpose {
+    fn is_ordinary(&self) -> bool {
+        matches!(self, Self::Ordinary)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -12545,6 +12559,10 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
         source_id: ObjectId,
+        /// Reciprocal producer/consumer role carried across the interactive
+        /// pause. Omitted for ordinary zone choices.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reciprocal_role: Option<crate::types::ability::ReciprocalZoneChoiceRole>,
     },
     /// CR 701.4a: Behold a [quality] — the resolving player chooses which
     /// beholdable object to reveal-or-choose from a MIXED-ZONE candidate set
@@ -13556,6 +13574,11 @@ pub enum WaitingFor {
         player: PlayerId,
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
+        #[serde(
+            default,
+            skip_serializing_if = "ZoneOpponentChooserPurpose::is_ordinary"
+        )]
+        purpose: ZoneOpponentChooserPurpose,
     },
     /// CR 601.2c + CR 115.1: A spell with an "of an opponent's choice" target slot
     /// is being cast in a multiplayer game; the controller (`player`) chooses
@@ -33606,6 +33629,7 @@ mod tests {
             up_to: false,
             constraint: None,
             source_id: ObjectId(100),
+            reciprocal_role: None,
         }));
         variants.push(Box::new(WaitingFor::ChooseOneOfBranch {
             player: PlayerId(0),

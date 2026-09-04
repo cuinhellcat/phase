@@ -57,6 +57,65 @@ pub enum Chooser {
     OwningPlayer,
 }
 
+/// Who makes a [`Effect::ChooseFromZone`] selection.
+///
+/// This is deliberately local to zone choices: the reciprocal instruction
+/// binds its second choice to the owner of the first selected card, which is
+/// not a general choice role.
+///
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChoiceChooser {
+    /// Preserve the historic serialized `chooser: "Controller"` shape.
+    #[default]
+    Controller,
+    /// Preserve the historic serialized `chooser: "Opponent"` shape.
+    Opponent,
+    /// The player whose resolved zone is being scanned.
+    OwningPlayer,
+    /// The owner bound by the immediately preceding reciprocal selection.
+    /// `None` is an intentionally unbound continuation and is never a legal
+    /// chooser.
+    ImmediatePriorSelectedCardOwner {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<PlayerId>,
+    },
+}
+
+impl From<Chooser> for ZoneChoiceChooser {
+    fn from(value: Chooser) -> Self {
+        match value {
+            Chooser::Controller => Self::Controller,
+            Chooser::Opponent => Self::Opponent,
+            Chooser::OwningPlayer => Self::OwningPlayer,
+        }
+    }
+}
+
+/// Candidate provenance for [`Effect::ChooseFromZone`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneChoiceCandidateSource {
+    /// Preserve the historic tracked-set / target / direct-zone fallback.
+    #[default]
+    Legacy,
+    /// Read only the declared zone(s), never a prior tracked set or targets.
+    Direct,
+    /// Read only this resolution chain's active tracked set.
+    Tracked,
+}
+
+impl ZoneChoiceCandidateSource {
+    fn is_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
+/// The two halves of a reciprocal sequential zone choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReciprocalZoneChoiceRole {
+    Produce,
+    Consume,
+}
+
 /// CR 608.2d: Resolution-time choice cardinality.
 ///
 /// Unlike the legacy `min`/`max` range, an exact selection is infeasible when
@@ -16150,9 +16209,17 @@ pub enum Effect {
         /// Optional filter for direct zone-backed choices.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
-        /// Who makes the choice: controller (default) or opponent.
+        /// Who makes the choice. Defaults preserve legacy controller behavior.
         #[serde(default)]
-        chooser: Chooser,
+        chooser: ZoneChoiceChooser,
+        /// Where candidate cards are read from. Legacy keeps the historical
+        /// fallback order for existing card data.
+        #[serde(default, skip_serializing_if = "ZoneChoiceCandidateSource::is_legacy")]
+        candidate_source: ZoneChoiceCandidateSource,
+        /// Marks a composable reciprocal producer/consumer pair. Ordinary
+        /// zone choices omit this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reciprocal_role: Option<ReciprocalZoneChoiceRole>,
         /// CR 107.1c: When true, the chooser may select any number from 0..=count.
         #[serde(default)]
         up_to: bool,

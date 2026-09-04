@@ -81,9 +81,12 @@ use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_reflexive_conditional_connector;
+use super::oracle_nom::enters_under::{parse_control_clause, ControlClausePossessor};
 use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{
     parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause_with_context,
@@ -114,13 +117,14 @@ use crate::types::ability::{
     NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
     PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
     PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UntilCondition, WheneverEventExpiry, ZoneOwner,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition,
+    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -7412,7 +7416,9 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
             additional_zones: Vec::new(),
             zone_owner: crate::types::ability::ZoneOwner::Controller,
             filter: None,
-            chooser: crate::types::ability::Chooser::Controller,
+            chooser: crate::types::ability::Chooser::Controller.into(),
+            candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+            reciprocal_role: None,
             up_to: true,
             selection: crate::types::ability::CardSelectionMode::Chosen,
             constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
@@ -17166,7 +17172,9 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
         additional_zones: Vec::new(),
         zone_owner: ZoneOwner::Controller,
         filter: Some(filter),
-        chooser: Chooser::Opponent,
+        chooser: Chooser::Opponent.into(),
+        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+        reciprocal_role: None,
         up_to: false,
         selection: crate::types::ability::CardSelectionMode::Chosen,
         constraint: None,
@@ -22161,7 +22169,10 @@ fn lower_subject_predicate_ast(
                                     PerPlayerScope::TargetedPlayers,
                                 ),
                                 filter: None,
-                                chooser: crate::types::ability::Chooser::OwningPlayer,
+                                chooser: crate::types::ability::Chooser::OwningPlayer.into(),
+                                candidate_source:
+                                    crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                                reciprocal_role: None,
                                 up_to: false,
                                 selection: crate::types::ability::CardSelectionMode::Chosen,
                                 constraint: None,
@@ -22284,7 +22295,7 @@ fn lower_subject_predicate_ast(
                                 && tf.properties.is_empty()
                     )
                 {
-                    *chooser = crate::types::ability::Chooser::Opponent;
+                    *chooser = crate::types::ability::Chooser::Opponent.into();
                     return clause;
                 }
             }
@@ -32330,11 +32341,214 @@ fn unimplemented_clause(
     .push();
 }
 
+/// A card descriptor followed by its explicitly owned candidate zone.
+///
+/// This grammar deliberately keeps the descriptor, zone owner, and zone as
+/// separate productions. The reciprocal lowering below currently owns the
+/// graveyard/opponent→graveyard/you class, but parsing those axes separately
+/// keeps a near-miss honest instead of recognizing a Dawnbreak-shaped sentence
+/// by its complete text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReciprocalOwnedZoneDescriptor {
+    filter: TargetFilter,
+    owner: ControllerRef,
+    zone: Zone,
+}
+
+/// The destination/control rider of an optional reciprocal return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReciprocalReturnDestination {
+    zone: Zone,
+    control: ControlClausePossessor,
+}
+
+fn parse_reciprocal_card_descriptor(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    let (input, filter) = nom_target::parse_type_phrase(input)?;
+    let (input, _) = tag(" card").parse(input)?;
+    Ok((input, filter))
+}
+
+fn parse_reciprocal_zone_owner(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::Opponent, tag("an opponent's ")),
+        value(ControllerRef::You, tag("your ")),
+    ))
+    .parse(input)
+}
+
+fn parse_reciprocal_zone_word(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Battlefield, tag("the battlefield")),
+        value(Zone::Graveyard, tag("graveyard")),
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Library, tag("library")),
+        nom_filter::parse_zone_word,
+    ))
+    .parse(input)
+}
+
+fn parse_reciprocal_owned_zone_descriptor(
+    input: &str,
+) -> OracleResult<'_, ReciprocalOwnedZoneDescriptor> {
+    let (input, filter) = parse_reciprocal_card_descriptor(input)?;
+    let (input, _) = tag(" in ").parse(input)?;
+    let (input, owner) = parse_reciprocal_zone_owner(input)?;
+    let (input, zone) = parse_reciprocal_zone_word(input)?;
+    Ok((
+        input,
+        ReciprocalOwnedZoneDescriptor {
+            filter,
+            owner,
+            zone,
+        },
+    ))
+}
+
+fn parse_reciprocal_optional_return(input: &str) -> OracleResult<'_, ReciprocalReturnDestination> {
+    let (input, _) = tag(". you may return those cards to ").parse(input)?;
+    let (input, zone) = parse_reciprocal_zone_word(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, control) = parse_control_clause(input)?;
+    Ok((input, ReciprocalReturnDestination { zone, control }))
+}
+
+/// Parse the reciprocal sequential-zone-choice grammar before ordinary sentence
+/// splitting. Lowering accepts the graveyard return class only when the parsed
+/// descriptor, owner, zone, and control components form that typed shape.
+/// A malformed or unsupported component therefore falls through honestly.
+fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option<EffectChainIr> {
+    type E<'a> = OracleError<'a>;
+    let lower = text.to_ascii_lowercase();
+    let parsed = nom_on_lower(text, &lower, |input| {
+        all_consuming(terminated(
+            (
+                tag::<_, _, E<'_>>("choose "),
+                parse_reciprocal_owned_zone_descriptor,
+                tag(", then that player chooses "),
+                parse_reciprocal_owned_zone_descriptor,
+                parse_reciprocal_optional_return,
+            ),
+            pair(opt(tag(".")), eof),
+        ))
+        .parse(input)
+        .map(|(rest, (_, first, _, second, return_destination))| {
+            (rest, (first, second, return_destination))
+        })
+    })?;
+    let ((first, second, return_destination), _) = parsed;
+    if first.owner != ControllerRef::Opponent
+        || first.zone != Zone::Graveyard
+        || second.owner != ControllerRef::You
+        || second.zone != Zone::Graveyard
+        || return_destination.zone != Zone::Battlefield
+        || return_destination.control != ControlClausePossessor::Owner
+    {
+        return None;
+    }
+    let first = add_filter_props(
+        first.filter,
+        &[
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            },
+        ],
+    );
+    let second = add_filter_props(
+        second.filter,
+        &[
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+        ],
+    );
+    let mut consume = AbilityDefinition::new(
+        kind,
+        Effect::ChooseFromZone {
+            count: 1,
+            zone: Zone::Graveyard,
+            additional_zones: Vec::new(),
+            zone_owner: ZoneOwner::Controller,
+            filter: Some(second),
+            chooser: ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { player: None },
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            reciprocal_role: Some(ReciprocalZoneChoiceRole::Consume),
+            up_to: false,
+            selection: crate::types::ability::CardSelectionMode::Chosen,
+            constraint: None,
+        },
+    );
+    let mut tail = AbilityDefinition::new(
+        kind,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            library_position: None,
+            random_order: false,
+        },
+    );
+    tail.optional = true;
+    consume.sub_ability = Some(Box::new(tail));
+    let mut produce = parsed_clause(Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Graveyard,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::AllOwners,
+        filter: Some(first),
+        chooser: ZoneChoiceChooser::Controller,
+        candidate_source: ZoneChoiceCandidateSource::Direct,
+        reciprocal_role: Some(ReciprocalZoneChoiceRole::Produce),
+        up_to: false,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        constraint: None,
+    });
+    produce.sub_ability = Some(Box::new(consume));
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            produce,
+            Some(ClauseBoundary::Sentence),
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: None,
+        in_trigger: false,
+        repeat_until: None,
+    })
+}
+
 pub(crate) fn parse_effect_chain_ir(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
+        return ir;
+    }
     if let Some(ir) = parse_choose_survivors_destroy_rest_ir(text, kind, ctx) {
         return ir;
     }
@@ -35667,7 +35881,9 @@ pub(crate) fn parse_effect_chain_ir(
                             additional_zones: Vec::new(),
                             zone_owner: crate::types::ability::ZoneOwner::Controller,
                             filter: None,
-                            chooser: *chooser,
+                            chooser: (*chooser).into(),
+                            candidate_source: ZoneChoiceCandidateSource::Legacy,
+                            reciprocal_role: None,
                             up_to: false,
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,
@@ -35724,7 +35940,9 @@ pub(crate) fn parse_effect_chain_ir(
                             additional_zones: Vec::new(),
                             zone_owner: crate::types::ability::ZoneOwner::Controller,
                             filter: None,
-                            chooser: *chooser,
+                            chooser: (*chooser).into(),
+                            candidate_source: ZoneChoiceCandidateSource::Legacy,
+                            reciprocal_role: None,
                             up_to: false,
                             selection: crate::types::ability::CardSelectionMode::Chosen,
                             constraint: None,

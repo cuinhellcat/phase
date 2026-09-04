@@ -16,7 +16,11 @@ import type {
   SubmitResult,
   FormatConfig,
 } from "./types";
-import type { InteractionSubmission } from "./generated/interaction";
+import type {
+  InteractionPreview,
+  InteractionPreviewRequest,
+  InteractionSubmission,
+} from "./generated/interaction";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
@@ -203,7 +207,7 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
- * 59 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ * 60 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
  *      may cast whose player chooses a spell face at cast time (a split card
  *      such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
  *      cost of the OTHER face; spell_costs reports the live face only. The
@@ -211,6 +215,23 @@ export class NativeEngineVersionMismatchError extends Error {
  *      client renders the map directly, so an older server would silently
  *      show a Room's single-face badge again. The full handshake refuses
  *      stale peers. Lobby messages are unchanged.
+ * 59 — InteractionResponseSpec.shortcut.preview changed from a single optional
+ *      InteractionShortcutPreview to an Array<InteractionShortcutPreview>, one
+ *      element per offerable count, and each element gained an allocation list
+ *      stating the declaration's shape over that element's count. The retype is
+ *      the break; the added list is not — it is default and skip-if-empty and
+ *      parses in both directions. A PARSE bump like 23, 36 and 42, not a
+ *      capability bump like 24, and asymmetric: a v58 peer always emits the
+ *      preview key (null or an object) and neither deserializes into a list, so
+ *      v58 → v59 fails on every shortcut offer; v59 → v58 fails only when a
+ *      preview is actually carried, because an empty list omits the key and a
+ *      v58 peer reads that as absent. No shim ships.
+ *      MIN_SUPPORTED_SERVER_PROTOCOL below and MIN_SUPPORTED_PROTOCOL in
+ *      crates/server-core/src/protocol.rs are each equal to their own
+ *      PROTOCOL_VERSION, so the pairing is refused at the handshake — which
+ *      matters here because this client parses server frames with JSON.parse and
+ *      would otherwise read the new shape silently. See PROTOCOL_VERSION in
+ *      crates/lobby-broker/src/protocol.rs for the full entry.
  * 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
  *      commander designation count. The client renders designation controls
  *      from this required field rather than inferring them from `DraftKind`.
@@ -407,7 +428,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 59;
+export const PROTOCOL_VERSION = 60;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -639,6 +660,12 @@ export class WebSocketAdapter implements EngineAdapter {
     resolve: (state: string) => void;
     reject: (error: Error) => void;
   } | null = null;
+  /** Keyed on the engine-minted `PreviewRequestId`, so this adapter mints no
+   *  counter of its own and the correlation key stays the caller's. */
+  private pendingInteractionPreviews = new Map<
+    string,
+    { resolve: (preview: InteractionPreview) => void; reject: (error: Error) => void }
+  >();
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
   /** Starting-player contest event captured from the initial GameStarted
@@ -1020,6 +1047,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectAuthoritativeStateExport(
         new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
       );
+      this.rejectPendingInteractionPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
+      );
       this.rejectPregameMutation(
         new AdapterError("WS_CLOSED", "Connection closed during seat mutation", true),
       );
@@ -1156,6 +1186,24 @@ export class WebSocketAdapter implements EngineAdapter {
     });
   }
 
+  async previewInteraction(
+    request: InteractionPreviewRequest,
+    _actor: PlayerId,
+  ): Promise<InteractionPreview> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    return new Promise<InteractionPreview>((resolve, reject) => {
+      this.pendingInteractionPreviews.set(request.requestId, { resolve, reject });
+      // `request` is forwarded VERBATIM — no field is read, reshaped or rebuilt.
+      if (!this.send({ type: "PreviewInteraction", data: { request } })) {
+        this.pendingInteractionPreviews.delete(request.requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send interaction preview", true));
+      }
+    });
+  }
+
   async getState(): Promise<GameState> {
     if (!this.snapshot) {
       throw new AdapterError("WS_ERROR", "No game state available", false);
@@ -1283,6 +1331,9 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectAuthoritativeStateExport(
       new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
+    );
+    this.rejectPendingInteractionPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during interaction preview", true),
     );
     this.rejectPregameMutation(
       new AdapterError("WS_CLOSED", "Adapter disposed during seat mutation", true),
@@ -1521,6 +1572,13 @@ export class WebSocketAdapter implements EngineAdapter {
   private rejectAuthoritativeStateExport(error: Error): void {
     this.pendingAuthoritativeStateExport?.reject(error);
     this.pendingAuthoritativeStateExport = null;
+  }
+
+  private rejectPendingInteractionPreviews(error: Error): void {
+    for (const { reject } of this.pendingInteractionPreviews.values()) {
+      reject(error);
+    }
+    this.pendingInteractionPreviews.clear();
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -1921,6 +1979,18 @@ export class WebSocketAdapter implements EngineAdapter {
         break;
       }
 
+      // `ServerMessage` carries no `rename_all`, so its own fields are
+      // snake_case on the wire while the engine DTO inside carries camelCase.
+      case "InteractionPreview": {
+        const data = msg.data as { preview: InteractionPreview };
+        const pending = this.pendingInteractionPreviews.get(data.preview.requestId);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.preview.requestId);
+          pending.resolve(data.preview);
+        }
+        break;
+      }
+
       case "AuthoritativeStateExportFailed": {
         const data = msg.data;
         const pending = this.pendingAuthoritativeStateExport;
@@ -1935,6 +2005,16 @@ export class WebSocketAdapter implements EngineAdapter {
             : "Authoritative-state export failed.",
           false,
         ));
+        break;
+      }
+
+      case "InteractionPreviewFailed": {
+        const data = msg.data as { request_id: string; message: string };
+        const pending = this.pendingInteractionPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingInteractionPreviews.delete(data.request_id);
+          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+        }
         break;
       }
 

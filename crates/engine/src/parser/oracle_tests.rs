@@ -13945,7 +13945,7 @@ fn enlightened_tutor_chain() {
 #[test]
 fn choice_partition_after_search_routes_chosen_and_rest() {
     use crate::parser::oracle_effect::parse_effect_chain;
-    use crate::types::ability::{AbilityKind, Chooser};
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
 
     let chain = parse_effect_chain(
             "Search your library for up to four cards with different names and reveal them. Target opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand. Then shuffle.",
@@ -13960,7 +13960,7 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
         &*choose.effect,
         Effect::ChooseFromZone {
             count: 2,
-            chooser: Chooser::Opponent,
+            chooser: ZoneChoiceChooser::Opponent,
             ..
         }
     ));
