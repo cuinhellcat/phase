@@ -96,6 +96,18 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  42 — DerivedViews.back_face_spell_costs publishes, for each card the viewer
+ *       may cast whose player chooses a spell face at cast time (a split card
+ *       such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the live
+ *       cost of the OTHER face; spellCosts reports the live face only. The
+ *       cost badge renders both faces from this map. Additive behind a serde
+ *       default, but this client renders the map directly; a v41 host would
+ *       silently show a Room's single-face badge again, on top of the second
+ *       half's printed cost. Since game_setup and reconnect_ack carry
+ *       GameState, first contact rejects the version skew.
+ *  41 — GameAction.BeginResolveAll gained `scope: ResolveAllScope` and
+ *       PriorityPassingMode gained `FullControl` (#8346); paired with full-game
+ *       PROTOCOL_VERSION 57.
  *  40 — DerivedViews.room_half_identities publishes both halves of every
  *       battlefield Room in printed order, resolved through the COPIED halves
  *       for a permanent that copies a Room (CR 709.5b + CR 707.2). The unlock
@@ -255,7 +267,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 41 as const;
+export const WIRE_PROTOCOL_VERSION = 42 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

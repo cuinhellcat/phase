@@ -76,3 +76,127 @@ describe("ManaCostPips over card art", () => {
     expect(container.firstElementChild).toBeNull();
   });
 });
+
+describe("ManaCostPips for a card with two castable spell faces", () => {
+  // CR 709.3 + CR 712.11b: a Room, split card or spell//spell MDFC has two
+  // payable costs; the engine publishes the other face's live cost and the
+  // badge shows both, `front // back`.
+  const front: ManaCost = { type: "Cost", shards: ["White", "White"], generic: 2 };
+  const back: ManaCost = { type: "Cost", shards: ["Blue", "Blue"], generic: 5 };
+
+  it("shows both faces' symbols with a // between them", () => {
+    const { container } = render(
+      <ManaCostPips cost={front} backFace={{ cost: back }} size="fluid" />,
+    );
+    const alts = within(container).getAllByRole("img").map((el) => el.getAttribute("alt"));
+
+    expect(alts).toEqual(["2", "W", "W", "5", "U", "U"]);
+    expect(container.querySelector("[data-mana-cost-face-separator]")?.textContent).toBe("//");
+  });
+
+  it("keeps the single badge's own pip for a pair the frame affords — four symbols", () => {
+    // 4 * (6 + 0.5) + 2.4 = 28.4cqi: no reason to shrink Fire // Ice.
+    const single = render(<ManaCostPips cost={printedCost} size="fluid" />);
+    const pair = render(
+      <ManaCostPips
+        cost={{ type: "Cost", shards: ["Red"], generic: 1 }}
+        backFace={{ cost: { type: "Cost", shards: ["Blue"], generic: 1 } }}
+        size="fluid"
+      />,
+    );
+    const pipWidth = (c: HTMLElement) =>
+      geometry(PIP_WIDTH, within(c).getAllByRole("img")[0].parentElement!.className);
+
+    expect(pipWidth(pair.container)).toBe(pipWidth(single.container));
+  });
+
+  it.each([
+    // From five symbols on the pip shrinks: 5, then the corpus's widest pairs
+    // — 6 (Restricted Office // Lecture Hall), 7 (Expansion // Explosion) and
+    // 8 (Esika, God of the Tree // The Prismatic Bridge). Each must stay
+    // inside the 32cqi a lone five-symbol cost may span, or the pair runs
+    // through the card name. Pip width, gap and the separator's declared width
+    // are read off the DOM; the row holds the pips AND the separator, so it
+    // has as many gaps as pips.
+    [
+      "5",
+      { type: "Cost", shards: ["Red"], generic: 1 } as ManaCost,
+      { type: "Cost", shards: ["Blue", "Blue"], generic: 2 } as ManaCost,
+    ],
+    ["6", front, back],
+    [
+      "7",
+      { type: "Cost", shards: ["BlueRed", "BlueRed"], generic: 0 } as ManaCost,
+      { type: "Cost", shards: ["X", "Blue", "Blue", "Red", "Red"], generic: 0 } as ManaCost,
+    ],
+    [
+      "8",
+      { type: "Cost", shards: ["Green", "Green"], generic: 1 } as ManaCost,
+      { type: "Cost", shards: ["White", "Blue", "Black", "Red", "Green"], generic: 0 } as ManaCost,
+    ],
+  ])("keeps a %s-symbol pair no wider than a single five-symbol cost", (_symbols, frontCost, backCost) => {
+    const { container } = render(
+      <ManaCostPips cost={frontCost} backFace={{ cost: backCost }} size="fluid" />,
+    );
+    const pips = within(container).getAllByRole("img").map((img) => img.parentElement!);
+    const row = pips[0].parentElement!;
+    const width = geometry(PIP_WIDTH, pips[0].className);
+    const gap = geometry(/gap-\[([\d.]+)cqi\]/, row.className);
+    const separator = geometry(
+      /w-\[([\d.]+)cqi\]/,
+      container.querySelector("[data-mana-cost-face-separator]")!.className,
+    );
+
+    expect(pips.length * (width + gap) + separator).toBeLessThanOrEqual(32);
+  });
+
+  it("clamps a pair past the corpus maximum to the smallest tier instead of vanishing", () => {
+    // A live front that grew a symbol can push a pair to nine; it renders at
+    // the 8-symbol tier and, as documented, may exceed the 32cqi budget.
+    const { container } = render(
+      <ManaCostPips
+        cost={{ type: "Cost", shards: ["Green", "Green", "Green"], generic: 1 }}
+        backFace={{ cost: { type: "Cost", shards: ["White", "Blue", "Black", "Red", "Green"], generic: 0 } }}
+        size="fluid"
+      />,
+    );
+    const eight = render(
+      <ManaCostPips
+        cost={{ type: "Cost", shards: ["Green", "Green"], generic: 1 }}
+        backFace={{ cost: { type: "Cost", shards: ["White", "Blue", "Black", "Red", "Green"], generic: 0 } }}
+        size="fluid"
+      />,
+    );
+    const pipWidth = (c: HTMLElement) =>
+      geometry(PIP_WIDTH, within(c).getAllByRole("img")[0].parentElement!.className);
+
+    expect(within(container).getAllByRole("img")).toHaveLength(9);
+    expect(pipWidth(container)).toBe(pipWidth(eight.container));
+  });
+
+  it("draws nothing for a back face without a front — a lone number names no face", () => {
+    const { container } = render(
+      <ManaCostPips cost={{ type: "NoCost" }} backFace={{ cost: back }} size="fluid" />,
+    );
+
+    expect(container.firstElementChild).toBeNull();
+  });
+
+  it("ignores the back face outside the fluid size — fixed-px pips have no width budget", () => {
+    const { container } = render(<ManaCostPips cost={front} backFace={{ cost: back }} size="xs" />);
+
+    expect(within(container).getAllByRole("img")).toHaveLength(3);
+    expect(container.querySelector("[data-mana-cost-face-separator]")).toBeNull();
+  });
+
+  it("rings only the face the engine reduced", () => {
+    const { container } = render(
+      <ManaCostPips cost={front} backFace={{ cost: back, isReduced: true }} size="fluid" />,
+    );
+    const ringed = (alt: string) =>
+      within(container).getAllByAltText(alt)[0].parentElement!.className.includes("ring-green-400");
+
+    expect(ringed("W")).toBe(false);
+    expect(ringed("U")).toBe(true);
+  });
+});

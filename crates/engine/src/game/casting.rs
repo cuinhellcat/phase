@@ -14801,6 +14801,34 @@ pub fn can_cast_modal_face_now(
     can_cast_object_now(&sim, player, object_id)
 }
 
+/// CR 709.3 + CR 712.11b: the display cost of the OTHER castable spell face of
+/// a split card or spell//spell MDFC — the half the default cast does NOT
+/// present. `display_spell_cost` prepares the live face only, so a card whose
+/// player still chooses a face at cast time has a second payable cost that no
+/// single-cost sweep reports. Mirror the back-face choice on a clone
+/// (`simulate_chosen_split_spell_back_face`, the swap the cast pipeline itself
+/// performs), then run `prepare_spell_cast_for_display` — the entry point
+/// `display_spell_cost` uses — so every cost-modifying static the cast
+/// pipeline applies to the live face applies to this one too. `None` when the
+/// object offers no cast-time spell-face choice from its zone (a single-faced card, an
+/// Adventure — CR 715 — or a spell//land MDFC), or when that face is not
+/// castable by `player` at all.
+pub fn display_back_face_spell_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::mana::ManaCost> {
+    let obj = state.objects.get(&object_id)?;
+    if !cast_spell_face_choice_offered_from_zone(state, obj) {
+        return None;
+    }
+    let mut sim = state.clone();
+    simulate_chosen_split_spell_back_face(sim.objects.get_mut(&object_id)?);
+    prepare_spell_cast_for_display(&sim, player, object_id)
+        .ok()
+        .map(|prepared| prepared.mana_cost)
+}
+
 pub fn can_cast_object_now_with_probe(
     state: &GameState,
     player: PlayerId,

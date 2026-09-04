@@ -21,6 +21,7 @@ import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -1109,6 +1110,10 @@ function CardImagePreview({
   // mana cost (e.g. The Prismatic Bridge's {W}{U}{B}{R}{G} instead of Esika's
   // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
+  // CR 709.3 + CR 712.11b: the other castable spell face's live cost, when
+  // the engine published one; only the cast-cost badge shows it, never the
+  // Ctrl "other face" view, which already IS that face.
+  const backFaceCost = useBackFaceSpellCost(obj?.id, obj?.back_face?.mana_cost);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const activateLabels = useMemo<ActivateLabel[]>(() => {
     if (!obj || obj.zone !== "Battlefield") return [];
@@ -1145,6 +1150,7 @@ function CardImagePreview({
     showCastManaCost && obj ? spellCostDisplay(effectiveCost, obj.mana_cost) : null;
   const displayCost = showOtherFace ? otherFaceCost : (castCostDisplay?.displayCost ?? null);
   const displayCostReduced = castCostDisplay?.isReduced ?? false;
+  const displayBackFace = showOtherFace || castCostDisplay == null ? undefined : backFaceCost;
 
   return (
     <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${renderInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
@@ -1184,7 +1190,7 @@ function CardImagePreview({
           // preview's own width, which varies from a 300px hand hover to a
           // 472px docked preview — a fixed px size can only be right at one end.
           <div className="pointer-events-none absolute inset-0 z-10 @container">
-            <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="fluid" />
+            <ManaCostPips cost={displayCost} isReduced={displayCostReduced} backFace={displayBackFace} size="fluid" />
           </div>
         )}
         {classLevel != null && (

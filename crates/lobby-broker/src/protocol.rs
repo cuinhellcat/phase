@@ -38,6 +38,15 @@ pub enum ServerErrorCode {
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 59 — `DerivedViews::back_face_spell_costs` publishes, for each card the
+///      viewer may cast whose player chooses a spell face at cast time (a split
+///      card such as a Room, a spell//spell MDFC — CR 709.3 + CR 712.11b), the
+///      live cost of the OTHER face; `spell_costs` reports the live face only.
+///      The cost badge renders both faces from this map. Serde-additive, but
+///      the client renders the map directly; a v58 host would silently show a
+///      Room's single-face badge again, on top of the second half's printed
+///      cost. Full-game handshakes must refuse that capability mismatch. Lobby
+///      messages are unchanged.
 /// 58 — `DraftPlayerView::commanders_required` publishes the procedure-owned
 ///      commander designation count. The client renders designation controls
 ///      from this required field rather than inferring them from `DraftKind`;
@@ -272,7 +281,7 @@ pub enum ServerErrorCode {
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 58;
+pub const PROTOCOL_VERSION: u32 = 59;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -1018,12 +1027,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 58);
+        assert_eq!(PROTOCOL_VERSION, 59);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which is what refuses an older full-game peer whose GameState cannot
         // understand a success acknowledgment the submitting client awaits.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 57);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 58);
     }
 
     #[test]
