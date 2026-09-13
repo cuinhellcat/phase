@@ -32,15 +32,23 @@
 //! and read as a permanent (or a player).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::Duration;
+use engine::game::zones::apply_resolved_zone_change;
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{
+    AbilityDefinition, ControllerRef, Duration, Effect, ObjectScope, QuantityExpr,
+    QuantityModification, QuantityRef, ReplacementDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+use engine::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::zones::Zone;
 
 // Oracle text verbatim from `client/public/card-data.json`.
@@ -74,6 +82,12 @@ fn put_spell_on_stack(
         obj.card_types.core_types = vec![core];
         obj.keywords = printed.to_vec();
         obj.base_keywords = printed.to_vec();
+        // Mana value 2 ({1}{R}) — read by the target-relative counter test.
+        obj.mana_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
     }
     runner.state_mut().stack.push_back(StackEntry {
         id: spell,
@@ -89,6 +103,30 @@ fn put_spell_on_stack(
     spell
 }
 
+/// Replace the `enter_with_counters` of the exile rider (the `ChangeZone`
+/// directly under the `Counter` head) in a parsed Delay chain.
+fn with_rider_counters(
+    mut ability: AbilityDefinition,
+    counters: &[(CounterType, QuantityExpr)],
+) -> AbilityDefinition {
+    let rider = ability
+        .sub_ability
+        .as_deref_mut()
+        .expect("reach guard: Delay's counter carries the exile rider");
+    let Effect::ChangeZone {
+        enter_with_counters,
+        ..
+    } = &mut *rider.effect
+    else {
+        panic!(
+            "reach guard: the rider is the exile ChangeZone, got {:?}",
+            rider.effect
+        );
+    };
+    *enter_with_counters = counters.to_vec();
+    ability
+}
+
 /// P0 casts Delay at an opponent spell of type `core` carrying `printed`
 /// keywords and resolves it. Returns the runner and the countered spell.
 fn delay_against(
@@ -96,14 +134,43 @@ fn delay_against(
     printed: &[Keyword],
     setup: impl FnOnce(&mut GameScenario),
 ) -> (GameRunner, ObjectId) {
+    delay_against_with(core, printed, None, setup)
+}
+
+/// As `delay_against`; `rider_counters`, when given, replaces the parsed
+/// rider's `enter_with_counters` (Delay's `Fixed` 3) before the card is
+/// built, so a target-relative count can be driven through the production
+/// path without a corpus card that prints one.
+fn delay_against_with(
+    core: CoreType,
+    printed: &[Keyword],
+    rider_counters: Option<Vec<(CounterType, QuantityExpr)>>,
+    setup: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let mut cs = scenario.add_spell_to_hand_from_oracle(P0, "Delay", true, DELAY);
-    cs.with_mana_cost(ManaCost::Cost {
-        generic: 1,
-        shards: vec![ManaCostShard::Blue],
-    });
-    let delay = cs.id();
+    let delay = match rider_counters {
+        None => {
+            let mut cs = scenario.add_spell_to_hand_from_oracle(P0, "Delay", true, DELAY);
+            cs.with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue],
+            });
+            cs.id()
+        }
+        Some(counters) => {
+            let parsed = parse_oracle_text(DELAY, "Delay", &[], &["Instant".to_string()], &[]);
+            let mut cs = scenario.add_spell_to_hand(P0, "Delay", true);
+            cs.with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue],
+            });
+            for ability in parsed.abilities {
+                cs.with_ability_definition(with_rider_counters(ability, &counters));
+            }
+            cs.id()
+        }
+    };
     scenario.add_basic_land(P0, ManaColor::Blue);
     scenario.add_basic_land(P0, ManaColor::Blue);
     setup(&mut scenario);
@@ -529,5 +596,160 @@ fn delays_granted_suspend_runs_to_the_free_cast_and_ends_with_the_spell() {
         runner.state().transient_continuous_effects.is_empty(),
         "the grant is gone, not merely inert: {:#?}",
         runner.state().transient_continuous_effects
+    );
+}
+
+/// A rider whose count is target-relative — "exile it with X time counters
+/// on it, where X is its mana value" (`QuantityRef::ObjectManaValue { Target }`,
+/// no corpus card prints one; Delay's parse with its `Fixed` 3 replaced) —
+/// counts the countered spell: mana value 2 → 2 time counters.
+/// `graveyard_exile_rider_entry_counters` binds the countered object into
+/// the rider's context before resolving; the rider sub starts without
+/// targets, so an unbound resolution reads no target and counts 0 (measured).
+#[test]
+fn a_target_relative_rider_count_reads_the_countered_spell() {
+    let (runner, countered) = delay_against_with(
+        CoreType::Creature,
+        &[],
+        Some(vec![(
+            CounterType::Time,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            },
+        )]),
+        |_| {},
+    );
+    assert_countered_into_exile(&runner, countered);
+    assert_eq!(
+        runner.state().objects[&countered].effective_mana_value(),
+        2,
+        "reach guard: the countered spell's mana value is the count"
+    );
+    assert_eq!(
+        time_counters(&runner, countered),
+        2,
+        "the rider's target-relative count must read the countered spell (issue #8795 review)"
+    );
+}
+
+/// CR 109.2 at the replacement seam, the gate's siblings: a counter
+/// replacement whose `valid_card` only SOMETIMES describes a permanent —
+/// "creature or instant" (a mixed `Or`), "nonland" (`Non`) — is not
+/// battlefield-only, so the gate stays out of its way and it applies to the
+/// exiled card as its filter says (six time counters); the positive partner
+/// "creature you control" is battlefield-only and leaves the exiled creature
+/// spell's three counters alone. Hand-built definitions on a P1 permanent,
+/// the shape `vorinclex_loyalty_actor_scope` uses.
+#[test]
+fn counter_replacement_zone_gate_ignores_mixed_and_negated_type_descriptions() {
+    fn typed(types: Vec<TypeFilter>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: types,
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        })
+    }
+    fn doubling(valid_card: TargetFilter) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(valid_card)
+            .quantity_modification(QuantityModification::DOUBLE)
+            .description("double".to_string())
+    }
+    let rows: [(&str, TargetFilter, u32); 4] = [
+        (
+            "creature or instant you control (Or)",
+            TargetFilter::Or {
+                filters: vec![
+                    typed(vec![TypeFilter::Creature]),
+                    typed(vec![TypeFilter::Instant]),
+                ],
+            },
+            6,
+        ),
+        (
+            "creature or instant you control (AnyOf)",
+            typed(vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Instant,
+            ])]),
+            6,
+        ),
+        (
+            "nonland you control",
+            typed(vec![TypeFilter::Non(Box::new(TypeFilter::Land))]),
+            6,
+        ),
+        ("creature you control", typed(vec![TypeFilter::Creature]), 3),
+    ];
+    for (label, valid_card, expected) in rows {
+        let (runner, countered) = delay_against(CoreType::Creature, &[], |scenario| {
+            scenario
+                .add_creature(P1, "Counter Doubler", 1, 1)
+                .with_replacement_definition(doubling(valid_card));
+        });
+        assert_countered_into_exile(&runner, countered);
+        assert_eq!(time_counters(&runner, countered), expected, "{label}");
+    }
+}
+
+/// Replay equivalence (CR 733 P2 + CR 400.7): a recorded zone exit of the
+/// suspended card, applied through `apply_resolved_zone_change` to the state
+/// before it, ends the grant exactly where the live path did. Both paths call
+/// `prune_object_bound_effects_on_exit`; measured before the shared authority,
+/// replay retained the grant across the new object. The recorded move is an
+/// exile → graveyard `move_to_zone` (the shape `cr733_resolved_zone_change`
+/// records its commands with; Pull from Eternity's "target face-up exiled
+/// card" does not parse to an object target today): none of Delay's own
+/// moves (stack → exile, exile → stack, stack → graveyard) is journaled as a
+/// zone command — stack routes are outside the zone-command family's first
+/// cut (`move_to_zone_with_entry_flags`), and `apply_resolved_stack_removal`
+/// moves no object — so the journaled exit of a suspended card is a
+/// non-stack move.
+#[test]
+fn replaying_a_zone_exit_ends_the_suspend_grant_like_the_live_path() {
+    let (mut runner, countered) = delay_against(CoreType::Instant, &[], |_| {});
+    assert_countered_into_exile(&runner, countered);
+    assert!(has_suspend(&runner, countered));
+    let pre_exit: GameState = runner.state().clone();
+
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), countered, Zone::Graveyard, &mut events);
+    assert_eq!(runner.state().objects[&countered].zone, Zone::Graveyard);
+    assert!(
+        !has_suspend(&runner, countered) && runner.state().transient_continuous_effects.is_empty(),
+        "live: the grant ended with the exiled object (CR 400.7)"
+    );
+
+    let command = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::ZoneChange(command)
+                if command.object.object_id == countered
+                    && command.from == Zone::Exile
+                    && command.to == Zone::Graveyard =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("the live exile → graveyard move journals its zone command");
+
+    let mut replay = pre_exit;
+    apply_resolved_zone_change(&mut replay, &command).expect("exile → graveyard replays");
+    assert_eq!(replay.objects[&countered].zone, Zone::Graveyard);
+    assert!(
+        !engine::game::keywords::object_has_effective_keyword_kind(
+            &replay,
+            countered,
+            KeywordKind::Suspend
+        ) && replay.transient_continuous_effects.is_empty(),
+        "CR 400.7: replay ends the grant like the live path: {:#?}",
+        replay.transient_continuous_effects
     );
 }

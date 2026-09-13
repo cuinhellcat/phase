@@ -1870,8 +1870,12 @@ pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
 /// permanent of that card type or subtype on the battlefield"? True for a
 /// `Typed` predicate naming a permanent card type (Creature, Artifact,
 /// Enchantment, Planeswalker, Land, Battle, Kindred, Permanent) or a subtype;
-/// false for plain "card" (`TypeFilter::Card`), "spell", `Any`, and every
-/// non-`Typed` reference. Zone is NOT read here — the caller pairs this with
+/// false for plain "card" (`TypeFilter::Card`), "spell", `Any`, a negated
+/// type ("nonland" describes any other card), and every non-`Typed`
+/// reference. A disjunction (`TypeFilter::AnyOf`, `TargetFilter::Or`) is
+/// battlefield-only when every branch is — "creature or instant" is not; the
+/// terms of one `Typed` filter and the legs of an `And` are conjunctive, so
+/// one battlefield-only term settles those. Zone is NOT read here — the caller pairs this with
 /// its own zone reading (`population_zones`, or an explicit `zone` field),
 /// because the two callers substitute different defaults when no zone is
 /// written.
@@ -1889,7 +1893,9 @@ pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
 /// caller; MEASURED over `card-data.json`, the first caller's answers are
 /// unchanged: no zone-less exile cost names `Kindred`, and the one naming a
 /// subtype (Mechtitan Core, `Or[Typed[Artifact, Creature], Typed[Vehicle]]`)
-/// already answered battlefield through its artifact-creature branch.
+/// answers battlefield through both branches — the artifact-creature leg as
+/// before, the Vehicle leg through the subtype reading, which the universal
+/// `Or` aggregation now requires.
 pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
     fn type_implies_battlefield(t: &TypeFilter) -> bool {
         match t {
@@ -1902,15 +1908,24 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
             | TypeFilter::Kindred
             | TypeFilter::Permanent
             | TypeFilter::Subtype(_) => true,
-            TypeFilter::Non(inner) => type_implies_battlefield(inner),
-            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
+            // "nonland", "noncreature": a negated type describes nothing that
+            // must be on the battlefield — a nonland card is any other card.
+            TypeFilter::Non(_) => false,
+            // A union is battlefield-only when EVERY branch is: "artifact or
+            // creature" is, "creature or instant" is not.
+            TypeFilter::AnyOf(inners) => {
+                !inners.is_empty() && inners.iter().all(type_implies_battlefield)
+            }
             TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
         }
     }
     match filter {
+        // The terms of one `Typed` filter are conjunctive ("artifact creature"),
+        // so one battlefield-only term settles it.
         TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_implies_battlefield_permanent)
+        TargetFilter::And { filters } => filters.iter().any(filter_implies_battlefield_permanent),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_implies_battlefield_permanent)
         }
         _ => false,
     }

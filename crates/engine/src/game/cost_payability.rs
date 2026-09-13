@@ -1148,6 +1148,85 @@ mod tests {
 
     const P0: PlayerId = PlayerId(0);
 
+    /// CR 109.2 + CR 118.3: the zone a zone-less exile cost reads from is
+    /// decided by whether its filter describes a permanent. A description
+    /// that only SOMETIMES names a permanent does not: "creature or instant"
+    /// (`AnyOf` / `Or`) and "nonland" (`Non`) keep the hand default, while
+    /// "artifact or creature" and "creature" mean the battlefield. Pinned at
+    /// this seam (issue #8795 review): with existential aggregation over a
+    /// disjunction, or `Non` read through to its inner type, the first three
+    /// rows answered `Battlefield`.
+    #[test]
+    fn exile_cost_zone_default_treats_only_an_unambiguous_permanent_description_as_battlefield() {
+        fn typed(types: Vec<TypeFilter>) -> TargetFilter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: types,
+                ..Default::default()
+            })
+        }
+        let rows: [(&str, TargetFilter, Zone); 6] = [
+            (
+                "creature or instant (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Instant,
+                ])]),
+                Zone::Hand,
+            ),
+            (
+                "creature or instant (Or)",
+                TargetFilter::Or {
+                    filters: vec![
+                        typed(vec![TypeFilter::Creature]),
+                        typed(vec![TypeFilter::Instant]),
+                    ],
+                },
+                Zone::Hand,
+            ),
+            (
+                "nonland card",
+                typed(vec![
+                    TypeFilter::Card,
+                    TypeFilter::Non(Box::new(TypeFilter::Land)),
+                ]),
+                Zone::Hand,
+            ),
+            (
+                "artifact or creature (AnyOf)",
+                typed(vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])]),
+                Zone::Battlefield,
+            ),
+            (
+                "artifact creature (conjunctive terms)",
+                typed(vec![TypeFilter::Artifact, TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+            (
+                "creature",
+                typed(vec![TypeFilter::Creature]),
+                Zone::Battlefield,
+            ),
+        ];
+        for (label, filter, expected) in rows {
+            assert_eq!(
+                exile_cost_effective_zone(None, Some(&filter)),
+                expected,
+                "{label}"
+            );
+        }
+        assert_eq!(
+            exile_cost_effective_zone(
+                Some(Zone::Graveyard),
+                Some(&typed(vec![TypeFilter::Creature]))
+            ),
+            Zone::Graveyard,
+            "an explicit zone is authoritative"
+        );
+    }
+
     /// `TargetFilter::PlayerMatching` is a recursive carrier. Each of
     /// the three nested-object-population payloads must be reached by BOTH the
     /// detector and the relaxer, or an `X` mana-value constraint survives cost
