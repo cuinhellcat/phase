@@ -611,6 +611,33 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::ring::clear_ring_bearer_if_object(state, object_id);
     }
 
+    // CR 400.7: an object that moves to a new zone is a new object, so a
+    // continuous effect a resolved spell or ability bound to THIS object
+    // (`SpecificObject`) ends with it — on a battlefield exit below, with the
+    // rest of the departure cleanup, and here on every other exit (issue
+    // #8795: Delay's suspend grant on the exiled card followed the storage id
+    // into the graveyard after the card was cast). Two moves are excepted:
+    // - a move TO the stack: CR 400.7g, an ability granted to a card that
+    //   allows it to be cast (suspend) "will continue to apply to the new
+    //   object that card became after it moved to the stack". The clause is
+    //   wider than the rule — every grant, every way onto the stack — because
+    //   the engine's cast move is deferred: a mana-spent keyword grant
+    //   (`ManaSpellGrant::AddKeywordUntilEndOfTurn`, Hall of the Bandit Lord's
+    //   haste; 6 corpus cards) is installed during payment while the object's
+    //   zone still reads hand, and by CR 601.2a / CR 601.2h the card is on
+    //   the stack by then, so no object change intervenes and that grant must
+    //   survive this move (the cast move is the engine's only production
+    //   move onto the stack).
+    // - a permanent spell's move from the stack to the battlefield:
+    //   CR 400.7a, its grants "continue to apply to the permanent that spell
+    //   becomes".
+    if from != Zone::Battlefield
+        && to != Zone::Stack
+        && !(from == Zone::Stack && to == Zone::Battlefield)
+    {
+        super::layers::prune_affected_object_left_effects(state, object_id);
+    }
+
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {

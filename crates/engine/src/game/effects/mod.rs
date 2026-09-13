@@ -12250,19 +12250,19 @@ fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
 ///   and is not driven separately.
 /// - `Scry` — No Escape ("Scry 1."); driven by its test, which asserts the
 ///   `PlayerPerformedAction { Scry }` event.
+/// - `GenericEffect` — Delay ("If it doesn't have suspend, it gains suspend",
+///   issue #8795); driven by its tests (`counter_rider_time_counters_8795`),
+///   which assert the exiled card has suspend off the battlefield
+///   (`object_has_effective_keyword_kind`) and ticks a time counter at its
+///   owner's upkeep. The #8762 probe read `has_keyword_kind`, the printed
+///   keywords of the raw object, which cannot see a granted keyword on a card
+///   in exile — the tail was never inert, the probe was blind.
 ///
-/// NOT admitted, each MEASURED under a probe that ran the tail with the
-/// allowlist open AND the parent context supplied — with
-/// `should_propagate_parent_targets` and `apply_parent_chain_context`, the way
-/// the `CastFromZone` fanout above runs its tail — so the null results below
-/// are about the tails, not about withheld context:
-/// - `GenericEffect` — Delay ("If it doesn't have suspend, it gains suspend").
-///   With the countered card bound as its subject, the exiled card still had no
-///   suspend after layer evaluation. Its rider's "with three time counters" IS
-///   carried by the parse (`enter_with_counters: [[time, 3]]`) and dropped by
-///   `counter::resolve`, which consumes the rider as a destination only — a
-///   separate gap. Running the tail changes nothing observable, so it has no
-///   evidence.
+/// NOT admitted, MEASURED under a probe that ran the tail with the allowlist
+/// open AND the parent context supplied — with `should_propagate_parent_targets`
+/// and `apply_parent_chain_context`, the way the `CastFromZone` fanout above
+/// runs its tail — so the null result below is about the tail, not about
+/// withheld context:
 /// - `ChangeZone` — Devious Cover-Up ("You may shuffle up to four target cards
 ///   from your graveyard into your library", a two-link tail `ChangeZone` →
 ///   `Shuffle`). Its own "up to four target cards" slots are never announced:
@@ -12276,7 +12276,10 @@ fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
 /// with evidence through ITS branch, and the two sets differ because the tests
 /// do.
 fn counter_tail_family_has_runtime_evidence(effect: &Effect) -> bool {
-    matches!(effect, Effect::CastFromZone { .. } | Effect::Scry { .. })
+    matches!(
+        effect,
+        Effect::CastFromZone { .. } | Effect::Scry { .. } | Effect::GenericEffect { .. }
+    )
 }
 
 /// One full pass of an ability's resolution chain — the parent effect (with its
@@ -14754,10 +14757,10 @@ fn resolve_chain_body(
         // Scope, measured over the corpus (20 counter heads carry the exile
         // rider, 6 of them a tail): the rider's DIRECT sequential tail, and only
         // when its family is one an integration test drives end to end through
-        // this branch (`counter_tail_family_has_runtime_evidence`). Four of the
-        // six tails are admitted; Delay and Devious Cover-Up are named there,
-        // not here. No separate last-link rule: a multi-link tail is admitted
-        // with its evidence like any other, or not at all.
+        // this branch (`counter_tail_family_has_runtime_evidence`). Five of the
+        // six tails are admitted; Devious Cover-Up is named there, not here. No
+        // separate last-link rule: a multi-link tail is admitted with its
+        // evidence like any other, or not at all.
         //
         // The rider's own condition ("If that spell is countered this way" /
         // Thranduil's Decree's "If a PERMANENT spell is countered this way")
@@ -14772,10 +14775,12 @@ fn resolve_chain_body(
         // and only the rider's own sentence carries the "if". MEASURED: against
         // a CR 101.2 uncounterable spell the counter moves nothing and the
         // scry still happens.
-        // A tail with a printed condition of its own would be gated by
+        // A tail with a printed condition of its own is gated by
         // `resolve_chain_body`'s top-level `ability.condition` read, with the
-        // tail as its own context; no admitted tail carries one (Delay's is the
-        // only conditioned tail in the corpus).
+        // tail as its own context — Delay's "If it doesn't have suspend"
+        // (`TargetMatchesFilter { WithoutKeywordKind Suspend }`, the only
+        // conditioned tail in the corpus) reads the tail's first object target,
+        // which is why the tail is handed its targets below.
         //
         // No park site, and none is needed. `counter::resolve` returns early on
         // `ZoneMoveResult::NeedsChoice` so a CR 616.1 ordering choice can be
@@ -14802,12 +14807,20 @@ fn resolve_chain_body(
         // from a printed card; if one ever is, the tail is left as it was on
         // `main` — dropped — rather than resolved against an unanswered choice.
         //
-        // Neither admitted family's tails read any inherited chain context: `Controller`
-        // and a tracked-set anaphor resolve from the sub's own controller and
-        // the chain set. So `should_propagate_parent_targets` and
-        // `apply_parent_chain_context`, which the generic sub loop below applies,
-        // are deliberately not called; a family that reads either must add both
-        // together with its evidence.
+        // The tail is handed the parent's context the way the generic sub loop
+        // below and the `CastFromZone` branch above hand it: targets through
+        // `should_propagate_parent_targets` (issue #8795 — Delay's "it gains
+        // suspend" binds `ParentTarget` and its condition reads the tail's
+        // first target; a `CastFromZone` tail declines the inheritance, a
+        // `Scry` tail ignores an object target — measured, the #8762 tests are
+        // unchanged) and the chain context through `apply_parent_chain_context`.
+        // The targets handed down are the parent's, restricted to the cards the
+        // rider exiled — `exile_rider_countered_ids`, the once-asked answer
+        // `counter::resolve` recorded — so the tail's "it" is the exiled card
+        // and never a spell the counter could not touch: against a CR 101.2
+        // uncounterable spell the ledger is empty, Delay's tail gets no target,
+        // its condition reads none and grants nothing, while the spell stays
+        // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
             && cast_from_zone::is_graveyard_exile_rider_subability(sub)
         {
@@ -14826,11 +14839,24 @@ fn resolve_chain_body(
                 .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
                 .filter(|tail| counter_tail_family_has_runtime_evidence(&tail.effect))
                 .cloned();
-            if let Some(tail) = direct_sequential_tail {
-                // No condition gate here (see above): a tail reading the
-                // countered card through `ParentTarget` instead of the stamped
-                // set (Delay's shape) would need one, so admitting such a
-                // family means adding it together with its evidence.
+            if let Some(mut tail) = direct_sequential_tail {
+                if should_propagate_parent_targets(ability, &tail) {
+                    tail.targets = ability
+                        .targets
+                        .iter()
+                        .filter(|target| {
+                            matches!(target, TargetRef::Object(id)
+                                if state.exile_rider_countered_ids.contains(id))
+                        })
+                        .cloned()
+                        .collect();
+                }
+                apply_parent_chain_context(
+                    &mut tail,
+                    ability,
+                    effect_context_object.as_ref(),
+                    state,
+                );
                 resolve_ability_chain(state, &tail, events, depth + 1)?;
             }
             return Ok(());
@@ -17600,10 +17626,11 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
 
     /// Issue #8762: the counter rider branch's tail allowlist is a POLICY pin —
-    /// it admits only the families `counter_rider_tail_8762` drives end to end
-    /// and goes red when one is added without evidence. One lowered tail per
-    /// family from `client/public/card-data.json`, ABRIDGED to the fields that
-    /// identify the variant (the predicate reads the discriminant only).
+    /// it admits only the families `counter_rider_tail_8762` and
+    /// `counter_rider_time_counters_8795` drive end to end and goes red when
+    /// one is added without evidence. One lowered tail per family from
+    /// `client/public/card-data.json`, ABRIDGED to the fields that identify the
+    /// variant (the predicate reads the discriminant only).
     #[test]
     fn the_counter_rider_tail_allowlist_admits_only_the_families_a_test_drives() {
         fn effect(json: &str) -> Effect {
@@ -17618,7 +17645,7 @@ mod tests {
         let no_escape = effect(
             r#"{"type":"Scry","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
         );
-        // Delay — no runtime evidence (see the predicate's doc).
+        // Delay (issue #8795).
         let delay = effect(
             r#"{"type":"GenericEffect","static_abilities":[],"duration":"Permanent","target":{"type":"ParentTarget"}}"#,
         );
@@ -17629,11 +17656,7 @@ mod tests {
 
         assert!(counter_tail_family_has_runtime_evidence(&spelljack));
         assert!(counter_tail_family_has_runtime_evidence(&no_escape));
-        assert!(
-            !counter_tail_family_has_runtime_evidence(&delay),
-            "GenericEffect has no test that fails when the branch is reverted — admitting it \
-             would change Delay on an unmeasured path"
-        );
+        assert!(counter_tail_family_has_runtime_evidence(&delay));
         assert!(
             !counter_tail_family_has_runtime_evidence(&devious_cover_up),
             "ChangeZone has no test that fails when the branch is reverted — admitting it \

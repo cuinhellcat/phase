@@ -1539,6 +1539,48 @@ pub(crate) fn graveyard_exile_rider_applies_to(
         }
 }
 
+/// CR 122.1 + CR 614.1a: the counters the counter's exile rider `sub` puts on
+/// the card it exiles — Delay's "exile it with three time counters on it"
+/// (`enter_with_counters: [(time, 3)]` on the rider, issue #8795). Resolved
+/// for the concrete countered object `obj_id` the way `change_zone::resolve`
+/// resolves its own entry counters (each `QuantityExpr` once, at resolution,
+/// in the rider's context — a sub starts without targets, and the one corpus
+/// rider that names counters names a `Fixed` count), merged with the rider's
+/// `conditional_enter_with_counters` through the shared
+/// `enter_with_counters_for_object`. Asked only where
+/// `graveyard_exile_rider_applies_to` answered yes; a rider that names no
+/// counters (Force of Negation, Spelljack — 19 of the 20 corpus heads, measured
+/// over `card-data.json`) yields an empty list and the move carries none.
+pub(crate) fn graveyard_exile_rider_entry_counters(
+    state: &GameState,
+    sub: &ResolvedAbility,
+    obj_id: ObjectId,
+) -> Vec<(crate::types::counter::CounterType, u32)> {
+    let Effect::ChangeZone {
+        enter_with_counters,
+        conditional_enter_with_counters,
+        ..
+    } = &sub.effect
+    else {
+        return Vec::new();
+    };
+    let base: Vec<(crate::types::counter::CounterType, u32)> = enter_with_counters
+        .iter()
+        .map(|(counter_type, quantity)| {
+            let n = crate::game::quantity::resolve_quantity_with_targets(state, quantity, sub)
+                .max(0) as u32;
+            (counter_type.clone(), n)
+        })
+        .collect();
+    super::change_zone::enter_with_counters_for_object(
+        state,
+        sub,
+        obj_id,
+        &base,
+        conditional_enter_with_counters,
+    )
+}
+
 fn cast_from_zone_graveyard_destination(
     ability: &ResolvedAbility,
 ) -> Option<SpellStackToGraveyardReplacement> {

@@ -1864,6 +1864,58 @@ pub(crate) fn filter_contains_last_created(filter: &TargetFilter) -> bool {
     filter_contains(filter, &|inner| matches!(inner, TargetFilter::LastCreated))
 }
 
+/// CR 109.2 + CR 110.1: does `filter` describe its object by a card type or
+/// subtype the way "a creature you control" or "a permanent" does — a
+/// description that, absent a named zone or the word "card"/"spell", "means a
+/// permanent of that card type or subtype on the battlefield"? True for a
+/// `Typed` predicate naming a permanent card type (Creature, Artifact,
+/// Enchantment, Planeswalker, Land, Battle, Kindred, Permanent) or a subtype;
+/// false for plain "card" (`TypeFilter::Card`), "spell", `Any`, and every
+/// non-`Typed` reference. Zone is NOT read here — the caller pairs this with
+/// its own zone reading (`population_zones`, or an explicit `zone` field),
+/// because the two callers substitute different defaults when no zone is
+/// written.
+///
+/// Neighbour, not the same question: `typed_reference_names_zone` /
+/// `reference_leg_admits` below apply CR 109.2 to a SharesQuality reference
+/// leg and count every type word; this predicate names the permanent types
+/// only, because its first caller substitutes "hand" for a "card" filter.
+///
+/// Callers: `cost_payability::exile_cost_effective_zone` (Food Chain's "Exile
+/// a creature you control: …" — `zone: None` means the battlefield, a "card"
+/// filter keeps the hand default) and `replacement::replacement_valid_card_matches`
+/// (a counter replacement's "a permanent you control" does not reach a card in
+/// exile). `Kindred` and subtype descriptions were added for the second
+/// caller; MEASURED over `card-data.json`, the first caller's answers are
+/// unchanged: no zone-less exile cost names `Kindred`, and the one naming a
+/// subtype (Mechtitan Core, `Or[Typed[Artifact, Creature], Typed[Vehicle]]`)
+/// already answered battlefield through its artifact-creature branch.
+pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
+    fn type_implies_battlefield(t: &TypeFilter) -> bool {
+        match t {
+            TypeFilter::Creature
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Planeswalker
+            | TypeFilter::Land
+            | TypeFilter::Battle
+            | TypeFilter::Kindred
+            | TypeFilter::Permanent
+            | TypeFilter::Subtype(_) => true,
+            TypeFilter::Non(inner) => type_implies_battlefield(inner),
+            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
+            TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
+        }
+    }
+    match filter {
+        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_implies_battlefield_permanent)
+        }
+        _ => false,
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a

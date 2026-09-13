@@ -961,7 +961,7 @@ fn has_enough_tap_creatures(
 /// battlefield, otherwise hand.
 pub(super) fn exile_cost_effective_zone(zone: Option<Zone>, filter: Option<&TargetFilter>) -> Zone {
     zone.unwrap_or_else(|| {
-        if filter.is_some_and(filter_implies_battlefield_permanent) {
+        if filter.is_some_and(crate::game::filter::filter_implies_battlefield_permanent) {
             Zone::Battlefield
         } else {
             Zone::Hand
@@ -1101,39 +1101,6 @@ pub(crate) fn eligible_craft_materials(
 }
 
 /// Count counters of the given kind on an object.
-/// CR 117.1 + CR 400.6: Decide whether a `TargetFilter` for an `AbilityCost::Exile`
-/// without an explicit `zone` implies the battlefield. True when the filter has
-/// any `CoreType` typed predicate that names a permanent type (Creature, Artifact,
-/// Enchantment, Planeswalker, Land, Battle, Tribal). False for plain "card",
-/// "spell", or zone-explicit filters — those keep the legacy hand default.
-///
-/// Used by Food Chain's "Exile a creature you control: ..." (`zone: None`,
-/// `filter: Typed{Creature, You}`) and the broader exile-permanent-cost class.
-fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
-    use crate::types::ability::TypeFilter;
-    fn type_implies_battlefield(t: &TypeFilter) -> bool {
-        match t {
-            TypeFilter::Creature
-            | TypeFilter::Artifact
-            | TypeFilter::Enchantment
-            | TypeFilter::Planeswalker
-            | TypeFilter::Land
-            | TypeFilter::Battle
-            | TypeFilter::Permanent => true,
-            TypeFilter::Non(inner) => type_implies_battlefield(inner),
-            TypeFilter::AnyOf(inners) => inners.iter().any(type_implies_battlefield),
-            _ => false,
-        }
-    }
-    match filter {
-        TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_implies_battlefield),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(filter_implies_battlefield_permanent)
-        }
-        _ => false,
-    }
-}
-
 /// CR 122.1 + CR 118.3: Count counters on `id` matching `kind`. `Any` sums
 /// across every counter type currently on the object (Loch Mare's untyped
 /// "remove a counter" cost — CR 118.3: the ability is payable iff the object

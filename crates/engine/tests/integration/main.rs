@@ -153,6 +153,7 @@ mod counter_anaphor_binds_to_recipient;
 mod counter_anaphor_created_token_binding;
 mod counter_double_redirect_choice;
 mod counter_rider_tail_8762;
+mod counter_rider_time_counters_8795;
 mod counter_spell_zone_redirect;
 mod court_of_ambition;
 mod court_of_cunning_multi_target_mill;
