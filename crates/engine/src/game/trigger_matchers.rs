@@ -753,6 +753,16 @@ fn player_matches_filter(
             trigger_controller,
             source_event_subject_id(source_context),
         ),
+        // CR 608.2b + CR 608.2c: the two leaves a delayed condition's slot
+        // binder writes into a player-axis filter slot
+        // (`effects::delayed_trigger::bind_parent_slots_from_root`): a declared
+        // player slot bound to that one player, and a slot with no referent —
+        // an illegal target, whose information "fails to determine" — bound to
+        // the leaf that matches nothing. Both are load-bearing for the same
+        // reason as the arm above — the fallback below is fail-OPEN, and
+        // without them a dead slot would match every player (PR #8881).
+        TargetFilter::SpecificPlayer { id } => *id == player_id,
+        TargetFilter::None => false,
         _ => true,
     }
 }
@@ -15192,6 +15202,42 @@ mod tests {
         let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
         let result = crate::game::filter::extract_targets_only(&filter);
         assert_eq!(result, None);
+    }
+
+    /// CR 608.2b + CR 608.2c: the player-axis leaves a delayed condition's
+    /// slot binder can write into `valid_target` — `SpecificPlayer` for a bound
+    /// player slot, `None` for a slot with no referent. The match ends in
+    /// `_ => true`, so without their arms a dead slot would admit every player.
+    ///
+    /// Revert-failing: delete either arm and its negative assertion flips.
+    #[test]
+    fn player_axis_specific_player_and_none_leaves_do_not_fall_open() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let context = test_trigger_source_context(&state, source_id);
+        let mut specific = TriggerDefinition::new(TriggerMode::ChangesController);
+        specific.valid_target = Some(TargetFilter::SpecificPlayer { id: PlayerId(1) });
+        assert!(
+            valid_player_matches(&specific, &state, PlayerId(1), &context),
+            "a bound player slot matches that player"
+        );
+        assert!(
+            !valid_player_matches(&specific, &state, PlayerId(0), &context),
+            "a bound player slot matches no other player"
+        );
+        let mut dead = TriggerDefinition::new(TriggerMode::ChangesController);
+        dead.valid_target = Some(TargetFilter::None);
+        assert!(
+            !valid_player_matches(&dead, &state, PlayerId(0), &context)
+                && !valid_player_matches(&dead, &state, PlayerId(1), &context),
+            "a slot with no referent matches no player"
+        );
     }
 
     #[test]

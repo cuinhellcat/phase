@@ -104,10 +104,10 @@ pub fn resolve(
     // fall through to `bind_contextual_filter_to_condition`, whose empty-parent
     // rewrite resolves `ParentTarget` → `TargetFilter::Any`
     // (`parent_targets_filter(&[])`), would OVER-FIRE on every creature's combat
-    // damage. The contextual bind rewrites all three `WheneverEvent` filter slots
-    // (`valid_card`, `valid_source`, `valid_target`), so a bare `ParentTarget` in
-    // ANY of them is over-fire prone and must gate installation — not just
-    // `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
+    // damage. The contextual bind rewrites all four `WheneverEvent` filter slots
+    // (`valid_card`, `valid_source`, `valid_target`, `valid_subject_player`),
+    // so a bare `ParentTarget` in ANY of them is over-fire prone and must gate
+    // installation — not just `valid_source`. Scoped to a pre-bind `ParentTarget` only, so a `SelfRef`
     // reference (Human Torch's "he", whose empty `ability.targets` is normal) still
     // installs. "Bare" means the reference, not its position: the bind recurses
     // into `And` / `Or` / `Not`, and a `ParentTarget` it reaches there is
@@ -133,24 +133,26 @@ pub fn resolve(
     // `resolve_live_parent_slot_from_root`, the shared chain-root slot
     // authority, which also carries the CR 608.2b legality stamp and the
     // CR 400.7 pin. A slot it cannot resolve
-    // — out of range, illegal as the spell resolved, or stale — names nothing,
-    // and a condition that names nothing installs no trigger, for the same
-    // reason the empty-parent `ParentTarget` above installs none. It is bound
-    // BEFORE the contextual bind so that bind never sees a slot; the four
+    // — out of range, illegal as the spell resolved, or stale — names nothing
+    // and becomes `TargetFilter::None`; the filter's own boolean structure then
+    // decides what survives (an `Or` keeps its other branches, an `And`
+    // collapses), and the install is refused only when NO alternative of the
+    // condition can match any more (`condition_cannot_match`) — an illegal
+    // referent must not take a still-legal alternative with it (CR 608.2b:
+    // "Other parts of the effect for which those targets are not illegal may
+    // still affect them"; review of PR #8881). A condition none of whose
+    // alternatives can match installs no trigger, for the same reason the
+    // empty-parent `ParentTarget` above installs none. It is bound BEFORE the
+    // contextual bind so that bind never sees a slot; the four
     // `filter: TargetFilter` variants go through the same call, so the slot
     // rule covers every condition that carries a filter.
-    // `any` short-circuits: the first unresolved slot refuses the whole
-    // install below, so filters after it need no binding.
-    let unresolved_parent_slot =
-        condition_bindable_filters(&mut condition)
-            .into_iter()
-            .any(|filter| {
-                bind_parent_slots_from_root(filter, &|index| {
-                    crate::game::targeting::resolve_live_parent_slot_from_root(
-                        state, ability, index,
-                    )
-                })
-            });
+    let mut filter_groups = condition_filter_groups(&mut condition);
+    for filter in filter_groups.iter_mut().flatten() {
+        let _bound = bind_parent_slots_from_root(filter, &|index| {
+            crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
+        });
+    }
+    let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
         DelayedTriggerCondition::WheneverEvent { trigger, .. } => vec![trigger.as_ref()],
@@ -190,11 +192,12 @@ pub fn resolve(
                 &trigger.valid_source,
                 &trigger.valid_card,
                 &trigger.valid_target,
+                &trigger.valid_subject_player,
             ]
             .iter()
             .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
         });
-    if references_empty_parent || unresolved_parent_slot {
+    if references_empty_parent || no_alternative_can_match {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateDelayedTrigger,
             source_id: ability.source_id,
@@ -885,43 +888,65 @@ fn effect_references_last_created(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
 }
 
-/// Every filter of `condition` that the creation-time binders rewrite: the
-/// single `filter` of the zone-change family, and the three filter slots of
-/// each embedded `TriggerDefinition` (plus the `or_trigger`'s). The phase
-/// conditions and the filterless `WhenLeavesPlay` carry none. One enumeration
-/// for both binders, so a condition variant cannot be bound by one and missed
-/// by the other.
-fn condition_bindable_filters(condition: &mut DelayedTriggerCondition) -> Vec<&mut TargetFilter> {
+/// Every filter of `condition` that the creation-time binders rewrite, grouped
+/// by ALTERNATIVE: the single `filter` of the zone-change family is one group;
+/// each embedded `TriggerDefinition` is one group holding its four filter
+/// slots (`valid_card`, `valid_source`, `valid_target`,
+/// `valid_subject_player`), so a `WhenNextEvent`'s `or_trigger` — a second way
+/// for the same delayed trigger to fire — is a second group. Within a group
+/// every filter must match for the trigger to fire; across groups any one
+/// group suffices. The phase conditions and the filterless `WhenLeavesPlay`
+/// carry none. One enumeration for both binders and for
+/// [`condition_cannot_match`], so a condition variant or a filter slot cannot
+/// be bound by one and missed by another (review of PR #8881: the fourth slot
+/// was missing from the first cut).
+fn condition_filter_groups(condition: &mut DelayedTriggerCondition) -> Vec<Vec<&mut TargetFilter>> {
     fn trigger_filters(
         trigger: &mut crate::types::ability::TriggerDefinition,
-    ) -> impl Iterator<Item = &mut TargetFilter> {
+    ) -> Vec<&mut TargetFilter> {
         [
             &mut trigger.valid_card,
             &mut trigger.valid_source,
             &mut trigger.valid_target,
+            &mut trigger.valid_subject_player,
         ]
         .into_iter()
         .flatten()
+        .collect()
     }
     match condition {
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter }
-        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => vec![filter],
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => vec![vec![filter]],
         DelayedTriggerCondition::WheneverEvent { trigger, .. } => {
-            trigger_filters(trigger).collect()
+            vec![trigger_filters(trigger)]
         }
         DelayedTriggerCondition::WhenNextEvent {
             trigger,
             or_trigger,
             ..
-        } => trigger_filters(trigger)
-            .chain(or_trigger.iter_mut().flat_map(|alt| trigger_filters(alt)))
+        } => std::iter::once(trigger_filters(trigger))
+            .chain(or_trigger.iter_mut().map(|alt| trigger_filters(alt)))
             .collect(),
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => Vec::new(),
     }
+}
+
+/// Can no alternative of the condition match any more? A group with a
+/// `TargetFilter::None` leaf (the bound form of a slot with no referent) can
+/// never fire; a condition all of whose groups are dead — and that has at
+/// least one — cannot fire at all. A condition without filters (the phase
+/// family) is never dead by this test.
+fn condition_cannot_match(filter_groups: &[Vec<&mut TargetFilter>]) -> bool {
+    !filter_groups.is_empty()
+        && filter_groups.iter().all(|group| {
+            group
+                .iter()
+                .any(|filter| matches!(**filter, TargetFilter::None))
+        })
 }
 
 /// CR 603.7c + CR 608.2k: A delayed triggered ability that refers to
@@ -936,7 +961,7 @@ fn bind_contextual_filter_to_condition(
     condition: &mut DelayedTriggerCondition,
     parent_targets: &[TargetRef],
 ) {
-    for filter in condition_bindable_filters(condition) {
+    for filter in condition_filter_groups(condition).into_iter().flatten() {
         bind_parent_target_filter(filter, parent_targets);
     }
 }
@@ -944,51 +969,88 @@ fn bind_contextual_filter_to_condition(
 /// CR 608.2c + CR 608.2b: Bind every `ParentTargetSlot { index }` this filter
 /// reaches to the referent `resolve_slot` gives for that declared slot —
 /// `SpecificObject` / `SpecificPlayer` — walking the same `And` / `Or` / `Not`
-/// shape as `concrete_parent_target_filter`. Returns `true` when a slot on a
-/// BARE path has no referent: bound any other way it would widen to `Any`, so
-/// the caller must refuse the install instead.
+/// shape as `concrete_parent_target_filter`. A slot with no referent becomes
+/// `TargetFilter::None`, the leaf that matches nothing, and the boolean
+/// structure above it is simplified so that no legal alternative is lost
+/// (CR 608.2b: "Other parts of the effect for which those targets are not
+/// illegal may still affect them"):
+/// - `And` with a `None` member can never match and becomes `None`;
+/// - `Or` drops its `None` members and keeps the rest (a single survivor is
+///   unwrapped), becoming `None` only when none remain;
+/// - `Not` over `None` becomes `Any` — an exclusion of nothing excludes
+///   nothing, the same decision `game::filter::normalize_contextual_filter`
+///   takes for its direct-child `Not { ParentTargetSlot }` form; it is written
+///   here rather than left to that normaliser because the normaliser indexes
+///   the immediate parent's list, which is not the chain a slot numbers. A
+///   `Not` over `Any` is the mirror image and becomes `None`, so a doubly
+///   negated dead slot is still recognised as dead.
 ///
-/// `Not { ParentTargetSlot }` with no referent is the one no-referent shape
-/// that answers `false`: an exclusion of nothing excludes nothing, which is `Any` on
-/// purpose — the same decision `game::filter::normalize_contextual_filter`
-/// takes for the direct-child form. It is written here rather than left to
-/// that normaliser because the normaliser indexes the immediate parent's
-/// list, which is not the chain a slot numbers. Two shapes are named and left
-/// unpinned, with zero corpus carriers in a delayed condition (walk of every
-/// `CreateDelayedTrigger.condition`): a `Not` over a slot that
+/// Whether the WHOLE condition can still match is decided afterwards by
+/// [`condition_cannot_match`], per alternative. The simplification touches
+/// only composites in which a slot was actually bound (the returned flag), so
+/// a filter that carries no slot leaves this function exactly as it came.
+///
+/// Named and left unpinned, zero corpus carriers in a delayed condition (walk
+/// of every `CreateDelayedTrigger.condition`): a `Not` over a slot that
 /// resolves to a PLAYER stays `Not { SpecificPlayer }` where the normaliser
-/// would say `Any`; and `Or { slot, slot }` with one unresolvable slot refuses
-/// the whole install where CR 608.2b would let the legal branch stand.
+/// would say `Any`.
 fn bind_parent_slots_from_root(
     filter: &mut TargetFilter,
     resolve_slot: &dyn Fn(usize) -> Option<TargetRef>,
 ) -> bool {
     match filter {
-        TargetFilter::ParentTargetSlot { index } => match resolve_slot(*index) {
-            Some(TargetRef::Object(id)) => {
-                *filter = TargetFilter::SpecificObject { id };
-                false
-            }
-            Some(TargetRef::Player(id)) => {
-                *filter = TargetFilter::SpecificPlayer { id };
-                false
-            }
-            None => true,
-        },
+        TargetFilter::ParentTargetSlot { index } => {
+            *filter = match resolve_slot(*index) {
+                Some(TargetRef::Object(id)) => TargetFilter::SpecificObject { id },
+                Some(TargetRef::Player(id)) => TargetFilter::SpecificPlayer { id },
+                None => TargetFilter::None,
+            };
+            true
+        }
         TargetFilter::Not { filter: inner } => {
-            if let TargetFilter::ParentTargetSlot { index } = inner.as_ref() {
-                if resolve_slot(*index).is_none() {
-                    *filter = TargetFilter::Any;
-                    return false;
+            let bound = bind_parent_slots_from_root(inner, resolve_slot);
+            if bound {
+                match inner.as_ref() {
+                    TargetFilter::None => *filter = TargetFilter::Any,
+                    TargetFilter::Any => *filter = TargetFilter::None,
+                    _ => {}
                 }
             }
-            bind_parent_slots_from_root(inner, resolve_slot)
+            bound
         }
-        // `any` short-circuits: one unresolved slot refuses the install, so the
-        // siblings after it need no binding.
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter_mut()
-            .any(|filter| bind_parent_slots_from_root(filter, resolve_slot)),
+        TargetFilter::And { filters } => {
+            // Every member is bound — no short-circuit — before the composite
+            // is simplified.
+            let mut bound = false;
+            for member in filters.iter_mut() {
+                bound |= bind_parent_slots_from_root(member, resolve_slot);
+            }
+            if bound
+                && filters
+                    .iter()
+                    .any(|member| matches!(member, TargetFilter::None))
+            {
+                *filter = TargetFilter::None;
+            }
+            bound
+        }
+        TargetFilter::Or { filters } => {
+            // Every member is bound — no short-circuit — before the composite
+            // is simplified.
+            let mut bound = false;
+            for member in filters.iter_mut() {
+                bound |= bind_parent_slots_from_root(member, resolve_slot);
+            }
+            if bound {
+                filters.retain(|member| !matches!(member, TargetFilter::None));
+                match filters.len() {
+                    0 => *filter = TargetFilter::None,
+                    1 => *filter = filters.remove(0),
+                    _ => {}
+                }
+            }
+            bound
+        }
         // Catch-all on purpose, as in `reaches_bare_parent_target_bind`: only
         // the composites the binder recurses into matter here.
         _ => false,
@@ -1066,8 +1128,9 @@ pub(crate) fn concrete_parent_target_filter(
 ///   zero corpus carriers: `Not { Not { ParentTarget } }` therefore normalises to
 ///   `Not { Any }` and installs a trigger that can never fire.)
 /// - `ParentTargetSlot { .. }`: never reaches this binder. `bind_parent_slots_from_root`
-///   resolves every slot against the chain root first and refuses the install
-///   itself when a bare slot has no referent (issue #8758).
+///   resolves every slot against the chain root first; a slot with no referent
+///   becomes `None`, and `condition_cannot_match` refuses the install only when
+///   no alternative of the condition can match (issue #8758, PR #8881).
 /// - `TrackedSetFiltered { .. }`: the binder does not descend into it, so a
 ///   `ParentTarget` inside never degrades; unbound it under-matches, not over.
 ///
