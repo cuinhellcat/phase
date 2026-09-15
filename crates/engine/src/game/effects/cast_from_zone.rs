@@ -911,7 +911,8 @@ pub fn resolve(
                 // CR 601.2b: "by paying {R}{R} in addition to its other costs"
                 // rides the offer and is charged on accept (Ogre Battlecaster).
                 additional_cost,
-                source: ability.source_id,
+                // Filled by the resolution's inline tail (`effects/mod.rs`).
+                installed_triggers: Vec::new(),
             },
         };
         return Ok(());

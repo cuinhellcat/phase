@@ -3243,20 +3243,20 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `DraftKind::Winston` and
-    /// `DraftAction::SharedStackDecision` are serialized by draft WebSocket
-    /// messages, and neither carries `#[serde(other)]` or a fallback variant,
-    /// so a Winston pod's frames are a shape a v70 peer cannot decode — in
-    /// BOTH directions — and the pairing must be refused before it receives
-    /// one. Every other kind's draft frames are byte-identical to v70.
+    /// The bump this number is at: the paid graveyard cast offer
+    /// (`CastOfferKind::GraveyardPaidCast`) carries an additional cost and the
+    /// delayed triggers its decline withdraws, and opens for seven more
+    /// printed cards that a v71 peer handled as a lingering permission. A v71
+    /// peer parses the v72 offer and then pays the wrong cost — so the pairing
+    /// must be refused before it receives one.
     ///
     /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
     /// <n>)` under a function named for `<n-1>` is green, so
     /// `check-protocol-version.mjs` requires the current numeral in this name
     /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_71_for_winston_draft_frames() {
-        assert_eq!(PROTOCOL_VERSION, 71);
+    fn protocol_version_is_72_for_the_paid_graveyard_cast_offer() {
+        assert_eq!(PROTOCOL_VERSION, 72);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3267,7 +3267,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_71_for_winston_draft_frames` stays
+    /// `protocol_version_is_72_for_the_paid_graveyard_cast_offer` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {

@@ -2341,7 +2341,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed,
                         constraint,
                         additional_cost,
-                        source,
+                        installed_triggers,
                     },
             },
             GameAction::GraveyardPaidCastChoice { choice },
@@ -2382,7 +2382,7 @@ pub(super) fn handle_resolution_choice(
                 // accepted offer whose cast fails to initiate returns the error
                 // above and leaves the offer open, so the decline still reaches
                 // this withdrawal.
-                withdraw_declined_offer_cast_triggers(state, source, hit_card);
+                withdraw_declined_offer_cast_triggers(state, &installed_triggers);
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
@@ -8353,31 +8353,27 @@ fn finish_effect_zone_put_at_library_position(
     finish_with_continuation(state, player, events);
 }
 
-/// CR 603.7 + CR 608.2g: withdraw the one-shot "when you cast that spell"
-/// delayed trigger(s) `source`'s granting resolution installed for `card`,
-/// after the during-resolution offer to cast that card was declined. Matches
-/// exactly the shape that tail installs — a `WhenNextEvent` on `SpellCast`
-/// bound to the chosen card (`SpecificObject`) — from the same source; every
-/// other delayed trigger stays. The withdrawn triggers are booked as
-/// `Removed`, the disposition the cleanup prune uses for an unfired
-/// stated-lifetime trigger's sibling cases.
-fn withdraw_declined_offer_cast_triggers(state: &mut GameState, source: ObjectId, card: ObjectId) {
-    use crate::types::ability::{DelayedTriggerCondition, TargetFilter};
-    use crate::types::triggers::TriggerMode;
-    let waits_for_this_cast = |trigger: &crate::types::game_state::DelayedTrigger| {
-        trigger.source_id == source
-            && trigger.one_shot
-            && matches!(
-                &trigger.condition,
-                DelayedTriggerCondition::WhenNextEvent { trigger: definition, .. }
-                    if definition.mode == TriggerMode::SpellCast
-                        && definition.valid_card == Some(TargetFilter::SpecificObject { id: card })
-            )
-    };
+/// CR 603.7 + CR 608.2g: withdraw the delayed triggers the granting resolution
+/// installed behind a during-resolution offer, after that offer was declined.
+/// Matched by installation instance — the identity the CR 603.7 install
+/// authority mints once per record — so exactly the records this resolution's
+/// tail installed leave, and a second delayed trigger of the same source on the
+/// same card (another offer, another effect) stays. Booked as `Removed`.
+fn withdraw_declined_offer_cast_triggers(
+    state: &mut GameState,
+    installed: &[crate::types::identifiers::DelayedTriggerInstanceId],
+) {
+    if installed.is_empty() {
+        return;
+    }
     let mut survivors = Vec::new();
     let mut withdrawn = Vec::new();
     for trigger in std::mem::take(&mut state.delayed_triggers) {
-        if waits_for_this_cast(&trigger) {
+        let is_installed_here = trigger
+            .provenance
+            .origin()
+            .is_some_and(|origin| installed.contains(&origin.instance));
+        if is_installed_here {
             withdrawn.push(trigger);
         } else {
             survivors.push(trigger);

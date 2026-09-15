@@ -52922,6 +52922,93 @@ fn graveyard_paid_cast_router_opens_offer_not_lingering_permission() {
     );
 }
 
+/// CR 603.7 + CR 608.2g (issue #8775 review): declining a paid offer withdraws
+/// exactly the delayed triggers the granting resolution installed behind THAT
+/// offer — matched by installation instance, not by source and card. Two
+/// "when you cast that spell" triggers of the same source on the same card
+/// (a second offer for the same card, another effect): the offer records the
+/// second; declining leaves the first standing.
+///
+/// Revert-failing: matching by source + card shape withdraws both (`left: 0`).
+#[test]
+fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
+    use crate::types::ability::{
+        DelayedTriggerCondition, DelayedTriggerLifetime, TriggerDefinition,
+    };
+    use crate::types::game_state::{CastOfferKind, DelayedTrigger};
+    use crate::types::triggers::TriggerMode;
+
+    let mut state = setup_game_at_main_phase();
+    let spell = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    let source = ObjectId(9200);
+    let cast_of_spell = || {
+        let mut definition = TriggerDefinition::new(TriggerMode::SpellCast);
+        definition.valid_card = Some(TargetFilter::SpecificObject { id: spell });
+        DelayedTrigger::new(
+            DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(definition),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            PlayerId(0),
+            source,
+            true,
+        )
+    };
+    let mut events = Vec::new();
+    crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    crate::game::triggers::install_delayed_trigger(&mut state, cast_of_spell(), &mut events);
+    let instance_of = |state: &GameState, index: usize| {
+        state.delayed_triggers[index]
+            .provenance
+            .origin()
+            .expect("a live install mints a receipt root")
+            .instance
+    };
+    let (first, second) = (instance_of(&state, 0), instance_of(&state, 1));
+    assert_ne!(first, second, "reach guard: two distinct installations");
+
+    state.waiting_for = WaitingFor::CastOffer {
+        player: PlayerId(0),
+        kind: CastOfferKind::GraveyardPaidCast {
+            hit_card: spell,
+            mana_spend_permission: None,
+            graveyard_replacement: None,
+            cast_transformed: false,
+            constraint: None,
+            additional_cost: None,
+            installed_triggers: vec![second],
+        },
+    };
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Decline,
+        },
+    )
+    .expect("declining the paid offer must succeed");
+
+    assert_eq!(
+        state.delayed_triggers.len(),
+        1,
+        "only the trigger recorded on the declined offer is withdrawn"
+    );
+    assert_eq!(
+        instance_of(&state, 0),
+        first,
+        "the other trigger of the same source on the same card stays"
+    );
+}
+
 #[test]
 fn paid_during_resolution_cast_router_is_independent_of_chosen_card_zone() {
     for zone in [Zone::Hand, Zone::Exile, Zone::Library] {

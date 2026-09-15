@@ -12594,6 +12594,35 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// `GameScenario`, so neither repair can be measured here either (issue #8750).
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
+/// CR 603.7 + CR 608.2g: after a `CastFromZone` head's tail ran inline behind
+/// an open `CastOffer::GraveyardPaidCast`, note on that offer the delayed
+/// triggers the tail installed — every record whose installation instance is
+/// at or past `first_new_instance`, the counter value read before the tail
+/// ran. The offer's decline withdraws exactly these
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`). No-op
+/// when the head left any other state.
+fn record_tail_installs_on_paid_offer(state: &mut GameState, first_new_instance: u64) {
+    let new_instances: Vec<_> = state
+        .delayed_triggers
+        .iter()
+        .filter_map(|trigger| trigger.provenance.origin())
+        .map(|origin| origin.instance)
+        .filter(|instance| instance.0 >= first_new_instance)
+        .collect();
+    if new_instances.is_empty() {
+        return;
+    }
+    if let WaitingFor::CastOffer {
+        kind: CastOfferKind::GraveyardPaidCast {
+            installed_triggers, ..
+        },
+        ..
+    } = &mut state.waiting_for
+    {
+        installed_triggers.extend(new_instances);
+    }
+}
+
 fn tail_family_has_runtime_evidence(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -15118,7 +15147,12 @@ fn resolve_chain_body(
                 ) {
                     prepend_to_pending_continuation(state, tail);
                 } else {
+                    // CR 603.7: every delayed trigger this tail installs is
+                    // recorded on the open paid offer by installation instance,
+                    // so a declined offer can withdraw exactly those records.
+                    let first_new_instance = state.next_delayed_trigger_instance;
                     resolve_ability_chain(state, &tail, events, depth + 1)?;
+                    record_tail_installs_on_paid_offer(state, first_new_instance);
                 }
             }
             return Ok(());

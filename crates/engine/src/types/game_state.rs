@@ -9524,14 +9524,15 @@ pub enum CastOfferKind {
         /// is accepted. `None` for every other paid offer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_cost: Option<crate::types::mana::ManaCost>,
-        /// CR 603.7: the source of the granting ability. Its "when you cast
-        /// that spell" delayed trigger is installed before the offer is
-        /// answered (the resolution's inline tail) and is withdrawn again when
-        /// the offer is declined, so it cannot fire on a later cast of the same
-        /// card by another route. The zero sentinel for saved states predating
-        /// the field withdraws nothing.
-        #[serde(default = "zero_object_id")]
-        source: ObjectId,
+        /// CR 603.7: the delayed triggers the granting resolution installed
+        /// AFTER this offer opened — its "when you cast that spell" tail,
+        /// resolved inline before the offer is answered (`effects/mod.rs`) —
+        /// by installation instance. Declining the offer withdraws exactly
+        /// these records and no other, so a second delayed trigger of the same
+        /// source on the same card (a second offer, another effect) is left
+        /// alone. Empty for saved states predating the field.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        installed_triggers: Vec<crate::types::identifiers::DelayedTriggerInstanceId>,
     },
 }
 

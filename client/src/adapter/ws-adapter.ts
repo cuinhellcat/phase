@@ -209,6 +209,17 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 72 — WaitingFor.CastOffer { kind: GraveyardPaidCast } carries two additive
+ *      fields: additional_cost (Ogre Battlecaster's "{R}{R} in addition to its
+ *      other costs", CR 601.2b) and installed_triggers (the delayed triggers a
+ *      declined offer withdraws). Both are serde-defaulted, so a v71 peer
+ *      parses a v72 offer — and then pays the offered card at its printed
+ *      cost alone while the v72 host charges the addition. The offer also
+ *      opens for seven more printed cards (the paid "cast target … card from
+ *      your graveyard" class, CR 608.2g) that v71 granted a lingering
+ *      permission instead. Exact-match refuses the pairing. P2P moves in
+ *      lockstep (wire 54); lobby messages are unchanged. See PROTOCOL_VERSION
+ *      in crates/lobby-broker/src/protocol.rs for the full entry.
  * 71 — DraftKind.Winston and DraftAction::SharedStackDecision are serialized
  *      by draft WebSocket messages. A PARSE bump like 27 and 34, not a
  *      capability bump like 24 — but a CONDITIONAL one: neither type carries
@@ -504,7 +515,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 71;
+export const PROTOCOL_VERSION = 72;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
