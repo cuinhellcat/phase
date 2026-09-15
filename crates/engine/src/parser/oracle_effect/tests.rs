@@ -55710,8 +55710,9 @@ fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
 }
 
 /// CR 608.2g vs CR 611.2: the shared filter-form DRIVER authority is
-/// duration-blind — the discriminator is mode + hand-origin + an alternative
-/// casting method (`without_paying` OR an alternative cost). Duration is
+/// duration-blind — the discriminators are mode + hand-origin + an alternative
+/// casting method (`without_paying` OR an alternative cost), and, since issue
+/// #8775, a chosen graveyard card at its printed cost. Duration is
 /// intentionally not a parameter because this authority answers the
 /// NO-DURATION question; a stated lifetime is reconciled afterwards by
 /// `CastFromZoneDriver::with_lingering_duration`, which degrades every
@@ -55723,18 +55724,104 @@ fn face_of_boe_clause_folds_suspend_cost_and_during_resolution() {
 fn filter_cast_driver_authority_is_duration_blind() {
     let d = super::during_resolution_for_filter_cast_clause;
     // The Face of Boe via fold: hand-origin alt cost.
-    assert_eq!(d(Cast, false, true, true), DuringResolution);
+    assert_eq!(d(Cast, false, true, true, false), DuringResolution);
     // Colossal Dreadmaw / Form of the Mulldrifter / Sen Triplets: full-cost
     // hand cast (durational or not) -> standing grant.
-    assert_eq!(d(Cast, false, false, true), LingeringPermission);
-    // Memory Plunder / Tasha: non-hand free pool.
-    assert_eq!(d(Cast, true, false, false), LingeringPermission);
+    assert_eq!(d(Cast, false, false, true, false), LingeringPermission);
+    // Tasha: non-hand free pool, no chosen card.
+    assert_eq!(d(Cast, true, false, false, false), LingeringPermission);
     // Expertise cycle / Brain in a Jar / Twinning Glass: hand free.
-    assert_eq!(d(Cast, true, false, true), DuringResolution);
+    assert_eq!(d(Cast, true, false, true, false), DuringResolution);
     // Xander's Pact: exile-origin alt cost — hand gate, not duration.
-    assert_eq!(d(Cast, false, true, false), LingeringPermission);
+    assert_eq!(d(Cast, false, true, false, false), LingeringPermission);
     // CR 305.1 land plays have no during-resolution mechanism.
-    assert_eq!(d(Play, true, false, true), LingeringPermission);
+    assert_eq!(d(Play, true, false, true, false), LingeringPermission);
+    // Ogre Battlecaster / Helmut Zemo / Toshiro Umezawa: ONE chosen graveyard
+    // card at its printed cost is cast as the ability resolves (CR 608.2g).
+    assert_eq!(d(Cast, false, false, false, true), DuringResolution);
+    // Memory Plunder / Torrential Gearhulk: the free chosen graveyard card is
+    // routed by the resolver's own shape guard; the driver is not changed for
+    // it here.
+    assert_eq!(d(Cast, true, false, false, true), LingeringPermission);
+    // Rat in the Hat's "this turn" is stamped afterwards and degrades the
+    // driver; that seam is `with_lingering_duration`, not this authority.
+    // An alternative cost on a chosen graveyard card is not the printed-cost
+    // form.
+    assert_eq!(d(Cast, false, true, false, true), LingeringPermission);
+}
+
+/// CR 608.2g (issue #8775): the printed-cost "you may cast target … card from
+/// your graveyard" lowers to a during-resolution cast — the whole paid class
+/// (Ogre Battlecaster's shape, Chandra, Flame's Catalyst's `Or` type list) —
+/// while the same clause with a stated lifetime keeps the lingering permission.
+#[test]
+fn a_paid_chosen_graveyard_cast_is_lowered_as_a_during_resolution_cast() {
+    fn driver_of(text: &str) -> crate::types::ability::CastFromZoneDriver {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::CastFromZone { driver, .. } = &*chain.effect else {
+            panic!("expected CastFromZone, got: {:?}", chain.effect);
+        };
+        *driver
+    }
+    // Ogre Battlecaster / Toshiro Umezawa / Emet-Selch.
+    assert_eq!(
+        driver_of("You may cast target instant or sorcery card from your graveyard."),
+        DuringResolution
+    );
+    // Chandra, Flame's Catalyst −2: an `Or` of graveyard leaves.
+    assert_eq!(
+        driver_of("You may cast target red instant or sorcery card from your graveyard."),
+        DuringResolution
+    );
+    // Rat in the Hat: a stated lifetime is a later priority window (CR 611.2a).
+    assert_eq!(
+        driver_of("You may cast target creature card from your graveyard this turn."),
+        LingeringPermission
+    );
+}
+
+/// CR 601.2c + CR 115.1: the chosen-graveyard-card signal needs BOTH the
+/// printed word "target" on the head and a graveyard origin on the filter.
+#[test]
+fn chosen_graveyard_card_signal_needs_the_target_word_and_the_graveyard() {
+    let graveyard = |controller: Option<ControllerRef>| {
+        let mut tf = TypedFilter::new(TypeFilter::Instant);
+        tf.controller = controller;
+        tf.properties.push(FilterProp::InZone {
+            zone: Zone::Graveyard,
+        });
+        TargetFilter::Typed(tf)
+    };
+    let c = super::cast_target_is_chosen_graveyard_card;
+    assert!(c(
+        "target instant card from your graveyard",
+        &graveyard(Some(ControllerRef::You))
+    ));
+    assert!(c(
+        "target instant card from an opponent's graveyard",
+        &graveyard(Some(ControllerRef::Opponent))
+    ));
+    // Chandra, Flame's Catalyst: "target red instant or sorcery card" is an
+    // `Or` of leaves, each in the graveyard.
+    assert!(c(
+        "target red instant or sorcery card from your graveyard",
+        &TargetFilter::Or {
+            filters: vec![
+                graveyard(Some(ControllerRef::You)),
+                graveyard(Some(ControllerRef::You)),
+            ],
+        }
+    ));
+    // Tasha-shaped pool: no target word.
+    assert!(!c("instant cards from your graveyard", &graveyard(None)));
+    // A chosen card that is not in a graveyard (hand pick, exile anaphor).
+    let mut hand = TypedFilter::new(TypeFilter::Instant);
+    hand.properties
+        .push(FilterProp::InZone { zone: Zone::Hand });
+    assert!(!c(
+        "target instant card from your hand",
+        &TargetFilter::Typed(hand)
+    ));
 }
 
 #[test]

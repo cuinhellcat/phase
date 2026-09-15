@@ -15072,36 +15072,39 @@ fn resolve_chain_body(
             // has not answered yet would read a state that does not exist, so
             // park it behind that head instead.
             //
-            // NARROWER than the states a `CastFromZone` head can leave, and named
-            // rather than hidden: `cast_from_zone::resolve` can also leave a
-            // `CastOfferKind::GraveyardPaidCast`, an in-resolution cast from
-            // `initiate_cast_during_resolution`, or a
-            // `LingeringPermissionGrantResult::NeedsChoice`.
+            // The other window a `CastFromZone` head leaves here is the PAID
+            // during-resolution offer, `CastOfferKind::GraveyardPaidCast`
+            // (Helmut Zemo, Ogre Battlecaster — issue #8775; their
+            // `without_paying_mana_cost: false` head carries the
+            // `DuringResolution` driver the paid branch of
+            // `cast_from_zone::resolve` reads). For that window the tail is
+            // resolved INLINE, before the offer is answered, and that order is
+            // load-bearing: the tail is the `CreateDelayedTrigger` for "when you
+            // cast that spell" / "if you cast a spell this way", keyed to the
+            // chosen card (CR 603.7), and the cast the offer performs is the
+            // event it waits for — installed after the cast it would never fire.
+            // It reads nothing the unanswered offer decides: its referent is the
+            // chosen target, bound when the trigger went on the stack. A declined
+            // offer leaves that one-shot trigger armed on the chosen card until
+            // cleanup: it is keyed to the CARD, not to the offer, so it would fire
+            // if that card were cast this turn by another route (a second attack
+            // trigger choosing it again, another permission) — an imprecision
+            // the lingering model shared. Pinned by
+            // `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
+            // and `ogre_battlecaster_8775`.
             //
-            // CORRECTED after review: an earlier version credited the driver for
-            // this ("all six carriers drive `LingeringPermission`"), which is not
-            // what gates those paths — `immediate_graveyard_free_cast` never
-            // consults the driver, and Finale of Promise satisfies its conditions.
-            // The load-bearing facts are per card, and only three heads reach this
-            // decision at all (the other three tails are stopped one step earlier
-            // by the two scope rules): Sins of the Past carries
-            // `duration: UntilEndOfTurn`, so the free-cast-during-resolution gate
-            // is false; Helmut Zemo and Ogre Battlecaster carry
-            // `without_paying_mana_cost: false`, so both free-cast gates are
-            // false; and all three target a card already in a graveyard, which
-            // `grant_lingering_permissions` routes in place, so `NeedsChoice`
-            // cannot fire.
+            // The remaining states are named rather than hidden:
+            // `cast_from_zone::resolve` can also leave an in-resolution cast
+            // from `initiate_cast_during_resolution`, or a
+            // `LingeringPermissionGrantResult::NeedsChoice`. Of the tail
+            // carriers only Sins of the Past reaches this decision through
+            // them: it carries `duration: UntilEndOfTurn`, so both
+            // during-resolution gates are false, and its target is already in
+            // a graveyard, which `grant_lingering_permissions` routes in place,
+            // so `NeedsChoice` cannot fire. (Finale of Promise satisfies the
+            // free gate's conditions but is stopped by the family allowlist.)
             //
-            // One correction to that correction, because over-correcting is its
-            // own failure: for the PAID offer (`CastOfferKind::GraveyardPaidCast`)
-            // `without_paying_mana_cost: false` is the SATISFIED first conjunct,
-            // not an exclusion. What keeps Zemo and Ogre out of that one is the
-            // driver after all — it also requires `driver.is_during_resolution()`,
-            // and both carry the default `LingeringPermission`. The driver is
-            // simply not what gates the two FREE-cast paths, which is what the
-            // first correction was about.
-            //
-            // Site without a demonstrated consequence, so this stays
+            // Site without a demonstrated consequence for those, so this stays
             // the pre-#8721 condition rather than being widened on speculation;
             // the broader idiom further down this function is
             // `!matches!(state.waiting_for, WaitingFor::Priority { .. })`.

@@ -27592,6 +27592,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             without_paying,
             alt_ability_cost.is_some(),
             cast_target_is_hand_origin(&filter),
+            cast_target_is_chosen_graveyard_card(rest, &filter),
         );
         return Some(Effect::CastFromZone {
             target: filter,
@@ -27656,25 +27657,74 @@ fn cast_target_is_hand_origin(target: &TargetFilter) -> bool {
 /// the `DuringResolution` this function returns for it.
 ///
 /// Casts during resolution iff it is a `Cast` (CR 601.2, not a CR 305.1 land
-/// play) from a `hand` origin via an alternative casting method — free
-/// (`without_paying`: the Expertise cycle, Brain in a Jar) OR an alternative
-/// cost (`alt_is_some`: The Face of Boe's suspend cost). A *full-cost*
-/// continuous "as though" permission (Colossal Dreadmaw / Form of the
-/// Mulldrifter / Sen Triplets — hand-origin, neither free nor alt-cost) is a
-/// standing grant (CR 611.2); non-hand pools (Memory Plunder, Tasha) likewise
-/// stay lingering permissions exercised at a later priority window.
+/// play) and either
+/// - from a `hand` origin via an alternative casting method — free
+///   (`without_paying`: the Expertise cycle, Brain in a Jar) OR an alternative
+///   cost (`alt_is_some`: The Face of Boe's suspend cost); or
+/// - of ONE chosen card in a graveyard at its printed cost
+///   (`chosen_graveyard_card`, neither free nor alt-cost: "you may cast target
+///   instant or sorcery card from your graveyard" — Ogre Battlecaster, Helmut
+///   Zemo, Toshiro Umezawa, Emet-Selch, the two Chandras' −2, Harness the
+///   Storm). CR 608.2g: the card is cast as the ability resolves, so a sorcery
+///   granted by an attack trigger is cast in combat and no player receives
+///   priority in between. The FREE form of the same shape (Torrential
+///   Gearhulk, Dreadhorde Arcanist) is routed by the resolver's own shape guard
+///   (`cast_from_zone::resolve`, `immediate_graveyard_free_cast`) and keeps
+///   the driver it always had; the paid form has no such guard — its
+///   during-resolution branch (`paid_during_resolution_cast`) reads THIS
+///   driver — which is why the printed-cost case is decided here.
+///
+/// A *full-cost* continuous "as though" permission (Colossal Dreadmaw / Form of
+/// the Mulldrifter / Sen Triplets — hand-origin, neither free nor alt-cost) is
+/// a standing grant (CR 611.2); unchosen non-hand pools (Tasha's "cast a spell
+/// from among cards exiled with ~") likewise stay lingering permissions
+/// exercised at a later priority window.
 fn during_resolution_for_filter_cast_clause(
     mode: CardPlayMode,
     without_paying: bool,
     alt_is_some: bool,
     hand_origin: bool,
+    chosen_graveyard_card: bool,
 ) -> crate::types::ability::CastFromZoneDriver {
     use crate::types::ability::CastFromZoneDriver;
-    if mode == CardPlayMode::Cast && hand_origin && (without_paying || alt_is_some) {
-        CastFromZoneDriver::DuringResolution
-    } else {
-        CastFromZoneDriver::LingeringPermission
+    if mode != CardPlayMode::Cast {
+        return CastFromZoneDriver::LingeringPermission;
     }
+    if hand_origin && (without_paying || alt_is_some) {
+        return CastFromZoneDriver::DuringResolution;
+    }
+    if chosen_graveyard_card && !without_paying && !alt_is_some {
+        return CastFromZoneDriver::DuringResolution;
+    }
+    CastFromZoneDriver::LingeringPermission
+}
+
+/// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
+/// clause names one chosen card in a graveyard — the printed word "target"
+/// on the head and an `InZone { Graveyard }` property on every leaf of the
+/// filter (a type list such as "red instant or sorcery card" is an `Or` of
+/// leaves, each carrying the zone). Mirrors `cast_target_is_hand_origin` for
+/// the graveyard axis; the target-word test is the same
+/// `strip_cast_target_prefix` the Branch-2 producer uses.
+fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bool {
+    fn every_leaf_in_a_graveyard(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+                matches!(
+                    prop,
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }
+                )
+            }),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                !filters.is_empty() && filters.iter().all(every_leaf_in_a_graveyard)
+            }
+            _ => false,
+        }
+    }
+    let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
+    names_a_target && every_leaf_in_a_graveyard(target)
 }
 
 /// CR 601.2 + CR 609.4b + CR 608.2g: "[you may ]cast target [type] card from
@@ -28023,11 +28073,14 @@ fn attach_alt_cost_to_prior_cast_from_zone(
             // attaching one. The exile-origin folded rider (Xander's Pact,
             // `ExiledBySource` → hand_origin false) correctly stays
             // `LingeringPermission` via the hand gate.
+            // `chosen_graveyard_card` is false here: that signal decides the
+            // PRINTED-cost graveyard cast, and an alternative cost is attaching.
             *driver = during_resolution_for_filter_cast_clause(
                 *mode,
                 *without_paying_mana_cost,
                 true,
                 cast_target_is_hand_origin(target),
+                false,
             );
             *alt = Some(cost.clone());
             return true;

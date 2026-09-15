@@ -835,8 +835,12 @@ pub fn resolve(
     //   - own-graveyard targets defer the cast to a later priority window,
     //     which violates CR 608.2g for resolution-time "you may cast" with no
     //     standing duration (issue #852).
-    // Timed grants (`duration: Some(_)`) and paid casts stay on the lingering
-    // permission path (Emry, Urza-class deferred play).
+    // Timed grants (`duration: Some(_)`) stay on the lingering permission path
+    // (Emry, Urza-class deferred play). A PAID chosen graveyard card (Ogre
+    // Battlecaster, Helmut Zemo, Toshiro Umezawa) is not routed by this guard:
+    // its during-resolution offer is the paid branch below, reached through
+    // the `DuringResolution` driver the parser now stamps on that shape
+    // (issue #8775).
     let immediate_graveyard_free_cast = without_paying
         && alt_ability_cost.is_none()
         && duration.is_none()

@@ -1044,6 +1044,7 @@ mod ob_nixilis_captive_kingpin_life_loss;
 mod obeka_splitter_additional_phases;
 mod obliterate_regression;
 mod officious_interrogation_bare_strive_surcharge;
+mod ogre_battlecaster_8775;
 mod ogre_marauder_defending_player_unless_sacrifice;
 mod old_growth_troll_return_as_aura;
 mod omniscience_free_cast_chalice_x;
