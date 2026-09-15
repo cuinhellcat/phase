@@ -153,4 +153,36 @@ describe("CascadeChoiceModal", () => {
       data: { choice: { type: "Decline" } },
     });
   });
+
+  // CR 608.2g + CR 601.2b (issue #8775): the PLAIN paid offer — no any-type
+  // concession (Helmut Zemo, Toshiro Umezawa) — must not claim "any type of
+  // mana", and Ogre Battlecaster's offer names its {R}{R} in addition.
+  it("renders the plain paid copy without the any-type claim, and the additional cost", () => {
+    setWaitingFor({
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: { type: "GraveyardPaidCast", hit_card: 52 },
+      },
+    });
+    const { unmount } = render(<CascadeChoiceModal />);
+    expect(screen.getByText("(pay its mana cost)")).toBeInTheDocument();
+    expect(screen.queryByText(/any type of mana/)).not.toBeInTheDocument();
+    unmount();
+
+    setWaitingFor({
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: {
+          type: "GraveyardPaidCast",
+          hit_card: 52,
+          additional_cost: { type: "Cost", shards: ["Red", "Red"], generic: 0 },
+        },
+      },
+    });
+    render(<CascadeChoiceModal />);
+    expect(screen.getByText("(pay its mana cost plus {R}{R})")).toBeInTheDocument();
+    expect(screen.getByText(/by paying its mana cost plus \{R\}\{R\}/)).toBeInTheDocument();
+  });
 });

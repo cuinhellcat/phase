@@ -5672,6 +5672,7 @@ fn rw_effect(
             duration: _,
             driver: _,
             mana_spend_permission: _,
+            additional_cost: _,
         } => {
             let mut p = ext_write(StateKind::HandLibrary);
             p.writes_external.set(StateKind::StackShape);

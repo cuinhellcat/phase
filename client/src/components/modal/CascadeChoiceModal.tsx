@@ -1,8 +1,9 @@
 import { useTranslation } from "react-i18next";
 
-import type { GameAction } from "../../adapter/types.ts";
+import type { GameAction, ManaCost } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { DialogShell } from "./DialogShell.tsx";
 
 /**
@@ -49,6 +50,8 @@ export function CascadeChoiceModal() {
         hitCardId={kind.hit_card}
         missCount={0}
         promptKind="GraveyardPaidCast"
+        anyTypeMana={kind.mana_spend_permission !== undefined}
+        additionalCost={kind.additional_cost}
         dispatch={dispatch}
       />
     );
@@ -86,6 +89,8 @@ function CascadeChoiceContent({
   missCount,
   promptKind,
   sourceMv,
+  anyTypeMana = false,
+  additionalCost,
   dispatch,
 }: {
   actionType: "CascadeChoice" | "DiscoverChoice" | "RippleChoice" | "GraveyardPaidCastChoice";
@@ -93,12 +98,26 @@ function CascadeChoiceContent({
   missCount: number;
   promptKind: "Cascade" | "Discover" | "Ripple" | "GraveyardPaidCast";
   sourceMv?: number;
+  // CR 609.4b: the paid offer's "mana of any type can be spent" concession
+  // (Quistis Trepe, Tinybones) — the plain paid offer (Ogre Battlecaster,
+  // Helmut Zemo, Toshiro Umezawa) takes normal mana and must not claim it.
+  anyTypeMana?: boolean;
+  // CR 601.2b: an additional mana cost paid on top of the printed cost.
+  additionalCost?: ManaCost;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[hitCardId]);
 
   if (!obj) return null;
+
+  // CR 601.2b: the additional cost as printed symbols ("{R}{R}"), for the
+  // paid offer that carries one.
+  const extraCostText = additionalCost
+    ? manaCostToShards(additionalCost)
+        .map((shard) => `{${shard}}`)
+        .join("")
+    : "";
 
   const subtitle =
     promptKind === "Cascade"
@@ -113,9 +132,14 @@ function CascadeChoiceContent({
             total: missCount + 1,
           })
         : promptKind === "GraveyardPaidCast"
-          ? t("cascadeChoice.subtitleGraveyardPaid", {
-              name: obj.name,
-            })
+          ? anyTypeMana
+            ? t("cascadeChoice.subtitleGraveyardPaid", { name: obj.name })
+            : extraCostText
+              ? t("cascadeChoice.subtitleGraveyardPaidExtra", {
+                  name: obj.name,
+                  extra: extraCostText,
+                })
+              : t("cascadeChoice.subtitleGraveyardPaidNormal", { name: obj.name })
           : t("cascadeChoice.subtitleDiscover", {
               name: obj.name,
               missCount,
@@ -150,9 +174,13 @@ function CascadeChoiceContent({
             {t("cascadeChoice.castNamed", { name: obj.name })}
           </span>
           <span className="ml-2 text-xs text-slate-400">
-            {promptKind === "GraveyardPaidCast"
-              ? t("cascadeChoice.castPaidSuffix")
-              : t("cascadeChoice.castSuffix")}
+            {promptKind !== "GraveyardPaidCast"
+              ? t("cascadeChoice.castSuffix")
+              : anyTypeMana
+                ? t("cascadeChoice.castPaidSuffix")
+                : extraCostText
+                  ? t("cascadeChoice.castPaidExtraSuffix", { extra: extraCostText })
+                  : t("cascadeChoice.castPaidNormalSuffix")}
           </span>
         </button>
         <button

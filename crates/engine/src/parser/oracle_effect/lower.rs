@@ -1328,6 +1328,7 @@ mod linked_exile_cleanup_tests {
             duration: None,
             driver: CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         }
     }
 

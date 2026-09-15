@@ -18153,6 +18153,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         if let Some(bounds) = refused_bound {
             clause.effect = crate::parser::oracle_ir::ast::cast_bound_lost_to_duration_gap(bounds);
         }
+        crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut clause.effect);
     }
     // CR 115.1d: Post-parse fixup for the "…counter(s) on up to N target …" shape.
     // The multi_target is lost in the AST→Effect lowering chain, so we re-extract
@@ -21891,6 +21892,7 @@ fn try_parse_per_opponent_graveyard_free_cast(lower: &str) -> Option<Effect> {
         duration: None,
         driver: CastFromZoneDriver::DuringResolution,
         mana_spend_permission: None,
+        additional_cost: None,
     })
 }
 
@@ -26176,6 +26178,7 @@ fn from_among_batch_cast_effect(
         duration: None,
         driver,
         mana_spend_permission: None,
+        additional_cost: None,
     }
 }
 
@@ -27198,6 +27201,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration,
             driver,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27505,6 +27509,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27565,6 +27570,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         });
     }
 
@@ -27594,7 +27600,21 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             cast_target_is_hand_origin(&filter),
             cast_target_is_chosen_graveyard_card(rest, &filter),
         );
-        return Some(Effect::CastFromZone {
+        // CR 601.2b: "by paying {R}{R} in addition to its other costs" (Ogre
+        // Battlecaster). Only the during-resolution paid cast charges it; a
+        // clause the lingering mechanism would carry is refused by the shared
+        // authority rather than lowered without its cost.
+        let additional_cost = parse_additional_mana_cost_rider(rest);
+        // A rider printed in the "in addition to its other costs" shape that
+        // the reader could not turn into mana symbols (a life payment, an
+        // {X}) must not be lowered without its cost either.
+        if additional_cost.is_none() && names_an_additional_cost(rest) {
+            return Some(Effect::unimplemented(
+                UNREPRESENTABLE_ADDITIONAL_COST_GAP,
+                rest,
+            ));
+        }
+        let mut effect = Effect::CastFromZone {
             target: filter,
             without_paying_mana_cost: without_paying,
             mode,
@@ -27604,7 +27624,10 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             duration: None,
             driver,
             mana_spend_permission: None,
-        });
+            additional_cost,
+        };
+        crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(&mut effect);
+        return Some(effect);
     }
 
     // Branch 3: bare fallback.
@@ -27618,6 +27641,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         duration: None,
         driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         mana_spend_permission: None,
+        additional_cost: None,
     })
 }
 
@@ -27697,6 +27721,48 @@ fn during_resolution_for_filter_cast_clause(
         return CastFromZoneDriver::DuringResolution;
     }
     CastFromZoneDriver::LingeringPermission
+}
+
+/// CR 601.2b: The parser gap name for a cast clause whose "in addition to its
+/// other costs" rider is not a plain mana cost this engine can carry (a life
+/// payment, an {X}). Zero printed carriers today (Festival of Embers pays life
+/// through a static permission and never reaches the cast-clause producer).
+const UNREPRESENTABLE_ADDITIONAL_COST_GAP: &str = "unrepresentable_additional_cost";
+
+/// The printed additional-cost wording is present on the clause, whatever
+/// follows "by paying".
+fn names_an_additional_cost(rest: &str) -> bool {
+    scan_contains_phrase(rest, "in addition to its other costs")
+        || scan_contains_phrase(rest, "in addition to their other costs")
+}
+
+/// CR 601.2b + CR 118.8: "… by paying <mana cost> in addition to its other
+/// costs" on a cast clause — an additional mana cost of the granted cast
+/// (Ogre Battlecaster: "by paying {R}{R} in addition to its other costs").
+/// The rider must close the clause: mana symbols, then exactly the printed
+/// "in addition to its/their other costs". Mana symbols are matched on an
+/// ASCII-uppercased copy because the clause arrives lowercased and
+/// `parse_mana_cost` reads printed symbols.
+fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::ManaCost> {
+    type E<'a> = OracleError<'a>;
+    let (after_head, _) = take_until::<_, _, E>(" by paying ").parse(rest).ok()?;
+    let (cost_and_tail, _) = tag::<_, _, E>(" by paying ").parse(after_head).ok()?;
+    let upper = cost_and_tail.to_ascii_uppercase();
+    let (tail_upper, cost) = nom_primitives::parse_mana_cost(&upper).ok()?;
+    // An {X} in an additional cost would need a choice this cast never asks
+    // for; refuse it here so the clause becomes a gap, not a cast without it.
+    if cost.has_x() {
+        return None;
+    }
+    let tail = &cost_and_tail[cost_and_tail.len() - tail_upper.len()..];
+    let (tail, _) = alt((
+        tag::<_, _, E>(" in addition to its other costs"),
+        tag(" in addition to their other costs"),
+    ))
+    .parse(tail)
+    .ok()?;
+    eof::<_, E>(tail.trim_end_matches('.')).ok()?;
+    Some(cost)
 }
 
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
@@ -28083,6 +28149,11 @@ fn attach_alt_cost_to_prior_cast_from_zone(
                 false,
             );
             *alt = Some(cost.clone());
+            // CR 601.2b: the fourth seam that can leave a cast grant on the
+            // lingering mechanism; an additional cost cannot stay on it.
+            crate::parser::oracle_ir::ast::refuse_additional_cost_on_lingering_cast(
+                def.effect.as_mut(),
+            );
             return true;
         }
         false

@@ -9493,11 +9493,13 @@ pub enum CastOfferKind {
         member_pool: Vec<ObjectId>,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
-    /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
-    /// target X card from a graveyard, and mana of any type can be spent to cast
-    /// that spell"). Unlike Cascade/Discover/Ripple this is not a free cast — on
-    /// accept the caster pays the card's real printed cost with the any-type
-    /// concession applied; on decline the card stays in the graveyard.
+    /// from a graveyard — "you may cast target X card from a graveyard", with
+    /// the any-type-mana concession (Quistis Trepe, Tinybones the Pickpocket)
+    /// or at normal mana (Ogre Battlecaster, Helmut Zemo, Toshiro Umezawa,
+    /// issue #8775). Unlike Cascade/Discover/Ripple this is not a free cast —
+    /// on accept the caster pays the card's real printed cost (plus any
+    /// `additional_cost`), with the concession applied when present; on
+    /// decline the card stays in the graveyard.
     GraveyardPaidCast {
         /// CR 601.2a: The graveyard card being offered for casting.
         hit_card: ObjectId,
@@ -9516,6 +9518,12 @@ pub enum CastOfferKind {
         /// CR 601.2b: Optional cast-time predicate gating the cast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<crate::types::ability::CastPermissionConstraint>,
+        /// CR 601.2b + CR 118.8: an additional mana cost the grant attaches to
+        /// this cast ("by paying {R}{R} in addition to its other costs", Ogre
+        /// Battlecaster), paid on top of the card's printed cost when the offer
+        /// is accepted. `None` for every other paid offer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_cost: Option<crate::types::mana::ManaCost>,
     },
 }
 

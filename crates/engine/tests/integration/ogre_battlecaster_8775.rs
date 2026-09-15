@@ -18,6 +18,10 @@
 //! X is the cast spell's mana value: the issue as first filed claimed X
 //! resolved to 0, which was a stand-in Bolt with no mana cost. The Bolt here
 //! carries `{R}`.
+//!
+//! "By paying {R}{R} in addition to its other costs" is an additional cost of
+//! that cast (CR 601.2b): accepting the offer pays the printed cost AND the
+//! {R}{R} — three Mountains for a Bolt. The parser used to drop the clause.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -34,6 +38,27 @@ Whenever this creature attacks, you may cast target instant or sorcery card from
 by paying {R}{R} in addition to its other costs. If that spell would be put into a graveyard, \
 exile it instead. When you cast that spell, this creature gets +X/+0 until end of turn, where X \
 is that spell's mana value.";
+
+/// Lands `player` controls that are tapped — the mana the accepted cast
+/// took from the untapped basics the scenario supplied.
+fn tapped_lands(
+    runner: &engine::game::scenario::GameRunner,
+    player: engine::types::player::PlayerId,
+) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.controller == player
+                && object.tapped
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&engine::types::card_type::CoreType::Land)
+        })
+        .count()
+}
 
 fn power(
     runner: &mut engine::game::scenario::GameRunner,
@@ -81,10 +106,20 @@ fn ogre_is_pumped_by_the_mana_value_of_the_spell_cast_as_its_trigger_resolves() 
         "reach guard: nothing is pumped before the cast"
     );
 
+    assert_eq!(
+        tapped_lands(&runner, P0),
+        0,
+        "reach guard: nothing paid yet"
+    );
     accept_offer_and_pay(&mut runner);
     assert!(
         runner.state().stack.iter().any(|entry| entry.id == bolt),
         "reach guard: the accepted Bolt is on the stack"
+    );
+    assert_eq!(
+        tapped_lands(&runner, P0),
+        3,
+        "CR 601.2b: the Bolt's {{R}} plus the printed {{R}}{{R}} in addition — three Mountains"
     );
     assert_eq!(
         runner.state().phase,
@@ -153,6 +188,11 @@ fn a_sorcery_offered_by_the_attack_trigger_is_cast_in_combat() {
     assert!(
         runner.state().stack.iter().any(|entry| entry.id == edict),
         "the sorcery is on the stack in the declare attackers step (CR 608.2g)"
+    );
+    assert_eq!(
+        tapped_lands(&runner, P0),
+        4,
+        "{{1}}{{B}} plus the printed {{R}}{{R}} in addition — four lands"
     );
     assert_eq!(runner.state().phase, Phase::DeclareAttackers);
     runner.advance_until_stack_empty();

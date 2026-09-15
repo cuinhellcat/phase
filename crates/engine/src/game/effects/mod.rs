@@ -18346,6 +18346,7 @@ mod tests {
                         bounds: crate::types::ability::ResolutionCastWindow::UNBOUNDED,
                     },
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -36534,6 +36535,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
@@ -36601,6 +36603,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
             )
             .optional();
@@ -36723,6 +36726,7 @@ mod tests {
                         duration: Some(Duration::UntilEndOfTurn),
                         driver,
                         mana_spend_permission: None,
+                        additional_cost: None,
                     },
                     vec![],
                     ObjectId(900),
@@ -36757,6 +36761,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![],
             ObjectId(900),
@@ -36924,6 +36929,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
             vec![TargetRef::Object(spell)],
             source,
@@ -36962,6 +36968,7 @@ mod tests {
                     duration: None,
                     driver: CastFromZoneDriver::DuringResolution,
                     mana_spend_permission: None,
+                    additional_cost: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -37086,6 +37093,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         )
         .optional();
@@ -37207,6 +37215,7 @@ mod tests {
                 duration: None,
                 driver: CastFromZoneDriver::LingeringPermission,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         );
         let dig_def = AbilityDefinition::new(

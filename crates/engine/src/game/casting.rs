@@ -12360,9 +12360,11 @@ pub(super) struct ResolutionCastRequest {
 /// reject disposition, so a cast-time rejection can still bottom/hand the hit).
 /// The `request.cost` (`ResolutionCastCost`) drives the payment shape: `Free`
 /// zeroes the cost and continues on `Auto` (Cascade/Discover/Suspend);
-/// `FullCost` charges the card's live printed cost (`SelfManaCost`), forwards the
-/// any-type-mana concession onto the grant, and pauses on `Manual` payment so the
-/// caster spends mana (Quistis Trepe, Tinybones the Pickpocket — CR 609.4b);
+/// `FullCost` charges the card's live printed cost (`SelfManaCost`) plus any
+/// `additional_cost` the grant attached (Ogre Battlecaster's {R}{R} — CR 601.2b),
+/// forwards the any-type-mana concession onto the grant, and pauses on `Manual`
+/// payment so the caster spends mana (Quistis Trepe, Tinybones the Pickpocket —
+/// CR 609.4b);
 /// `AlternativeMana { cost }` stamps an explicit keyword-borrowed mana cost and
 /// drains the pool on `Auto` payment at that cost (The Face of Boe — CR 118.9). The
 /// returned `WaitingFor` falls through
@@ -12420,6 +12422,12 @@ pub(super) fn initiate_cast_during_resolution(
     } else {
         crate::types::ability::ExileGrantCostProvenance::Alternative
     };
+    // CR 601.2b: the additional mana cost a `FullCost` grant attaches (Ogre
+    // Battlecaster's "{R}{R} in addition to its other costs") is not part of
+    // the permission's cost — that is the card's own printed cost, restated —
+    // and is added to the prepared cast's base below, where a Fuse cast adds
+    // its second half.
+    let mut additional_cost = None;
     let (perm_cost, mana_spend_permission, payment_mode) = match cost {
         crate::types::ability::ResolutionCastCost::Free => {
             (ManaCost::zero(), None, CastPaymentMode::Auto)
@@ -12428,11 +12436,15 @@ pub(super) fn initiate_cast_during_resolution(
         // any-type concession rides the grant.
         crate::types::ability::ResolutionCastCost::FullCost {
             mana_spend_permission,
-        } => (
-            ManaCost::SelfManaCost,
-            mana_spend_permission,
-            CastPaymentMode::Manual,
-        ),
+            additional_cost: extra,
+        } => {
+            additional_cost = extra;
+            (
+                ManaCost::SelfManaCost,
+                mana_spend_permission,
+                CastPaymentMode::Manual,
+            )
+        }
         // CR 118.9 + CR 702.62a: explicit alternative mana cost borrowed from a
         // keyword (e.g. The Face of Boe's suspend cost). The cost is stamped
         // directly — not `SelfManaCost` — so the permission carries the exact
@@ -12496,6 +12508,23 @@ pub(super) fn initiate_cast_during_resolution(
         Some(casting_permission_index),
         CastingMode::Actual,
     )?;
+    // CR 601.2b + CR 601.2f: an additional cost joins the tax-inclusive base
+    // and the total is rebuilt from that base so every cost modifier applies
+    // to printed cost plus addition — the same order a Fuse cast's second half
+    // takes in `prepare_spell_cast_with_variant_override_inner`.
+    if let Some(extra) = additional_cost {
+        prepared.base_mana_cost = restrictions::add_mana_cost(&prepared.base_mana_cost, &extra);
+        let mut total = prepared.base_mana_cost.clone();
+        apply_all_cost_modifiers(
+            state,
+            player,
+            hit_card,
+            &mut total,
+            Some(prepared.casting_variant),
+            prepared.casting_permission_index,
+        );
+        prepared.mana_cost = total;
+    }
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }

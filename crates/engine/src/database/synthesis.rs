@@ -6713,6 +6713,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             // sorcery-speed timing bypass for an upkeep recast (issue #1520).
             driver: CastFromZoneDriver::DuringResolution,
             mana_spend_permission: None,
+            additional_cost: None,
         },
     )
     .optional();
@@ -9976,6 +9977,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 // the explicit discriminator preserves that.)
                 driver: CastFromZoneDriver::DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
             },
         )
         .optional();

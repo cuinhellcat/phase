@@ -294,6 +294,21 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
          with a real mana cost: Zemo's ceiling is frozen at resolution, issue #4943)"
     );
     assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.controller == P0
+                && object.tapped
+                && object
+                    .card_types
+                    .core_types
+                    .contains(&engine::types::card_type::CoreType::Land))
+            .count(),
+        1,
+        "Zemo's offer charges the printed cost and nothing more: one Mountain for a {{R}} Bolt"
+    );
+    assert_eq!(
         runner.state().phase,
         Phase::DeclareAttackers,
         "CR 608.2g: the cast happened inside the attack trigger's resolution, in combat"

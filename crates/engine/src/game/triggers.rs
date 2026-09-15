@@ -31753,6 +31753,7 @@ pub mod tests {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -31785,6 +31786,7 @@ pub mod tests {
             duration: None,
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
+            additional_cost: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),

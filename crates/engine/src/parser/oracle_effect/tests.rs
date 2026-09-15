@@ -25288,10 +25288,12 @@ fn parse_linked_exile_owner_may_cast_that_card_is_owner_scoped_resolution_cast()
             duration,
             driver,
             mana_spend_permission,
+            additional_cost,
         } = &*def.effect
         else {
             panic!("{subject}: expected CastFromZone, got {:?}", def.effect);
         };
+        assert!(additional_cost.is_none(), "{subject}");
         assert_eq!(target, &owned_linked_card, "{subject}");
         assert!(*without_paying_mana_cost, "{subject}");
         assert_eq!(mode, &Cast, "{subject}");
@@ -36306,6 +36308,7 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
                 mode: Cast,
                 driver: DuringResolution,
                 mana_spend_permission: None,
+                additional_cost: None,
                 ..
             }
         ),
@@ -55743,7 +55746,7 @@ fn filter_cast_driver_authority_is_duration_blind() {
     // routed by the resolver's own shape guard; the driver is not changed for
     // it here.
     assert_eq!(d(Cast, true, false, false, true), LingeringPermission);
-    // Rat in the Hat's "this turn" is stamped afterwards and degrades the
+    // A stated lifetime ("this turn") is stamped afterwards and degrades the
     // driver; that seam is `with_lingering_duration`, not this authority.
     // An alternative cost on a chosen graveyard card is not the printed-cost
     // form.
@@ -55773,10 +55776,69 @@ fn a_paid_chosen_graveyard_cast_is_lowered_as_a_during_resolution_cast() {
         driver_of("You may cast target red instant or sorcery card from your graveyard."),
         DuringResolution
     );
-    // Rat in the Hat: a stated lifetime is a later priority window (CR 611.2a).
+    // A stated lifetime is a later priority window (CR 611.2a).
     assert_eq!(
         driver_of("You may cast target creature card from your graveyard this turn."),
         LingeringPermission
+    );
+}
+
+/// CR 601.2b + CR 118.8 (issue #8775): "by paying {R}{R} in addition to its
+/// other costs" is an additional mana cost of the offered cast, carried on
+/// the `CastFromZone`; the same clause with a stated lifetime would be a
+/// lingering permission with no slot for it and is refused, not lowered
+/// without the cost.
+#[test]
+fn ogres_additional_cost_rides_the_during_resolution_cast() {
+    let chain = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {R}{R} in \
+         addition to its other costs.",
+        AbilityKind::Spell,
+    );
+    let Effect::CastFromZone {
+        driver,
+        additional_cost,
+        without_paying_mana_cost,
+        alt_ability_cost,
+        ..
+    } = &*chain.effect
+    else {
+        panic!("expected CastFromZone, got: {:?}", chain.effect);
+    };
+    assert_eq!(*driver, DuringResolution);
+    assert_eq!(
+        *additional_cost,
+        Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        }),
+        "the {{R}}{{R}} is an additional cost, kept on the cast"
+    );
+    assert!(!without_paying_mana_cost && alt_ability_cost.is_none());
+
+    let unrepresentable = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {X} in \
+         addition to its other costs.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*unrepresentable.effect, Effect::Unimplemented { name, .. }
+            if name == "unrepresentable_additional_cost"),
+        "an {{X}} additional cost has no choice point on this cast: refused, got {:?}",
+        unrepresentable.effect
+    );
+
+    let refused = parse_effect_chain(
+        "You may cast target instant or sorcery card from your graveyard by paying {R}{R} in \
+         addition to its other costs this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*refused.effect, Effect::Unimplemented { name, .. }
+            if name == crate::types::ability::ADDITIONAL_COST_ON_LINGERING_CAST_GAP),
+        "a stated lifetime makes this a lingering permission, which cannot carry the cost: \
+         refused, got {:?}",
+        refused.effect
     );
 }
 

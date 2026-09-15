@@ -2322,11 +2322,14 @@ pub(super) fn handle_resolution_choice(
             }
         }
         // CR 608.2g + CR 609.4b: Paid during-resolution graveyard cast (Quistis
-        // Trepe, Tinybones the Pickpocket). Accept → cast the card at its real
-        // printed cost through `initiate_cast_during_resolution` with
-        // `ResolutionCastCost::FullCost`, which opens a manual mana-payment window
-        // and rides the any-type concession onto the grant. Decline → the card
-        // stays in the graveyard and resolution continues.
+        // Trepe, Tinybones the Pickpocket with the any-type concession; Ogre
+        // Battlecaster, Helmut Zemo, Toshiro Umezawa at normal mana — issue
+        // #8775). Accept → cast the card at its real printed cost, plus any
+        // `additional_cost` the grant attached (CR 601.2b), through
+        // `initiate_cast_during_resolution` with `ResolutionCastCost::FullCost`,
+        // which opens a manual mana-payment window and rides the any-type
+        // concession onto the grant. Decline → the card stays in the graveyard
+        // and resolution continues.
         (
             WaitingFor::CastOffer {
                 player,
@@ -2337,6 +2340,7 @@ pub(super) fn handle_resolution_choice(
                         graveyard_replacement,
                         cast_transformed,
                         constraint,
+                        additional_cost,
                     },
             },
             GameAction::GraveyardPaidCastChoice { choice },
@@ -2360,6 +2364,7 @@ pub(super) fn handle_resolution_choice(
                         graveyard_replacement,
                         cost: crate::types::ability::ResolutionCastCost::FullCost {
                             mana_spend_permission,
+                            additional_cost,
                         },
                     },
                     events,
