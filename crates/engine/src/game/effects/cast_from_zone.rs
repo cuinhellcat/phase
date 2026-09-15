@@ -429,6 +429,15 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
+    // CR 608.2h: a per-spell ceiling that reads the game ("mana value less
+    // than or equal to this creature's power" — Dreadhorde Arcanist, Helmut
+    // Zemo) is determined ONCE, as this effect is applied, and every route
+    // below consumes the frozen value. The two during-resolution single-card
+    // routes used to carry the live `Ref` onto the cast, where it was
+    // re-read at finalization without the source context and resolved to 0 —
+    // so a Bolt with a real mana cost was rejected and stayed in the
+    // graveyard (issue #4943; the lingering route already froze it).
+    let constraint = freeze_cast_permission_constraint(state, ability, constraint);
 
     // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
     // reference whose members the chain published, so it binds INTRINSICALLY

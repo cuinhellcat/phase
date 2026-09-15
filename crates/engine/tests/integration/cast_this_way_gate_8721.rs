@@ -37,7 +37,7 @@ use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -259,6 +259,10 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     }
     let bolt = scenario
         .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -286,7 +290,8 @@ fn zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast() {
     accept_offer_and_pay(&mut runner);
     assert!(
         runner.state().stack.iter().any(|entry| entry.id == bolt),
-        "reach guard: the accepted card is on the stack, cast as the trigger resolved"
+        "reach guard: the accepted card is on the stack, cast as the trigger resolved (a Bolt \
+         with a real mana cost: Zemo's ceiling is frozen at resolution, issue #4943)"
     );
     assert_eq!(
         runner.state().phase,

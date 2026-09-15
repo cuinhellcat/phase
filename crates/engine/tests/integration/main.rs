@@ -256,6 +256,7 @@ mod dragonstorm_forecaster_named_or_tutor;
 mod draw_delivery_preview;
 mod draw_from_general_post_replacement;
 mod draw_preflight_matches_live_pipeline;
+mod dreadhorde_arcanist_ceiling_4943;
 mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;
