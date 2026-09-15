@@ -2341,6 +2341,7 @@ pub(super) fn handle_resolution_choice(
                         cast_transformed,
                         constraint,
                         additional_cost,
+                        source,
                     },
             },
             GameAction::GraveyardPaidCastChoice { choice },
@@ -2372,6 +2373,16 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 608.2g decline: card stays in the graveyard; nothing is cast.
+                // CR 603.7: the "when you cast that spell" trigger the granting
+                // resolution installed ahead of this offer (its inline tail,
+                // `effects/mod.rs`) waits for the cast the offer would have made;
+                // withdrawn here, since it is keyed to the CARD and would otherwise
+                // fire on a later cast of that card by another route this turn
+                // (Helmut Zemo declined, the Bolt then cast under Kess). An
+                // accepted offer whose cast fails to initiate returns the error
+                // above and leaves the offer open, so the decline still reaches
+                // this withdrawal.
+                withdraw_declined_offer_cast_triggers(state, source, hit_card);
                 ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
             }
         }
@@ -8340,6 +8351,45 @@ fn finish_effect_zone_put_at_library_position(
         subject: None,
     });
     finish_with_continuation(state, player, events);
+}
+
+/// CR 603.7 + CR 608.2g: withdraw the one-shot "when you cast that spell"
+/// delayed trigger(s) `source`'s granting resolution installed for `card`,
+/// after the during-resolution offer to cast that card was declined. Matches
+/// exactly the shape that tail installs — a `WhenNextEvent` on `SpellCast`
+/// bound to the chosen card (`SpecificObject`) — from the same source; every
+/// other delayed trigger stays. The withdrawn triggers are booked as
+/// `Removed`, the disposition the cleanup prune uses for an unfired
+/// stated-lifetime trigger's sibling cases.
+fn withdraw_declined_offer_cast_triggers(state: &mut GameState, source: ObjectId, card: ObjectId) {
+    use crate::types::ability::{DelayedTriggerCondition, TargetFilter};
+    use crate::types::triggers::TriggerMode;
+    let waits_for_this_cast = |trigger: &crate::types::game_state::DelayedTrigger| {
+        trigger.source_id == source
+            && trigger.one_shot
+            && matches!(
+                &trigger.condition,
+                DelayedTriggerCondition::WhenNextEvent { trigger: definition, .. }
+                    if definition.mode == TriggerMode::SpellCast
+                        && definition.valid_card == Some(TargetFilter::SpecificObject { id: card })
+            )
+    };
+    let mut survivors = Vec::new();
+    let mut withdrawn = Vec::new();
+    for trigger in std::mem::take(&mut state.delayed_triggers) {
+        if waits_for_this_cast(&trigger) {
+            withdrawn.push(trigger);
+        } else {
+            survivors.push(trigger);
+        }
+    }
+    state.delayed_triggers = survivors;
+    for trigger in withdrawn {
+        super::lifecycle::record_delayed_terminal(
+            trigger.provenance.firing(),
+            super::lifecycle::DelayedTerminalDisposition::Removed,
+        );
+    }
 }
 
 fn finish_with_continuation(

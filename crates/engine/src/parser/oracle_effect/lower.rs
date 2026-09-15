@@ -6940,10 +6940,10 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 ///
 /// And `ThisTurn` rather than a persistent lifetime: the offer is answered
 /// within this resolution, so the cast it waits for happens this turn or not
-/// at all. A declined offer leaves the one-shot trigger armed on the chosen
-/// card until cleanup; it would fire if that card were cast this turn by some
-/// other route (a second attack trigger choosing the same card, another
-/// permission) — an imprecision the lingering model shared.
+/// at all. A declined offer withdraws the trigger again
+/// (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`) —
+/// keyed to the card, it would otherwise fire on a cast of that card by some
+/// other route this turn.
 ///
 /// Two prefixes, not three: `"if you cast it this way, "` has ZERO corpus
 /// members (26 cards print `"if you cast a spell this way, "`, 7 print

@@ -224,6 +224,69 @@ fn zemo_declining_the_offer_pays_out_no_counter_and_leaves_no_permission() {
         "a declined offer leaves no lingering permission: the cast happens as the trigger \
          resolves or not at all (CR 608.2g)"
     );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the \"if you cast a spell this way\" trigger installed ahead of the offer is \
+         withdrawn with the decline — it is keyed to the card, and would otherwise fire on \
+         a cast of that card by another route this turn"
+    );
+}
+
+/// The route the withdrawal exists for: Zemo's offer declined, the same Bolt
+/// then cast this turn under Kess, Dissident Mage's standing permission. That
+/// cast was NOT made "this way" (CR 608.2c), so no counter — a trigger left
+/// armed on the card would have placed one.
+#[test]
+fn a_card_cast_by_another_route_after_the_declined_offer_pays_out_no_counter() {
+    const KESS: &str = "Flying\nOnce during each of your turns, you may cast an instant or \
+sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, \
+exile it instead.";
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let zemo = scenario
+        .add_creature_from_oracle(P0, "Helmut Zemo, Mastermind", 2, 2, HELMUT_ZEMO)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Kess, Dissident Mage", 3, 4, KESS);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let bolt = scenario
+        .add_spell_to_graveyard(P0, "Lightning Bolt", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    to_declare_attackers(&mut runner, P0);
+    runner
+        .declare_attackers(&[(zemo, AttackTarget::Player(P1))])
+        .expect("Zemo must be a legal attacker");
+    settle_attack_trigger(&mut runner, true);
+    assert_eq!(
+        offered_card(&runner),
+        Some(bolt),
+        "reach guard: Zemo's offer is open"
+    );
+    decline_offer(&mut runner);
+
+    runner
+        .cast(bolt)
+        .target_players(&[P1])
+        .try_resolve()
+        .expect("the Bolt is cast from the graveyard under Kess's permission");
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Exile,
+        "reach guard: the Bolt was cast (Kess exiles it afterwards)"
+    );
+    assert_eq!(
+        p1p1(&runner, zemo),
+        0,
+        "a cast under another permission is not a cast \"this way\": no counter"
+    );
 }
 
 /// CR 603.7 (issue #8721): the positive direction, and the DISCRIMINATING half of

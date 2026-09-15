@@ -9524,6 +9524,14 @@ pub enum CastOfferKind {
         /// is accepted. `None` for every other paid offer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_cost: Option<crate::types::mana::ManaCost>,
+        /// CR 603.7: the source of the granting ability. Its "when you cast
+        /// that spell" delayed trigger is installed before the offer is
+        /// answered (the resolution's inline tail) and is withdrawn again when
+        /// the offer is declined, so it cannot fire on a later cast of the same
+        /// card by another route. The zero sentinel for saved states predating
+        /// the field withdraws nothing.
+        #[serde(default = "zero_object_id")]
+        source: ObjectId,
     },
 }
 

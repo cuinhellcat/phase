@@ -15084,12 +15084,12 @@ fn resolve_chain_body(
             // chosen card (CR 603.7), and the cast the offer performs is the
             // event it waits for — installed after the cast it would never fire.
             // It reads nothing the unanswered offer decides: its referent is the
-            // chosen target, bound when the trigger went on the stack. A declined
-            // offer leaves that one-shot trigger armed on the chosen card until
-            // cleanup: it is keyed to the CARD, not to the offer, so it would fire
-            // if that card were cast this turn by another route (a second attack
-            // trigger choosing it again, another permission) — an imprecision
-            // the lingering model shared. Pinned by
+            // chosen target, bound when the trigger went on the stack. The
+            // trigger is keyed to the CARD, not to the offer, so a declined
+            // offer WITHDRAWS it again
+            // (`engine_resolution_choices::withdraw_declined_offer_cast_triggers`);
+            // otherwise it would fire on a cast of that card by another route
+            // this turn (Zemo declined, the Bolt then cast under Kess). Pinned by
             // `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`
             // and `ogre_battlecaster_8775`.
             //
