@@ -1067,6 +1067,7 @@ mod painters_servant_multi_zone_additive_color;
 mod palace_jailer;
 mod palisade_giant_redirect;
 mod panther_habit_equipped_prevention_scope;
+mod parent_target_slot_delayed_condition_8758;
 mod parent_target_slot_illegal_at_resolution;
 mod pariah_attached_redirect;
 mod part_in_friendship_conditional_reveal;
