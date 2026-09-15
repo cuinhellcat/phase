@@ -990,10 +990,14 @@ fn bind_contextual_filter_to_condition(
 /// only composites in which a slot was actually bound (the returned flag), so
 /// a filter that carries no slot leaves this function exactly as it came.
 ///
-/// Named and left unpinned, zero corpus carriers in a delayed condition (walk
-/// of every `CreateDelayedTrigger.condition`): a `Not` over a slot that
-/// resolves to a PLAYER stays `Not { SpecificPlayer }` where the normaliser
-/// would say `Any`.
+/// A `Not` over a slot that resolves to a PLAYER stays `Not { SpecificPlayer }`
+/// — "every player but that one" — as does an `Or` or `And` over live player
+/// slots. The object axis has always evaluated those shapes; the player axis
+/// (`trigger_matchers::player_matches_filter`) walks `Not`/`Or`/`And` too,
+/// so the shape is judged and not read as the wildcard. Zero corpus carriers
+/// in a delayed condition (walk of every
+/// `CreateDelayedTrigger.condition`); pinned by
+/// `parent_target_slot_delayed_condition_8758::a_not_over_a_bound_player_slot_excludes_only_that_player`.
 fn bind_parent_slots_from_root(
     filter: &mut TargetFilter,
     resolve_slot: &dyn Fn(usize) -> Option<TargetRef>,

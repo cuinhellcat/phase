@@ -28,14 +28,16 @@
 //! slot condition, so the compound cases below rewrite Stolen Uniform's parsed
 //! chain — the condition and, to make a firing observable without an attach,
 //! the delayed effect (draw a card) — and cast the result through the ordinary
-//! pipeline.
+//! pipeline. The player-axis case grafts that rewritten clause onto "target
+//! player draws a card", so the slot resolves to a player and the bound leaf
+//! is matched by `trigger_matchers::player_matches_filter`.
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, EffectKind, QuantityExpr,
-    TargetFilter, TriggerDefinition,
+    TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -44,9 +46,12 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
-use crate::rules::{cast_spell_action, drive_with_response, PriorityResponse};
+use crate::rules::{
+    cast_spell_action, drive_with_response, drive_with_target_refs, PriorityResponse,
+};
 
 const STOLEN_UNIFORM: &str = "Choose target creature you control and target Equipment. Gain \
 control of that Equipment until end of turn. Attach it to the chosen creature. When you lose \
@@ -128,18 +133,20 @@ fn installed_valid_card(runner: &GameRunner) -> Option<TargetFilter> {
     installed_valid_cards(runner).map(|(primary, _)| primary)
 }
 
+/// The `CreateDelayedTrigger` instruction of a parsed chain, if any.
+fn delayed_clause(ability: &mut AbilityDefinition) -> Option<&mut AbilityDefinition> {
+    if matches!(*ability.effect, Effect::CreateDelayedTrigger { .. }) {
+        return Some(ability);
+    }
+    ability.sub_ability.as_deref_mut().and_then(delayed_clause)
+}
+
 /// Stolen Uniform's parsed chain with its `CreateDelayedTrigger` clause
 /// rewritten: `rewrite` edits the condition, and the delayed effect becomes
 /// "draw a card" so a firing is observable whether or not the attach happened.
 fn stolen_uniform_with_condition(
     rewrite: impl FnOnce(&mut DelayedTriggerCondition),
 ) -> Vec<AbilityDefinition> {
-    fn delayed_clause(ability: &mut AbilityDefinition) -> Option<&mut AbilityDefinition> {
-        if matches!(*ability.effect, Effect::CreateDelayedTrigger { .. }) {
-            return Some(ability);
-        }
-        ability.sub_ability.as_deref_mut().and_then(delayed_clause)
-    }
     let mut parsed = parse_oracle_text(
         STOLEN_UNIFORM,
         "Stolen Uniform",
@@ -186,6 +193,56 @@ fn when_next_event(
 
 fn slot(index: usize) -> TargetFilter {
     TargetFilter::ParentTargetSlot { index }
+}
+
+/// A spell whose only declared target is a player: slot 0 of its chain
+/// resolves to a `TargetRef::Player`.
+const PROBE: &str = "Target player draws a card.";
+
+/// "Target player draws a card" followed by Stolen Uniform's delayed clause,
+/// its lose-control trigger swapped for a becomes-target trigger whose
+/// `valid_subject_player` is `subject`: "when a player matching `subject`
+/// next becomes the target of a spell or ability this turn, draw a card".
+fn probe_with_subject(subject: TargetFilter) -> Vec<AbilityDefinition> {
+    let mut uniform = stolen_uniform_with_condition(|condition| {
+        let (trigger, _) = when_next_event(condition);
+        let mut becomes_target = TriggerDefinition::new(TriggerMode::BecomesTarget);
+        becomes_target.valid_subject_player = Some(subject);
+        *trigger = becomes_target;
+    });
+    let mut clause = delayed_clause(&mut uniform[0])
+        .expect("reach guard: the rewritten chain still ends in CreateDelayedTrigger")
+        .clone();
+    clause.sub_ability = None;
+    let mut parsed = parse_oracle_text(PROBE, "Probe", &[], &["Instant".to_string()], &[]);
+    let root = parsed
+        .abilities
+        .first_mut()
+        .expect("reach guard: the probe parses to one spell ability");
+    assert!(
+        root.sub_ability.is_none(),
+        "reach guard: the probe is a single instruction"
+    );
+    root.sub_ability = Some(Box::new(clause));
+    parsed.abilities
+}
+
+/// The primary trigger's `valid_subject_player` of the one installed
+/// `WhenNextEvent` delayed trigger, or `None` when nothing is installed.
+fn installed_subject_player(runner: &GameRunner) -> Option<TargetFilter> {
+    let installed = runner.state().delayed_triggers.first()?;
+    let DelayedTriggerCondition::WhenNextEvent { trigger, .. } = &installed.condition else {
+        panic!(
+            "the probe's delayed trigger is a WhenNextEvent, found {:?}",
+            installed.condition
+        );
+    };
+    Some(
+        trigger
+            .valid_subject_player
+            .clone()
+            .expect("the becomes-target condition carries a valid_subject_player filter"),
+    )
 }
 
 /// Two creatures you control, an Equipment the opponent controls, Stolen
@@ -584,5 +641,86 @@ fn an_or_trigger_over_a_dead_slot_too_installs_nothing() {
         installed_valid_cards(&board.runner),
         None,
         "a delayed trigger none of whose alternatives can match installs nothing"
+    );
+}
+
+/// CR 608.2c ("read the whole text") on the player axis: the slot resolves
+/// to the targeted player and the condition keeps its shape,
+/// `Not { SpecificPlayer }` — "a player other than that one". Targeting the
+/// named player again does NOT fire it; targeting
+/// any other player does. Before the player-axis matcher walked `Not`, the
+/// composed filter fell through to the wildcard and the first targeting of
+/// ANY player — the excluded one included — fired the trigger.
+#[test]
+fn a_not_over_a_bound_player_slot_excludes_only_that_player() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let probe = {
+        let mut card = scenario.add_spell_to_hand(P0, "Probe", true);
+        for ability in probe_with_subject(TargetFilter::Not {
+            filter: Box::new(slot(0)),
+        }) {
+            card.with_ability_definition(ability);
+        }
+        card.id()
+    };
+    let at_them = scenario
+        .add_spell_to_hand_from_oracle(P0, "Probe", true, PROBE)
+        .id();
+    let at_me = scenario
+        .add_spell_to_hand_from_oracle(P0, "Probe", true, PROBE)
+        .id();
+    // Libraries to draw from (CR 704.5b): the probes make the opponent draw
+    // twice and you once, and a firing draws once more.
+    for _ in 0..3 {
+        scenario.add_spell_to_library_top(P0, "Filler", true);
+        scenario.add_spell_to_library_top(P1, "Filler", true);
+    }
+    let mut runner = scenario.build();
+
+    let cast = cast_spell_action(&runner, probe);
+    let events = drive_with_target_refs(&mut runner, cast, &[TargetRef::Player(P1)]);
+    assert!(
+        resolved(&events, EffectKind::CreateDelayedTrigger, probe),
+        "reach guard: the installing clause ran"
+    );
+    assert_eq!(
+        installed_subject_player(&runner),
+        Some(TargetFilter::Not {
+            filter: Box::new(TargetFilter::SpecificPlayer { id: P1 }),
+        }),
+        "the player slot is bound to the targeted player and keeps its `Not`"
+    );
+    assert!(
+        runner.state().waiting_for == WaitingFor::Priority { player: P0 }
+            && runner.state().phase == Phase::PreCombatMain,
+        "reach guard: you hold priority again in your main phase"
+    );
+
+    let before = hand_size(&runner, P0);
+    let cast = cast_spell_action(&runner, at_them);
+    drive_with_target_refs(&mut runner, cast, &[TargetRef::Player(P1)]);
+    assert_eq!(
+        hand_size(&runner, P0),
+        before - 1,
+        "targeting the excluded player must not fire the trigger"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "the one-shot trigger must still be armed"
+    );
+
+    let before = hand_size(&runner, P0);
+    let cast = cast_spell_action(&runner, at_me);
+    drive_with_target_refs(&mut runner, cast, &[TargetRef::Player(P0)]);
+    assert_eq!(
+        hand_size(&runner, P0),
+        before - 1 + 1 + 1,
+        "targeting any other player fires the trigger: the probe's draw and the trigger's"
+    );
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "the one-shot trigger fired and left"
     );
 }
