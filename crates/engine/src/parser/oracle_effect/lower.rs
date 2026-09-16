@@ -35,16 +35,16 @@ use crate::types::ability::{
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, Comparator, ConjureSource, ContinuousModification, ControllerRef,
     DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, ManaSpendPermission,
-    MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
-use crate::types::statics::{CostModifyMode, StaticMode};
+use crate::types::statics::CostModifyMode;
 use crate::types::zones::{EtbTapState, Zone};
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -987,72 +987,6 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
             *count = QuantityExpr::Fixed { value: 0 };
         }
     }
-}
-
-pub(super) fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
-    let Effect::GenericEffect {
-        static_abilities, ..
-    } = &clause.parsed.effect
-    else {
-        return false;
-    };
-    if static_abilities.len() != 1
-        || static_abilities[0].mode
-            != (StaticMode::SpendManaAsAnyColor {
-                spell_filter: None,
-                activation_source_filter: None,
-            })
-    {
-        return false;
-    }
-
-    let lower = clause
-        .source
-        .fragment()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let parsed = all_consuming((
-        opt(alt((
-            tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
-            tag("if you cast it this way, "),
-        ))),
-        tag("you may spend mana as though it were mana of any "),
-        alt((tag("color"), tag("type"))),
-        tag(" to cast "),
-        alt((
-            tag("it"),
-            tag("that spell"),
-            tag("a spell this way"),
-            tag("spells this way"),
-            tag("those spells"),
-        )),
-        opt(tag(".")),
-    ))
-    .parse(lower.trim())
-    .is_ok();
-    parsed
-}
-
-pub(super) fn attach_any_color_mana_rider_to_previous_play_from_exile(
-    defs: &mut [AbilityDefinition],
-) -> bool {
-    let Some(previous) = defs.last_mut() else {
-        return false;
-    };
-    let Effect::GrantCastingPermission {
-        permission:
-            CastingPermission::PlayFromExile {
-                mana_spend_permission,
-                ..
-            },
-        ..
-    } = previous.effect.as_mut()
-    else {
-        return false;
-    };
-
-    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
-    true
 }
 
 /// CR 614.1a + CR 608.2n: Fold a "if that spell would be put into a graveyard,

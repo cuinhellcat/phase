@@ -14308,8 +14308,8 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
 /// surfacing. No new variant needed — the existing primitives compose.
 ///
 /// The optional ", and you may spend mana as though it were mana of any
-/// color to cast those spells" conjunct folds into the same permission via
-/// `mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor)`,
+/// color|type to cast those spells" conjunct folds into the same permission
+/// via `mana_spend_permission` (`parse_any_mana_word` decides the variant),
 /// matching the wire-up used by `try_parse_exile_play_grant_with_any_mana`.
 fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (permission_text, explicit_duration) = strip_trailing_duration(tp.original);
@@ -14388,14 +14388,14 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
         // Trailing text that is not the recognized conjunct — reject so the
         // catch-all SpendManaAsAnyColor parse does not consume an unrelated
         // suffix and silently drop the cast-permission half.
-        nom_on_lower(rest_orig, rest_lower, |i| {
+        let (permission, _) = nom_on_lower(rest_orig, rest_lower, |i| {
             let (i, _) = tag(", and you may spend mana as though it were mana of any ").parse(i)?;
-            let (i, _) = alt((tag("color"), tag("type"))).parse(i)?;
+            let (i, permission) = parse_any_mana_word(i)?;
             let (i, _) = tag(" to cast those spells").parse(i)?;
             let (i, _) = eof.parse(i)?;
-            Ok((i, ()))
+            Ok((i, permission))
         })?;
-        Some(ManaSpendPermission::AnyTypeOrColor)
+        Some(permission)
     };
 
     let clause = parsed_clause(Effect::GrantCastingPermission {
@@ -14503,12 +14503,16 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
     ))
     .parse(rest)
     .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(", and ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(", and mana of any ")
+        .parse(rest)
+        .ok()?;
+    let (rest, mana_spend_permission) = parse_any_mana_word(rest).ok()?;
+    // "… to cast that spell" (Hostage Taker), "… to cast it" (Court of
+    // Locthwain, Blightwing Bandit), "… to cast a spell this way".
     let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("mana of any type can be spent to cast that spell"),
-        tag("mana of any color can be spent to cast that spell"),
-        tag("mana of any type can be spent to cast a spell this way"),
-        tag("mana of any color can be spent to cast a spell this way"),
+        tag::<_, _, OracleError<'_>>(" can be spent to cast that spell"),
+        tag(" can be spent to cast it"),
+        tag(" can be spent to cast a spell this way"),
     ))
     .parse(rest)
     .ok()?;
@@ -14523,7 +14527,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             frequency: CastFrequency::Unlimited,
             source_id: None,
             exiled_by_ability_controller: None,
-            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            mana_spend_permission: Some(mana_spend_permission),
             card_filter: None,
             single_use_group: None,
             single_use: false,
@@ -14541,10 +14545,10 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
 fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // CR 118.9 + CR 609.4b: The any-mana conjunct must win over the bare
-    // per-grantee branch so "they may play that card ... mana of any type can
-    // be spent to cast a spell this way" (Gonti, Night Minister) keeps
-    // `mana_spend_permission: AnyTypeOrColor`.
+    // CR 118.14 + CR 609.4b: The any-mana conjunct must win over the bare
+    // per-grantee branch so "you may cast that card for as long as it remains
+    // exiled, and mana of any type can be spent to cast that spell" (Hostage
+    // Taker, Thief of Sanity) keeps `mana_spend_permission: AnyTypeOrColor`.
     if let Some(clause) = try_parse_exile_play_grant_with_any_mana(tp) {
         return Some(clause);
     }
@@ -14825,15 +14829,18 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
                 value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
             ))
             .parse(input)?;
-            // CR 609.4b + CR 601.2: optional trailing "and mana of any type can
-            // be spent to cast that spell" scopes the any-type/any-color mana
-            // permission to the granted cast (Black Widow, Super Spy).
-            let (input, mana_spend_permission) = opt(value(
-                ManaSpendPermission::AnyTypeOrColor,
-                (
-                    tag(" and mana of any "),
-                    alt((tag("type"), tag("color"))),
-                    tag(" can be spent to cast that spell"),
+            // CR 118.14 + CR 609.4b: optional trailing "[,] and mana of any
+            // type can be spent to cast that spell|it" scopes the mana
+            // concession to the granted cast (Black Widow, Super Spy; Reno and
+            // Rude with the comma and "it").
+            let (input, mana_spend_permission) = opt(preceded(
+                (opt(tag(",")), tag(" and mana of any ")),
+                terminated(
+                    parse_any_mana_word,
+                    (
+                        tag(" can be spent to cast "),
+                        alt((tag("that spell"), tag("it"))),
+                    ),
                 ),
             ))
             .parse(input)?;
@@ -18594,9 +18601,10 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     }
 
     // CR 609.4b: "spend mana as though it were mana of any [color|type] to cast ..." /
-    // "mana of any type can be spent to cast ..." — grants any-type/any-color mana
-    // permission for a cast-from-exile card (Outrageous Robbery's "any type" rider).
-    // Produce a GenericEffect with SpendManaAsAnyColor static.
+    // "mana of any type can be spent to cast ..." with no cast grant before it
+    // in the chunk sequence (a rider after a grant is folded onto the grant by
+    // `try_parse_mana_spend_rider` earlier). Produce a GenericEffect with
+    // SpendManaAsAnyColor static.
     // Variants: "spend colorless mana as though..." / "mana of any color to cast..."
     {
         let lower = text.to_lowercase();
@@ -28690,9 +28698,7 @@ fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext)
         .parse(body)
         .ok()?;
     let (rest, _) = tag::<_, _, E>(", and mana of any ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("type"), tag("color")))
-        .parse(rest)
-        .ok()?;
+    let (rest, concession) = parse_any_mana_word(rest).ok()?;
     let (rest, _) = tag::<_, _, E>(" can be spent to cast ").parse(rest).ok()?;
     let (rest, _) = alt((tag::<_, _, E>("that spell"), tag("a spell this way")))
         .parse(rest)
@@ -28715,8 +28721,8 @@ fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext)
     else {
         return None;
     };
-    // CR 609.4b: scope the any-type concession to this specific granted cast.
-    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
+    // CR 118.14 + CR 609.4b: scope the concession to this specific granted cast.
+    *mana_spend_permission = Some(concession);
     // CR 608.2g: "cast target ... from a graveyard" with no duration is a
     // during-resolution paid cast, not a lingering permission.
     *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
@@ -28933,6 +28939,184 @@ pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::abili
         trimmed_lower
     };
     parse_alt_ability_cost_rider(after_prefix)
+}
+
+/// CR 609.4b: what a mana rider after a cast grant asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManaSpendRider {
+    /// "spend mana as though it were mana of any color/type …" / "Mana of any
+    /// type can be spent …" — the concession `ManaSpendPermission` models.
+    Concession(ManaSpendPermission),
+    /// "spend **colorless** mana as though …" (Abstruse Appropriation), "spend
+    /// mana **from snow sources** as though …" (Draugr Necromancer): only one
+    /// kind of mana is relaxed. `ManaSpendPermission` has no such shape, and
+    /// widening it to every mana would grant what the card does not print.
+    SingleKind,
+}
+
+/// The gap name for a `ManaSpendRider::SingleKind` rider after a cast grant:
+/// the grant itself lowers, the rider is an honest `Unimplemented` instead of
+/// a bare board-wide static nothing at cast time reads.
+pub(crate) const UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP: &str =
+    "unrepresentable_mana_spend_concession";
+
+/// CR 609.4b + CR 106.1a/106.1b: the word after "mana of any " — "color"
+/// names the five colors, "type" the six mana types (colorless included), so
+/// the two words are two permissions.
+fn parse_any_mana_word(input: &str) -> OracleResult<'_, ManaSpendPermission> {
+    alt((
+        value(ManaSpendPermission::AnyColor, tag("color")),
+        value(ManaSpendPermission::AnyTypeOrColor, tag("type")),
+    ))
+    .parse(input)
+}
+
+/// CR 118.14 + CR 609.4b: The any-color / any-type mana rider that follows a cast grant —
+/// "[you may] spend mana as though it were mana of any color to cast that
+/// spell" (Siphon Insight, Robber of the Rich), "Mana of any type can be spent
+/// to cast spells this way" (Black Cat, Cunning Thief, The Madcap Jester).
+/// The rider states no permission of its own: CR 118.14 has it apply only to
+/// mana spent casting through the PRECEDING grant, so it is a `PriorModifier`,
+/// not an effect. The word after "any" decides the permission
+/// (`parse_any_mana_word`); a rider that relaxes only one kind of mana is
+/// reported as `ManaSpendRider::SingleKind`.
+pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
+    type Vbe<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+    let trimmed = lower.trim().trim_end_matches('.');
+    let cast_object = || {
+        alt((
+            tag::<_, _, Vbe>("that spell"),
+            tag("those spells"),
+            tag("spells this way"),
+            tag("spells cast this way"),
+            tag("a spell this way"),
+            tag("them"),
+            tag("it"),
+        ))
+    };
+    // "If you cast a spell this way, mana of any type can be spent to cast it"
+    // (Bloodsoaked Insight): the gate restates what the rider already means —
+    // it applies only to a cast made through the grant — so it is dropped, as
+    // `try_parse_alt_cost_rider` drops the same prefix.
+    let (trimmed, _) = opt(alt((
+        tag::<_, _, Vbe>("if you cast a spell this way, "),
+        tag("if you cast it this way, "),
+    )))
+    .parse(trimmed)
+    .ok()?;
+    // "spend <what> as though it were mana of any …": "spend mana" is the
+    // concession the engine models; any other subject ("colorless mana",
+    // "mana from snow sources") relaxes a single kind.
+    let (rest, rider) = alt((
+        map(
+            preceded(
+                (
+                    opt(tag::<_, _, Vbe>("you may ")),
+                    tag("spend mana as though it were mana of any "),
+                ),
+                parse_any_mana_word,
+            ),
+            ManaSpendRider::Concession,
+        ),
+        value(
+            ManaSpendRider::SingleKind,
+            (
+                opt(tag::<_, _, Vbe>("you may ")),
+                tag("spend "),
+                take_until(" as though it were mana of any "),
+                tag(" as though it were mana of any "),
+                parse_any_mana_word,
+            ),
+        ),
+        map(
+            preceded(
+                tag("mana of any "),
+                terminated(parse_any_mana_word, tag(" can be spent")),
+            ),
+            ManaSpendRider::Concession,
+        ),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    let (rest, _) = tag::<_, _, Vbe>(" to cast ").parse(rest).ok()?;
+    let (rest, _) = cast_object().parse(rest).ok()?;
+    eof::<_, Vbe>(rest).ok()?;
+    Some(rider)
+}
+
+/// CR 609.4b: Does the most recently emitted clause (descending its
+/// `sub_ability` chain) grant a cast the mana rider can attach to — a
+/// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` that carries
+/// no `mana_spend_permission` yet? The rider only ever modifies the grant it
+/// follows, so a rider with no such antecedent keeps today's standalone
+/// lowering instead of folding onto an unrelated earlier grant.
+fn prior_clause_grants_a_cast_without_mana_spend_permission(clauses: &[ClauseIr]) -> bool {
+    fn effect_awaits(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::CastFromZone {
+                mana_spend_permission: None,
+                ..
+            } | Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mana_spend_permission: None,
+                    ..
+                },
+                ..
+            }
+        )
+    }
+    fn def_awaits(def: &AbilityDefinition) -> bool {
+        def.sub_ability.as_deref().is_some_and(def_awaits) || effect_awaits(&def.effect)
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            effect_awaits(&clause.parsed.effect)
+                || clause.parsed.sub_ability.as_deref().is_some_and(def_awaits)
+        })
+}
+
+/// CR 609.4b: Stamp `permission` onto the cast grant the rider follows — the
+/// LAST emitted def, descending its `sub_ability` chain to the deepest
+/// `CastFromZone` or `GrantCastingPermission { PlayFromExile }` that carries no
+/// `mana_spend_permission`. The same def
+/// `prior_clause_grants_a_cast_without_mana_spend_permission` admitted the
+/// rider for, so the two never name different grants. Returns `true` when a
+/// grant was stamped.
+pub(crate) fn attach_mana_spend_permission_to_prior_cast_grant(
+    defs: &mut [AbilityDefinition],
+    permission: ManaSpendPermission,
+) -> bool {
+    fn walk(def: &mut AbilityDefinition, permission: ManaSpendPermission) -> bool {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            if walk(sub, permission) {
+                return true;
+            }
+        }
+        match &mut *def.effect {
+            Effect::CastFromZone {
+                mana_spend_permission: slot @ None,
+                ..
+            }
+            | Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        mana_spend_permission: slot @ None,
+                        ..
+                    },
+                ..
+            } => {
+                *slot = Some(permission);
+                true
+            }
+            _ => false,
+        }
+    }
+    defs.last_mut().is_some_and(|def| walk(def, permission))
 }
 
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana
@@ -37058,6 +37242,56 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 118.14 + CR 609.4b: Any-color / any-type mana rider — "[, and you
+        // may] spend mana as though it were mana of any color to cast that
+        // spell" / "Mana of any type can be spent to cast spells this way". It
+        // applies only to mana spent casting through the PRECEDING grant, so it
+        // folds onto that grant's `mana_spend_permission` and emits no sibling. Left
+        // standalone it degraded to a bare board-wide `SpendManaAsAnyColor`
+        // static that no cast-time payment check ever consults — the granted
+        // card could not be paid for with off-color mana at all — and its
+        // "you may" surfaced a spurious optional-effect prompt (Siphon Insight).
+        // Only folds when the clause it follows is such a grant; anything else
+        // keeps today's lowering.
+        if let Some(rider) = try_parse_mana_spend_rider(normalized_text) {
+            if prior_clause_grants_a_cast_without_mana_spend_permission(builder.clauses()) {
+                match rider {
+                    ManaSpendRider::Concession(permission) => {
+                        builder
+                            .clause(
+                                normalized_text,
+                                placeholder_parsed_clause("mana_spend_rider_placeholder"),
+                                chunk.boundary_after,
+                                ClauseDisposition::ModifyPrior {
+                                    modifier: PriorModifier::ManaSpendPermission(permission),
+                                },
+                            )
+                            .push();
+                    }
+                    // A single-kind concession has no representation: the grant
+                    // stands, the rider is an honest gap — not a "may" prompt and
+                    // not a permission widened to every mana.
+                    ManaSpendRider::SingleKind => {
+                        builder
+                            .clause(
+                                normalized_text,
+                                parsed_clause(Effect::unimplemented(
+                                    UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP,
+                                    normalized_text,
+                                )),
+                                chunk.boundary_after,
+                                ClauseDisposition::Emit {
+                                    followup: None,
+                                    intrinsic: None,
+                                },
+                            )
+                            .push();
+                    }
+                }
+                continue;
+            }
+        }
+
         // CR 118.9: Alternative-cost rider — "[If you cast a spell
         // this way,] pay <ability-cost> rather than paying its mana cost."
         // This is a *modifier* on the previous chain entry's `CastFromZone`
@@ -39111,8 +39345,8 @@ pub(crate) fn parse_effect_chain_ir(
         //     must be live BEFORE the cast; a delayed trigger firing after it
         //     would be too late. These lower to
         //     `CastFromZone` (the cast restated) or `GenericEffect` (a static
-        //     modification of the grant), and are left exactly as they parsed
-        //     before this change.
+        //     modification of the grant); the "mana of any type" rider now folds
+        //     onto the grant's `mana_spend_permission` (CR 118.14) instead.
         //   * a CONSEQUENCE of the cast — "put a +1/+1 counter on ~"
         //     (Helmut Zemo), "this creature gets +X/+0" (Ogre Battlecaster).
         //     CR 603.7: a separate ability that triggers on the later cast.

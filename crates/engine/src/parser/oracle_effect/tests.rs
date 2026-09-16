@@ -26551,7 +26551,7 @@ fn parse_play_from_exile_while_exiled_with_spend_mana_as_any_color_permission() 
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
                     duration: Duration::Permanent,
-                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                     ..
                 },
                 ..
@@ -26576,7 +26576,7 @@ fn parse_brainstealer_dragon_play_grant_folds_mana_rider() {
         Effect::GrantCastingPermission {
             permission: CastingPermission::PlayFromExile {
                 duration: Duration::Permanent,
-                mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 ..
             },
             target: TargetFilter::TrackedSet { .. },
@@ -49905,10 +49905,8 @@ fn duration_scoped_cast_from_tracked_exile_grant_with_any_color_conjunct() {
         panic!("expected PlayFromExile permission");
     };
     assert_eq!(duration, Duration::UntilEndOfTurn);
-    assert_eq!(
-        mana_spend_permission,
-        Some(ManaSpendPermission::AnyTypeOrColor)
-    );
+    // CR 609.4b + CR 106.1a: "any color" is `AnyColor`.
+    assert_eq!(mana_spend_permission, Some(ManaSpendPermission::AnyColor));
     assert_eq!(
         target,
         TargetFilter::TrackedSet {
@@ -71341,4 +71339,258 @@ fn frost_breath_plural_anaphor_keeps_parent_target() {
         "CR 608.2c: one declared instance is not two, so the grant keeps its \
          parent's declared targets"
     );
+}
+
+/// CR 609.4b: the any-color / any-type mana rider that follows a cast grant is
+/// a payment concession on THAT grant, not an effect: it folds onto the grant's
+/// `mana_spend_permission` and leaves no `GenericEffect` sibling behind. Both
+/// grant shapes and both rider spellings — the ", and you may spend mana as
+/// though …" conjunct (Siphon Insight, `CastFromZone`) and the separate
+/// "If you cast a spell this way, mana of any type can be spent …" sentence
+/// (Bloodsoaked Insight, `GrantCastingPermission { PlayFromExile }`).
+#[test]
+fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
+    let siphon = parse_effect_chain(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled, and you may spend mana as though it were mana of any color \
+         to cast that spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&siphon);
+    let stamped: Vec<Option<ManaSpendPermission>> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::CastFromZone {
+                mana_spend_permission,
+                ..
+            } => Some(*mana_spend_permission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        vec![Some(ManaSpendPermission::AnyColor)],
+        "\"any color\" rides the play grant as AnyColor; chain: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "the rider emits no sibling static: {effects:?}"
+    );
+
+    let bloodsoaked = parse_effect_chain(
+        "Target opponent exiles the top three cards of their library. Until the end of your \
+         next turn, you may play those cards. If you cast a spell this way, mana of any type \
+         can be spent to cast it.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&bloodsoaked);
+    let stamped: Vec<Option<ManaSpendPermission>> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        mana_spend_permission,
+                        ..
+                    },
+                ..
+            } => Some(*mana_spend_permission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        vec![Some(ManaSpendPermission::AnyTypeOrColor)],
+        "\"any type\" rides the play grant as AnyTypeOrColor; chain: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "the rider emits no sibling static: {effects:?}"
+    );
+}
+
+/// CR 609.4b: the rider modifies the grant it FOLLOWS. Without a cast grant
+/// directly before it nothing is folded and the clause keeps its standalone
+/// lowering (a pin of the untouched path, green with or without the fold). A
+/// concession narrower than "mana" after a grant ("colorless mana as though
+/// …", Abstruse Appropriation; "mana from snow sources as though …", Draugr
+/// Necromancer) is an honest gap: the grant lowers, the rider is
+/// `Unimplemented`, and the grant is never widened to every mana.
+#[test]
+fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
+    let without_grant = parse_effect_chain(
+        "Draw a card. You may spend mana as though it were mana of any color to cast that \
+         spell.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&without_grant);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|s| matches!(
+                    s.mode,
+                    StaticMode::SpendManaAsAnyColor { .. }
+                ))
+        )),
+        "no grant to fold onto: the rider keeps today's standalone lowering: {effects:?}"
+    );
+
+    for narrower in [
+        "Exile target nonland permanent. You may cast that card for as long as it remains \
+         exiled, and you may spend colorless mana as though it were mana of any color to cast \
+         that spell.",
+        "You may cast spells from among cards in exile your opponents own with ice counters on \
+         them, and you may spend mana from snow sources as though it were mana of any color to \
+         cast those spells.",
+    ] {
+        let chain = parse_effect_chain(narrower, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let widened = effects.iter().any(|effect| match effect {
+            Effect::CastFromZone {
+                mana_spend_permission,
+                ..
+            } => mana_spend_permission.is_some(),
+            Effect::GrantCastingPermission {
+                permission:
+                    CastingPermission::PlayFromExile {
+                        mana_spend_permission,
+                        ..
+                    },
+                ..
+            } => mana_spend_permission.is_some(),
+            _ => false,
+        });
+        assert!(
+            !widened,
+            "a concession narrower than \"mana\" must not widen the grant: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. }
+                    if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+            )),
+            "the single-kind rider after a grant is an honest gap, not a static: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+            "no bare board-wide static survives: {effects:?}"
+        );
+    }
+}
+
+/// CR 609.4b: the rider grammar — subject, concession, and cast object are
+/// independent axes. "color" → `AnyColor`, "type" → `AnyTypeOrColor`; the
+/// "If you cast a spell this way," gate is dropped (it restates the scope the
+/// fold already gives the concession); a single-kind subject is reported, not
+/// widened. A pin of the recognizer alone — the fold test above is the
+/// discriminator.
+#[test]
+fn mana_spend_rider_grammar() {
+    use ManaSpendRider::{Concession, SingleKind};
+    for (text, expected) in [
+        (
+            "you may spend mana as though it were mana of any color to cast that spell",
+            Some(Concession(ManaSpendPermission::AnyColor)),
+        ),
+        (
+            "spend mana as though it were mana of any type to cast those spells.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any type can be spent to cast spells this way.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any type can be spent to cast a spell this way",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "If you cast a spell this way, mana of any type can be spent to cast it.",
+            Some(Concession(ManaSpendPermission::AnyTypeOrColor)),
+        ),
+        (
+            "Mana of any color can be spent to cast that spell",
+            Some(Concession(ManaSpendPermission::AnyColor)),
+        ),
+        // Narrower than "mana": reported as a single kind.
+        (
+            "you may spend colorless mana as though it were mana of any color to cast that spell",
+            Some(SingleKind),
+        ),
+        (
+            "you may spend mana from snow sources as though it were mana of any color to cast \
+             those spells",
+            Some(SingleKind),
+        ),
+        // Not a cast rider at all.
+        (
+            "you may spend mana as though it were mana of any color to activate those abilities",
+            None,
+        ),
+        (
+            "you may spend mana as though it were mana of any color to cast planeswalker spells",
+            None,
+        ),
+    ] {
+        assert_eq!(try_parse_mana_spend_rider(text), expected, "{text:?}");
+    }
+}
+
+/// CR 118.14 + CR 609.4b: the inline conjunct recognizers accept the printed
+/// objects — "… to cast it" after "for as long as it remains exiled" (Court of
+/// Locthwain, #8481; Blightwing Bandit; Cruelclaw's Heist) and ", and mana of
+/// any type can be spent to cast it" after "this turn" (Reno and Rude). Pre-fix
+/// each sentence fell through to the catch-all static and lost its grant.
+#[test]
+fn inline_any_mana_conjunct_accepts_it_and_the_comma() {
+    for (text, expected_duration) in [
+        (
+            "You may play that card for as long as it remains exiled, and mana of any type can \
+             be spent to cast it.",
+            Duration::Permanent,
+        ),
+        (
+            "You may play the exiled card this turn, and mana of any type can be spent to cast \
+             it.",
+            Duration::UntilEndOfTurn,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    duration,
+                    mana_spend_permission,
+                    ..
+                },
+            ..
+        } = &*chain.effect
+        else {
+            panic!(
+                "expected a PlayFromExile grant for {text:?}, got {:?}",
+                chain.effect
+            );
+        };
+        assert_eq!(*duration, expected_duration, "{text:?}");
+        assert_eq!(
+            *mana_spend_permission,
+            Some(ManaSpendPermission::AnyTypeOrColor),
+            "{text:?}"
+        );
+        assert!(
+            !collect_chain_effects(&chain)
+                .iter()
+                .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+            "no sibling static: {text:?}"
+        );
+    }
 }

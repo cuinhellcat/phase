@@ -1690,3 +1690,4 @@ mod exploit_ceased_exploiter_lki;
 mod extra_turn_quantity;
 mod optional_chain_link_prompt_description;
 mod ripple_reveal_choice_interaction;
+mod siphon_insight_mana_rider;
