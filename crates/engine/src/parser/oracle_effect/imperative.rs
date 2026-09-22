@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{one_of, space0, space1, u8 as parse_u8};
-use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, rest, value, verify};
 use nom::error::ParseError;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -21,8 +21,8 @@ use super::lower::{
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
 use super::token::try_parse_token;
 use super::{
-    attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
-    PriorZoneChoicePartition,
+    attach_controller_if_absent, is_bare_object_pronoun, is_bare_plural_object_pronoun,
+    resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -42,17 +42,18 @@ use crate::parser::oracle_static::{
     parse_quoted_ability_modifications,
 };
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection,
-    CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser, ContinuousModification,
-    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
-    CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile,
-    FilterProp, ForceBlockAttackerRef, GrantedAbilityScope, LibraryPosition,
-    MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttachCardinality,
+    AttachSelection, BounceSelection, CardSelectionMode, CategoryChooserScope, ChoiceType, Chooser,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
+    CounterAdjustment, CounterKindChooser, CounterKindDomain, DigSource, DoorLockOp, Duration,
+    Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
+    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner,
+    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
+    ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -6798,6 +6799,20 @@ pub(super) fn parse_utility_imperative_ast(
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_target_rem, text);
         if _target_rem.trim().is_empty() {
+            // CR 608.2d: the attachment here is a DESCRIBED filter ("Equipment
+            // that was/were attached to ~/it"), never a printed target; the
+            // cardinality mirrors the quantifier this arm already parsed
+            // (`any number of` → AnyNumber, `up to one` → UpTo(1), bare `an` →
+            // One). Filter shape keeps it slot-free either way.
+            let selection = AttachSelection::AtResolution {
+                count: match &multi_target {
+                    None => AttachCardinality::One,
+                    Some(spec) => match &spec.max {
+                        None => AttachCardinality::AnyNumber,
+                        Some(max) => AttachCardinality::UpTo(max.clone()),
+                    },
+                },
+            };
             return Some(UtilityImperativeAst::Attach {
                 attachment: TargetFilter::Typed(
                     TypedFilter::default()
@@ -6806,6 +6821,7 @@ pub(super) fn parse_utility_imperative_ast(
                 ),
                 target,
                 multi_target,
+                selection,
             });
         }
     }
@@ -6817,13 +6833,49 @@ pub(super) fn parse_utility_imperative_ast(
                 attachment,
                 target,
                 multi_target: None,
+                // The attachment is a context reference (the trigger source or
+                // the source itself) — determined, never a printed target.
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::One,
+                },
             });
         }
     }
-    if let Some(((attachment_text, target_text, multi_target), rem)) =
+    if let Some(((attachment_text, target_text, multi_target, cardinality), rem)) =
         nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
         if rem.trim().is_empty() {
+            // CR 608.2c (rules of English — number agreement): a PLURAL attachment
+            // anaphor names a set this engine cannot represent, and no producer in
+            // the chain publishes that set as typed provenance yet (see
+            // `parse_plural_attachment_anaphor`). Refuse the whole instruction so
+            // coverage reports it honestly instead of binding the singular
+            // `ParentTarget` fallback to the wrong object.
+            //
+            // UNCONDITIONAL on purpose: `ParseContext::plural_object_pronoun_ref`
+            // carries the linked-exile pool for QUANTITY references, but nothing
+            // consumes it into an attachment OPERAND — `parse_attachment_anaphor`
+            // ignores it and would still bind the singular `ParentTarget`, which is
+            // exactly the wrong-operand shape this guard exists to prevent. The
+            // refusal therefore stands until a set-valued attachment operand exists.
+            if parse_plural_attachment_anaphor(&attachment_text).is_ok() {
+                return Some(UtilityImperativeAst::AttachPluralAnaphor {
+                    fragment: text.to_string(),
+                });
+            }
+            // CR 115.10a + CR 115.1a/c/d/e + CR 608.2d: the ATTACHMENT operand is
+            // an announced target only when its printed phrase says "target …".
+            // The conservative internal scan matches the clause-level timing
+            // classifier (`lower::target_choice_timing_for_clause`): a phrase whose
+            // own relation is unmodelled ("all Auras enchanting target permanent")
+            // keeps the legacy announced semantics rather than re-timing on a
+            // partial parse.
+            let attachment_lower = attachment_text.to_ascii_lowercase();
+            let selection = if nom_primitives::scan_contains(&attachment_lower, "target ") {
+                AttachSelection::Targeted
+            } else {
+                AttachSelection::AtResolution { count: cardinality }
+            };
             let (attachment, _attachment_rem) = parse_attachment_anaphor(&attachment_text, ctx);
             let (target, _target_rem) =
                 parse_attach_recipient(&target_text, ctx, Some(&attachment));
@@ -6835,6 +6887,7 @@ pub(super) fn parse_utility_imperative_ast(
                 attachment,
                 target,
                 multi_target,
+                selection,
             });
         }
     }
@@ -6851,6 +6904,10 @@ pub(super) fn parse_utility_imperative_ast(
             attachment: TargetFilter::SelfRef,
             target,
             multi_target: None,
+            // A determined operand (the source) — never a printed target.
+            selection: AttachSelection::AtResolution {
+                count: AttachCardinality::One,
+            },
         });
     }
     None
@@ -6942,44 +6999,87 @@ pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
 
 fn parse_explicit_targeted_attach(
     input: &str,
-) -> nom::IResult<&str, (String, String, Option<MultiTargetSpec>), OracleError<'_>> {
+) -> nom::IResult<&str, (String, String, Option<MultiTargetSpec>, AttachCardinality), OracleError<'_>>
+{
     let (input, _) = tag("attach ").parse(input)?;
-    let (input, multi_target) = parse_attach_target_quantifier(input)?;
+    let (input, (multi_target, cardinality)) = parse_attach_target_quantifier(input)?;
     let (input, attachment) = take_until(" to ").parse(input)?;
     let (input, _) = tag(" to ").parse(input)?;
     let (input, target) = rest.parse(input)?;
     Ok((
         input,
-        (attachment.to_string(), target.to_string(), multi_target),
+        (
+            attachment.to_string(),
+            target.to_string(),
+            multi_target,
+            cardinality,
+        ),
     ))
 }
 
+/// CR 115.1d + CR 115.10a: Parse the optional cardinality prefix of an attach
+/// instruction and return BOTH the announced-target spec (only when the
+/// quantifier governs a printed `target …` phrase) and the printed
+/// [`AttachCardinality`] (always — it drives the resolution-time choice when the
+/// attachment operand is described, CR 608.2d).
+///
+/// The quantifier is now consumed WITHOUT requiring the `target` peek: a
+/// described attachment ("attach any number of Equipment you control to target
+/// creature you control") carries the same printed cardinality, and dropping it
+/// would make the resolution prompt offer exactly one object instead of the
+/// printed "any number" (CR 107.1c).
 fn parse_attach_target_quantifier(
     input: &str,
-) -> nom::IResult<&str, Option<MultiTargetSpec>, OracleError<'_>> {
-    let any_number = |input| {
-        let (input, _) = tag("any number of ").parse(input)?;
-        let (_, _) = peek(alt((
-            tag("target "),
+) -> nom::IResult<&str, (Option<MultiTargetSpec>, AttachCardinality), OracleError<'_>> {
+    let targets_printed = |input| {
+        peek(alt((
+            tag::<_, _, OracleError<'_>>("target "),
             tag("other target "),
             tag("another target "),
         )))
-        .parse(input)?;
-        Ok((input, MultiTargetSpec::unlimited(0)))
+        .parse(input)
+        .is_ok()
+    };
+    let any_number = |input| {
+        let (input, _) = tag("any number of ").parse(input)?;
+        let targeted = targets_printed(input);
+        Ok((
+            input,
+            (
+                targeted.then(|| MultiTargetSpec::unlimited(0)),
+                AttachCardinality::AnyNumber,
+            ),
+        ))
     };
     let up_to = |input| {
         let (input, _) = tag("up to ").parse(input)?;
         let (input, max) = parse_multi_target_count_expr(input)?;
         let (input, _) = space1.parse(input)?;
-        let (_, _) = peek(alt((
-            tag("target "),
-            tag("other target "),
-            tag("another target "),
-        )))
-        .parse(input)?;
-        Ok((input, MultiTargetSpec::up_to(max)))
+        let targeted = targets_printed(input);
+        Ok((
+            input,
+            (
+                targeted.then(|| MultiTargetSpec::up_to(max.clone())),
+                AttachCardinality::UpTo(max),
+            ),
+        ))
     };
-    opt(alt((any_number, up_to))).parse(input)
+    let all = |input| {
+        let (input, _) = tag("all ").parse(input)?;
+        let targeted = targets_printed(input);
+        Ok((
+            input,
+            (
+                targeted.then(|| MultiTargetSpec::unlimited(0)),
+                AttachCardinality::All,
+            ),
+        ))
+    };
+    match alt((any_number, up_to, all)).parse(input) {
+        Ok((rest, spec)) => Ok((rest, spec)),
+        // No printed quantifier: an unquantified attachment is a single object.
+        Err(_) => Ok((input, (None, AttachCardinality::One))),
+    }
 }
 
 fn parse_attach_recipient<'a>(
@@ -7130,6 +7230,37 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
     parse_target(text)
 }
 
+/// CR 608.2c (rules of English — number agreement): Recognize an attachment
+/// phrase printed as a PLURAL anaphor — "them"/"themselves" (the pronoun half
+/// delegates to [`is_bare_plural_object_pronoun`], the family's string
+/// authority) or a "those <noun>" demonstrative ("Attach those Equipment to
+/// it."). A plural anaphor names a SET, and this engine has no set-valued
+/// anaphor encoding: `TargetFilter` is singular, and the producers that create
+/// such sets earlier in the same chain (`GainControlAll`, conjure) publish no
+/// typed provenance. Lowering the phrase to the singular `ParentTarget`
+/// fallback therefore binds the WRONG operand (Fumble: the bounced creature,
+/// a new object per CR 400.7) while the instruction silently claims support.
+/// Callers refuse the phrase (`AttachPluralAnaphor` in
+/// `parse_utility_imperative_ast` → `Effect::unimplemented`) until the
+/// provenance follow-up lands.
+///
+/// `all_consuming` over the WHOLE attachment phrase is deliberate: a phrase
+/// that merely contains a plural pronoun ("Auras attached to them") names a
+/// different referent (the enchanted player, CR 303.4) and must not be caught.
+fn parse_plural_attachment_anaphor(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = all_consuming(alt((
+        verify(take_while1(|c: char| !c.is_whitespace()), |word: &str| {
+            is_bare_plural_object_pronoun(word)
+        }),
+        preceded(
+            tag("those "),
+            take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == ' '),
+        ),
+    )))
+    .parse(input)?;
+    Ok((rest, ()))
+}
+
 /// CR 301.5 + CR 303.4: The index of the unique Equipment/Aura slot among the
 /// declared target slots, or `None` when there is zero or more than one — the
 /// only attachable object a bare "it" attachment can name.
@@ -7212,8 +7343,21 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         // CR 710.4: Kamigawa flip cards.
         UtilityImperativeAst::FlipPermanent { target } => Effect::FlipPermanent { target },
         UtilityImperativeAst::Attach {
-            attachment, target, ..
-        } => Effect::Attach { attachment, target },
+            attachment,
+            target,
+            selection,
+            ..
+        } => Effect::Attach {
+            attachment,
+            target,
+            selection,
+        },
+        // CR 608.2c + CR 400.7: the attachment operand is a plural anaphor whose
+        // antecedent set has no typed provenance (see the AST variant doc).
+        // Honest unsupported beats a wrong-operand attach.
+        UtilityImperativeAst::AttachPluralAnaphor { fragment } => {
+            Effect::unimplemented("plural_attachment_anaphor", fragment)
+        }
         UtilityImperativeAst::UnattachAll { attachment, target } => {
             Effect::UnattachAll { attachment, target }
         }
@@ -12080,14 +12224,39 @@ pub(super) fn parse_imperative_family_ast(
                 .parse(lower)
                 .ok()?;
             let rest = rest.trim().trim_end_matches('.');
-            let count = nom_primitives::parse_number
+            // CR 107.3a: `support X` (Blitzball Stadium, The Crowd Goes Wild)
+            // carries the announced X forward as a `QuantityExpr`; a literal N
+            // becomes `Fixed`. A bare `parse_number` would silently answer 1 for
+            // the X form, since "x" is not a number.
+            let (_, count) = nom_quantity::parse_quantity_expr_number
                 .parse(rest)
-                .map(|(_, n)| n)
-                .unwrap_or(1);
-            // CR 701.41a: On a permanent, Support targets "other" creatures.
-            // On an instant/sorcery, it targets any creatures. When parsing within
-            // a trigger effect (subject is Some), the card is a permanent.
-            let is_other = ctx.subject.is_some();
+                .ok()?;
+            // CR 701.41a: the expansion says "other target creatures" on a
+            // PERMANENT and "target creatures" on an instant or sorcery spell.
+            // Read the card's printed types rather than inferring from the
+            // enclosing grammar: an ETB trigger on a permanent supplies a
+            // subject and an activated ability on the same permanent supplies
+            // none (Joraga Auxiliary, Sol Advocate Eternal), so a
+            // subject-presence proxy silently drops the "other" restriction from
+            // every activated support and lets the source support itself.
+            //
+            // CR 207.2a settles which text is authoritative where the two seem
+            // to disagree. The three non-creature permanents that print support
+            // (Blitzball Stadium, Captured by Lagacs, Together Forever) show
+            // reminder text with no "other" in it, but reminder text "summarizes
+            // a rule" and has no game function — and the summary is accurate,
+            // because "other" excludes only the source object and a
+            // non-creature permanent is never a legal "target creature" anyway.
+            // The clause it elides is vacuous, not absent. Keying on the
+            // permanent axis is therefore identical in behaviour on every
+            // printed card AND stays correct when such a permanent is animated,
+            // which a creature-typed axis would not be.
+            let is_other = !ctx.source_is_instant_or_sorcery();
+            // CR 115.10a: the printed shorthand omits the word "target" that its
+            // CR 701.41a expansion supplies, so state the announcement timing
+            // here rather than letting the text-scan ladder infer it from
+            // "support N". See `ParseContext::declared_target_choice_timing`.
+            ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Stack);
             Some(ImperativeFamilyAst::Support { count, is_other })
         }
         // CR 508.1d + CR 509.1c: "attacks or blocks this turn/combat if able" —
@@ -14033,8 +14202,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause
         }
         // CR 701.41a: Support N → PutCounter with multi-target "up to N".
-        // On permanents (is_other=true): "up to N other target creatures"
-        // On instants/sorceries (is_other=false): "up to N target creatures"
+        // On a permanent source (is_other=true): "up to N other target creatures"
+        // On an instant/sorcery spell (is_other=false): "up to N target creatures"
         ImperativeFamilyAst::Support { count, is_other } => {
             let properties = if is_other {
                 vec![crate::types::ability::FilterProp::Another]
@@ -14051,7 +14220,9 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 count: QuantityExpr::Fixed { value: 1 },
                 target,
             });
-            clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
+            // CR 701.41a: "each of UP TO N" — min 0, max N, where N may be the
+            // announced X (`QuantityExpr`), so `up_to` rather than `fixed`.
+            clause.multi_target = Some(MultiTargetSpec::up_to(count));
             clause
         }
         // CR 603.5 / CR 608.2d: "you may <effect>" and subject-stripped "each
@@ -14115,8 +14286,22 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             attachment,
             target,
             multi_target,
+            selection,
         })) => {
-            let mut clause = parsed_clause(Effect::Attach { attachment, target });
+            // CR 115.1a/c/d/e + CR 608.2d: `clause.multi_target` stays the
+            // ANNOUNCED target-count spec. It is already empty for a described
+            // quantifier — `parse_attach_target_quantifier` emits a spec only
+            // when the quantifier governs a printed `target …` phrase — while the
+            // Cass/Zack-Fair arm deliberately carries the pre-existing
+            // resolution-time count there, so it must not be cleared here. The
+            // described count travels on the effect's `selection` (CR 107.1c) and
+            // is applied by `effects::attach::attachment_choice_bounds` while
+            // resolving, ahead of any `multi_target` fallback.
+            let mut clause = parsed_clause(Effect::Attach {
+                attachment,
+                target,
+                selection,
+            });
             clause.multi_target = multi_target;
             clause
         }
@@ -14296,6 +14481,10 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
                     target: host,
+                    // The attachment is the source; only the host is chosen.
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
                 },
             )));
             clause
@@ -15715,7 +15904,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ParitySource, TargetChoiceTiming, ZoneChoiceChooser};
+    use crate::types::ability::{ParitySource, ZoneChoiceChooser};
 
     /// Matrix row 18 — the mana ROLE must survive the cost-resource AST
     /// round-trip byte-for-byte.
@@ -16830,6 +17019,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -16851,6 +17041,7 @@ mod tests {
                 attachment,
                 target,
                 multi_target,
+                ..
             }) = result
             else {
                 panic!("{input}: expected Attach, got {result:?}");
@@ -17008,6 +17199,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -17036,6 +17228,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -17069,6 +17262,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -17099,6 +17293,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -17161,6 +17356,7 @@ mod tests {
             attachment,
             target,
             multi_target,
+            ..
         }) = result
         else {
             panic!("{input}: expected Attach, got {result:?}");
@@ -17215,6 +17411,7 @@ mod tests {
                 attachment: _,
                 target,
                 multi_target,
+                ..
             }) = result
             else {
                 panic!("{input}: expected Attach, got {result:?}");
@@ -20094,22 +20291,33 @@ mod tests {
         }
     }
 
+    /// CR 701.41a: `support N` on an INSTANT OR SORCERY expands to "up to N
+    /// target creatures" — no "other" (Nissa's Judgment, Lead by Example,
+    /// Unity of Purpose, The Crowd Goes Wild).
     #[test]
-    fn parse_support_on_spell() {
-        // CR 701.41a: Support N on an instant/sorcery — "up to N target creatures"
+    fn parse_support_on_spell_source() {
         let text = "support 2";
         let lower = text.to_lowercase();
-        let mut ctx = ParseContext::default(); // No subject = spell context
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Sorcery],
+            ..Default::default()
+        };
         let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
                 Some(ImperativeFamilyAst::Support {
-                    count: 2,
+                    count: QuantityExpr::Fixed { value: 2 },
                     is_other: false
                 })
             ),
-            "Expected Support {{ count: 2, is_other: false }}, got {ast:?}"
+            "Expected Support {{ count: Fixed 2, is_other: false }}, got {ast:?}"
+        );
+        // CR 115.10a: the shorthand prints no "target", so the producer must
+        // declare the announcement timing or the slots are never surfaced.
+        assert_eq!(
+            ctx.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Stack)
         );
         let clause = lower_imperative_family_ast(ast.unwrap());
         assert!(
@@ -20121,27 +20329,47 @@ mod tests {
             "Expected PutCounter P1P1, got {:?}",
             clause.effect
         );
-        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
-        // Spell support should NOT have Another property
-        if let Effect::PutCounter {
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+        );
+        // Reach guard for the negative below: the filter IS the creature filter
+        // the expansion names, so "no Another" is a real absence rather than a
+        // vacuous pass on some other shape.
+        let Effect::PutCounter {
             target: TargetFilter::Typed(tf),
             ..
         } = &clause.effect
-        {
-            assert!(
-                !tf.properties
-                    .contains(&crate::types::ability::FilterProp::Another),
-                "Spell support should not use 'other'"
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
             );
-        }
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![crate::types::ability::TypeFilter::Creature]
+        );
+        assert!(
+            !tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "an instant/sorcery source's support must not use 'other'"
+        );
     }
 
+    /// CR 701.41a: `support N` on a PERMANENT expands to "up to N OTHER target
+    /// creatures". Staged as an Enchantment (Together Forever) precisely because
+    /// that is the case whose printed reminder text omits "other": CR 207.2a
+    /// makes that a vacuous summary, not a different rule — "other" excludes
+    /// only the source, and a non-creature permanent is never a legal "target
+    /// creature" anyway — and keeping `Another` is what stays correct when such
+    /// a permanent is animated.
     #[test]
-    fn parse_support_on_permanent() {
-        // CR 701.41a: Support N on a permanent — "up to N other target creatures"
-        let text = "support 3";
+    fn parse_support_on_non_creature_permanent_source() {
+        let text = "support 2";
         let lower = text.to_lowercase();
         let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Enchantment],
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
@@ -20150,26 +20378,106 @@ mod tests {
             matches!(
                 &ast,
                 Some(ImperativeFamilyAst::Support {
-                    count: 3,
+                    count: QuantityExpr::Fixed { value: 2 },
                     is_other: true
                 })
             ),
-            "Expected Support {{ count: 3, is_other: true }}, got {ast:?}"
+            "Expected Support {{ count: Fixed 2, is_other: true }}, got {ast:?}"
         );
         let clause = lower_imperative_family_ast(ast.unwrap());
-        // Permanent support should have Another property
-        if let Effect::PutCounter {
+        let Effect::PutCounter {
             target: TargetFilter::Typed(tf),
             ..
         } = &clause.effect
-        {
-            assert!(
-                tf.properties
-                    .contains(&crate::types::ability::FilterProp::Another),
-                "Permanent support should use 'other'"
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
             );
-        }
-        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
+        };
+        assert!(
+            tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "a permanent source's support must use 'other'"
+        );
+    }
+
+    /// CR 701.41a: the LIVE half of the source-type defect. An activated support
+    /// on a permanent (Joraga Auxiliary's "{4}{G}{W}: Support 2.", Sol, Advocate
+    /// Eternal's Teamwork trigger) carries no parse subject, so the previous
+    /// `ctx.subject.is_some()` derivation dropped "other" and let a creature
+    /// support itself. Unlike the non-creature-permanent direction, that one is
+    /// not vacuous: the source IS a legal "target creature" there.
+    #[test]
+    fn parse_support_on_subjectless_creature_ability_still_excludes_self() {
+        let text = "support 3";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Creature],
+            // No subject: an activated ability body has none.
+            ..Default::default()
+        };
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        assert!(
+            matches!(
+                &ast,
+                Some(ImperativeFamilyAst::Support {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    is_other: true
+                })
+            ),
+            "Expected Support {{ count: Fixed 3, is_other: true }}, got {ast:?}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        let Effect::PutCounter {
+            target: TargetFilter::Typed(tf),
+            ..
+        } = &clause.effect
+        else {
+            panic!(
+                "expected a Typed creature recipient, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(
+            tf.properties
+                .contains(&crate::types::ability::FilterProp::Another),
+            "a creature's activated support must still exclude itself"
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }))
+        );
+    }
+
+    /// CR 701.41a + CR 107.3a: `support X` (Blitzball Stadium `{X}{U}`, The
+    /// Crowd Goes Wild) carries the announced X, not a literal. A `parse_number`
+    /// read of "x" answers nothing and the previous `unwrap_or(1)` fallback
+    /// silently capped every such card at one target.
+    #[test]
+    fn parse_support_x_carries_the_announced_variable() {
+        let text = "support X";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            source_core_types: vec![crate::types::card_type::CoreType::Artifact],
+            ..Default::default()
+        };
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(
+            ast,
+            Some(ImperativeFamilyAst::Support {
+                count: x.clone(),
+                is_other: true,
+            }),
+            "Expected Support {{ count: Variable X, is_other: true }}"
+        );
+        let clause = lower_imperative_family_ast(ast.unwrap());
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::up_to(x)));
     }
 
     /// CR 115.1d + CR 708.2a: "turn any number of target … face down" (Illithid

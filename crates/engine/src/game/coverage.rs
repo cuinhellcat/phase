@@ -18,8 +18,8 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttackScope, AttackSubject,
-    CardTypeSetSource, ChoiceType, CoinFlipResult, CommanderOwnership, Comparator,
+    ActivationRestriction, AdditionalCost, AggregateFunction, AttackSubject, CardTypeSetSource,
+    ChoiceType, CoinFlipResult, CombatHistoryScope, CommanderOwnership, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
@@ -1835,6 +1835,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let group = match group_by {
                 None => "ungrouped".to_string(),
                 Some(crate::types::ability::DamageGroupKey::SourceId) => "by-source".to_string(),
+                Some(crate::types::ability::DamageGroupKey::Target) => "by-target".to_string(),
             };
             let kind = match damage_kind {
                 crate::types::ability::DamageKindFilter::Any => "",
@@ -2023,14 +2024,16 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             return rendered;
         }
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
-            (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
-            (AttackSubject::Source, AttackScope::ThisTurn) => {
+            (AttackSubject::You, CombatHistoryScope::ThisTurn) => {
+                "each opponent you attacked this turn"
+            }
+            (AttackSubject::Source, CombatHistoryScope::ThisTurn) => {
                 "each opponent this source attacked this turn"
             }
-            (AttackSubject::You, AttackScope::ThisCombat) => {
+            (AttackSubject::You, CombatHistoryScope::ThisCombat) => {
                 "each opponent you attacked this combat"
             }
-            (AttackSubject::Source, AttackScope::ThisCombat) => {
+            (AttackSubject::Source, CombatHistoryScope::ThisCombat) => {
                 "each opponent this source attacked this combat"
             }
         },

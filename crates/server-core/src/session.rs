@@ -62,9 +62,10 @@ use crate::takeback::PendingTakeback;
 ///
 /// The game code is a sound session id: non-empty and far under the 128-byte limit.
 /// Uniqueness only has to hold *within* a state — the id namespaces that state's
-/// interaction ids and detects stale ones — so `generate_game_code`'s lack of a
-/// collision check (6 random chars) is not a concern here. Nor is guessability:
-/// `slot_for_submission` authorizes against the authenticated actor, never this id.
+/// interaction ids and detects stale ones. The session registry separately rejects
+/// reuse of a live game code before inserting a new game. Nor is guessability a
+/// concern here: `slot_for_submission` authorizes against the authenticated actor,
+/// never this id.
 ///
 /// Always re-bind on restore rather than trusting an id carried in a persisted blob,
 /// matching how this module re-stamps `hosting` and revokes unentitled debug capability.
@@ -2359,6 +2360,18 @@ impl SessionManager {
         self.sessions.contains_key(game_code)
     }
 
+    fn generate_available_game_code<F>(&self, mut generate: F) -> String
+    where
+        F: FnMut() -> String,
+    {
+        loop {
+            let game_code = generate();
+            if !self.sessions.contains_key(&game_code) {
+                return game_code;
+            }
+        }
+    }
+
     /// Create a new game session (2-player default). Returns (game_code, player_token).
     ///
     /// `deck_choice` is seat 0's provenance, forwarded verbatim to
@@ -2399,6 +2412,33 @@ impl SessionManager {
         match_config: MatchConfig,
         format_config: Option<FormatConfig>,
     ) -> Result<(String, String), String> {
+        self.create_game_n_players_with_generator(
+            deck,
+            deck_choice,
+            display_name,
+            timer_seconds,
+            player_count,
+            match_config,
+            format_config,
+            generate_game_code,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_game_n_players_with_generator<F>(
+        &mut self,
+        deck: PlayerDeckPayload,
+        deck_choice: Option<DeckChoice>,
+        display_name: String,
+        timer_seconds: Option<u32>,
+        player_count: u8,
+        match_config: MatchConfig,
+        format_config: Option<FormatConfig>,
+        mut generate: F,
+    ) -> Result<(String, String), String>
+    where
+        F: FnMut() -> String,
+    {
         // A defaulted config is not a declaration: when the caller does not
         // specify a format, use the engine's single shared authority for
         // picking a registry-compatible default for the REQUESTED seat
@@ -2419,7 +2459,7 @@ impl SessionManager {
         // two callers that close this same gap.
         validate_starting_life_bounds(&format_config)?;
 
-        let game_code = generate_game_code();
+        let game_code = self.generate_available_game_code(&mut generate);
         let player_token = generate_player_token();
         let pc = player_count as usize;
 
@@ -3651,6 +3691,56 @@ mod tests {
         assert!(code
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn game_code_generation_skips_a_live_session_code() {
+        let mut mgr = SessionManager::new();
+        let (occupied_code, _) = mgr.create_game(make_deck(), None);
+        let mut attempts = [occupied_code.clone(), "ZZZZZZ".to_string()].into_iter();
+
+        let generated = mgr.generate_available_game_code(|| {
+            attempts
+                .next()
+                .expect("test generator should provide a free code")
+        });
+
+        assert_eq!(generated, "ZZZZZZ");
+        assert!(mgr.sessions.contains_key(&occupied_code));
+    }
+
+    #[test]
+    fn create_game_path_skips_occupied_code_before_inserting_session() {
+        let mut mgr = SessionManager::new();
+        let (occupied_code, original_token) = mgr.create_game(make_deck(), None);
+        let mut attempts = [occupied_code.clone(), "ZZZZZZ".to_string()].into_iter();
+
+        let (new_code, new_token) = mgr
+            .create_game_n_players_with_generator(
+                make_deck(),
+                None,
+                String::new(),
+                None,
+                2,
+                MatchConfig::default(),
+                None,
+                || {
+                    attempts
+                        .next()
+                        .expect("test generator should provide a free code")
+                },
+            )
+            .expect("the production creation path should retry an occupied code");
+
+        assert_eq!(new_code, "ZZZZZZ");
+        assert_ne!(new_code, occupied_code);
+        assert!(mgr.sessions.contains_key(&occupied_code));
+        assert!(mgr.sessions.contains_key(&new_code));
+        assert_eq!(
+            mgr.game_for_token(&original_token),
+            Some(occupied_code.as_str())
+        );
+        assert_eq!(mgr.game_for_token(&new_token), Some(new_code.as_str()));
     }
 
     #[test]

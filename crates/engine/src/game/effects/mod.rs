@@ -24,7 +24,7 @@ use crate::types::ability::{
     TargetRef, ThisWayCause, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
-use crate::types::ability::{AttackScope, AttackSubject};
+use crate::types::ability::{AttackSubject, CombatHistoryScope};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, DiscardBatchCursor,
@@ -20415,6 +20415,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::Any,
                 target: TargetFilter::Any,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             Vec::new(),
             ObjectId(100),
@@ -21468,7 +21469,7 @@ mod tests {
                 PlayerId(2),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::You,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -21481,7 +21482,7 @@ mod tests {
                 PlayerId(2),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::Source,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -21494,7 +21495,7 @@ mod tests {
                 PlayerId(1),
                 &PlayerFilter::OpponentAttacked {
                     subject: AttackSubject::Source,
-                    scope: AttackScope::ThisTurn,
+                    scope: CombatHistoryScope::ThisTurn,
                 },
                 PlayerId(0),
                 angel,
@@ -25158,6 +25159,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::ParentTarget,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             source,
@@ -25437,6 +25439,7 @@ mod tests {
             Effect::Attach {
                 attachment: TargetFilter::SelfRef,
                 target: TargetFilter::LastCreated,
+                selection: crate::types::ability::AttachSelection::Targeted,
             },
             vec![],
             source,
