@@ -1199,16 +1199,16 @@ pub fn player_life_payment_colors(
 /// the single authority for constructing a `CostPermissionContext` at every
 /// cost-payment entry point (spell cast, activation, alt-cost effect).
 ///
-/// `any_color_for_source` is the `any_color` decision for the specific cost
+/// `mana_spend_permission` is the typed concession for the specific cost
 /// being paid (cast vs effect vs activation may compute this differently);
 /// callers pass it in so this helper stays cost-site-agnostic.
 pub fn build_cost_permission_context(
     state: &GameState,
     player_id: PlayerId,
-    any_color_for_source: bool,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> crate::types::mana::CostPermissionContext {
     crate::types::mana::CostPermissionContext {
-        any_color: any_color_for_source,
+        mana_spend_permission,
         max_life: super::life_costs::max_phyrexian_life_payments(state, player_id),
         life_colors: player_life_payment_colors(state, player_id),
     }

@@ -12918,14 +12918,14 @@ fn apply_non_priority_pass_action(
                             Some(ability_index),
                         );
                     let activation_ctx = activation_context.as_payment_context();
-                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
                         state,
                         player,
                         Some(spell_object),
                         Some(&activation_ctx),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, any_color,
+                        state, player, mana_spend_permission,
                     );
                     mana_payment::compute_phyrexian_shards(
                         &player_pool,
@@ -12938,14 +12938,14 @@ fn apply_non_priority_pass_action(
                     let spell_ctx = spell_meta
                         .as_ref()
                         .map(crate::types::mana::PaymentContext::Spell);
-                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                    let mana_spend_permission = casting::player_mana_spend_permission_for_payment(
                         state,
                         player,
                         Some(spell_object),
                         spell_ctx.as_ref(),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
-                        state, player, any_color,
+                        state, player, mana_spend_permission,
                     );
                     mana_payment::compute_phyrexian_shards(
                         &player_pool,
@@ -16942,7 +16942,13 @@ pub(super) fn handle_spend_pool_mana(
             .map(crate::types::mana::PaymentContext::Spell)
     };
 
-    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref()) {
+    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
+        state,
+        player,
+        Some(object_id),
+        ctx.as_ref(),
+    );
+    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref(), mana_spend_permission) {
         return Err(EngineError::ActionNotAllowed(
             "Mana unit cannot pay any part of this cost".to_string(),
         ));
@@ -16968,13 +16974,14 @@ pub(super) fn handle_unspend_pool_mana(
 }
 
 /// CR 118.3a: True when `unit` could legally pay at least one shard or generic
-/// pip of `cost` under the spell's spend-restriction context. Combines
-/// restriction gating (`ManaRestriction::allows`) with shard color/attribute
-/// matching (`shard_to_mana_type`) — the same predicates the spend funnel uses.
+/// pip of `cost` under the payment's spend-restriction context and mana-spend
+/// permission. Combines restriction gating (`ManaRestriction::allows`) with
+/// shard color/attribute matching (`shard_to_mana_type`).
 fn mana_unit_eligible_for_cost(
     unit: &crate::types::mana::ManaUnit,
     cost: &crate::types::mana::ManaCost,
     ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> bool {
     use crate::types::mana::{ManaCost, ManaType};
     use mana_payment::ShardRequirement;
@@ -17004,7 +17011,10 @@ fn mana_unit_eligible_for_cost(
     shards.iter().any(|&shard| {
         // CR 107.4: a unit pays a shard if its color (or attribute, for {S}/{Z})
         // is among those the shard accepts.
-        let accepts = |c: ManaType| unit.color == c;
+        let accepts = |c: ManaType| {
+            unit.color == c
+                || mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(c))
+        };
         match mana_payment::shard_to_mana_type(shard) {
             ShardRequirement::Single(mt) => accepts(mt),
             ShardRequirement::Hybrid(a, b) => accepts(a) || accepts(b),

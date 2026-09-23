@@ -4705,7 +4705,7 @@ pub enum CastingPermission {
         /// CR 609.4b: Optional payment permission scoped to this specific grant.
         /// `AnyColor` and `AnyTypeOrColor` both relax colored mana requirements;
         /// only the latter also relaxes mana-type requirements. Read at payment
-        /// time by `casting::player_can_spend_as_any_color_for_optional_spell`,
+        /// time by `casting::player_mana_spend_permission_for_optional_spell`,
         /// keyed on `granted_to == player`. Mirrors
         /// `PlayFromExile.mana_spend_permission`; `None` (the common case) leaves
         /// payment unchanged for every other exile/graveyard alt-cost grant.
@@ -5126,18 +5126,22 @@ pub enum ManaSpendPermission {
     /// color for this payment. This relaxes colored requirements but does not
     /// make colored mana satisfy a colorless (`{C}`) or snow (`{S}`) requirement.
     AnyColor,
-    /// CR 609.4b + CR 106.1b: Mana may be spent as though it were mana of any
-    /// type or color for this payment. This preserves the broader Oracle
-    /// distinction without changing the actual mana spent.
+    /// CR 118.14 + CR 106.1b: "Mana of any type can be spent" — mana may be
+    /// spent as though it were colorless mana or mana of any color, so it also
+    /// pays a colorless (`{C}`) requirement. Like `AnyColor`, it never changes
+    /// the mana actually spent (CR 609.4b), and never pays `{S}`.
     AnyTypeOrColor,
 }
 
 impl ManaSpendPermission {
-    /// CR 609.4b: Projects the shared colored-requirement relaxation without
-    /// claiming that `AnyColor` and `AnyTypeOrColor` are semantically equal.
-    pub const fn allows_spending_as_any_color(self) -> bool {
+    /// CR 118.14 + CR 609.4b: May any mana pay a `required` mana type under this
+    /// permission? "Any type" includes colorless (CR 106.1b); "any color" does
+    /// not (CR 106.1a). The single payment-time projection of the permission:
+    /// it decides eligibility, never the type of mana actually spent.
+    pub const fn allows_payment_as(self, required: crate::types::mana::ManaType) -> bool {
         match self {
-            Self::AnyColor | Self::AnyTypeOrColor => true,
+            Self::AnyColor => !matches!(required, crate::types::mana::ManaType::Colorless),
+            Self::AnyTypeOrColor => true,
         }
     }
 }
@@ -34870,7 +34874,7 @@ mod tests {
     /// leaf by whether its lowered runtime gate can return `true` at a reachable
     /// production payment site today, and short-circuit `Any` in both directions.
     /// CR 609.4b + CR 106.1a + CR 106.1b: the two spend permissions are distinct wire
-    /// discriminants even though both project the colored-payment relaxation.
+    /// discriminants, and they differ at payment: only "any type" pays `{C}`.
     #[test]
     fn mana_spend_permission_serde_preserves_color_vs_type_distinction() {
         let any_color = ManaSpendPermission::AnyColor;
@@ -34889,8 +34893,10 @@ mod tests {
             serde_json::from_str::<ManaSpendPermission>(r#""AnyTypeOrColor""#).unwrap(),
             any_type_or_color
         );
-        assert!(any_color.allows_spending_as_any_color());
-        assert!(any_type_or_color.allows_spending_as_any_color());
+        assert!(any_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Green));
+        assert!(!any_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
+        assert!(any_type_or_color.allows_payment_as(crate::types::mana::ManaType::Colorless));
         assert_ne!(any_color, any_type_or_color);
     }
 

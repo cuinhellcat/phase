@@ -72158,7 +72158,7 @@ fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
     }
 }
 
-/// CR 609.4b + CR 106.1b: a single-kind concession with NO cast grant before it
+/// CR 609.4b: a single-kind concession with NO cast grant before it
 /// ("spend colorless mana …", "mana from snow sources …", False Dawn's "white
 /// mana", Quicksilver Elemental's "blue mana") is the same honest gap as after a
 /// grant — never the board-wide `SpendManaAsAnyColor` that relaxes every mana.

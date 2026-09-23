@@ -1177,15 +1177,9 @@ pub struct ClientGameState {
 /// cast — activated-ability mana payment keeps its full-cost display, and
 /// convoke/improvise/delve pay via board taps tracked by their own staged UI.
 ///
-/// KNOWN LIMITATION: reduces with `any_color = false` and no life-for-color
-/// permissions, so under an any-color spend permission (Chromatic Orrery) or a
-/// K'rrik-style life-as-colored-mana grant the displayed residual can over-state
-/// the cost (a colorless unit pinned toward `{R}` reads as not covering it).
-/// This is deliberately consistent with the pin-eligibility gate
-/// (`mana_unit_eligible_for_cost`), which is also `any_color`-blind and would
-/// reject such a pin — both layers agree on the stricter behavior, and the
-/// common cases (generic + plain colored costs) are exact. Threading the real
-/// permission bundle through both sites is the follow-up to lift this.
+/// Uses the current spell's typed mana-spend permission when matching pinned
+/// units to colored or colorless requirements. This projection subtracts only
+/// pinned mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
     use crate::types::game_state::WaitingFor;
     use crate::types::mana::{ManaPool, PaymentContext};
@@ -1227,7 +1221,12 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
         &selected,
         &cost,
         ctx.as_ref(),
-        false,
+        crate::game::casting::player_mana_spend_permission_for_payment(
+            state,
+            viewer,
+            Some(pending.object_id),
+            ctx.as_ref(),
+        ),
         None,
     ))
 }

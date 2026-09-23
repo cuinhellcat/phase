@@ -2110,7 +2110,7 @@ pub enum StaticMode {
     ///   filter (Vizier of the Menagerie: "creature spells"). The concession is
     ///   re-derived against the spell object at spend time and never applies to
     ///   non-spell payments. Consulted by
-    ///   `casting::player_can_spend_as_any_color_for_optional_spell`.
+    ///   `casting::player_mana_spend_permission_for_optional_spell`.
     /// - `activation_source_filter: Some(filter)` — scoped to activated abilities
     ///   whose source permanent matches the filter (Agatha's Soul Cauldron /
     ///   Joiner Adept: "to activate abilities of creatures you control"). The

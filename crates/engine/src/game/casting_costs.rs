@@ -12393,14 +12393,17 @@ pub(crate) fn spell_cost_is_payable_from_pool(
 ) -> bool {
     let spell_meta = super::casting::build_spell_meta(state, player, object_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
         state,
         player,
         Some(object_id),
         spell_ctx.as_ref(),
     );
-    let permissions =
-        super::static_abilities::build_cost_permission_context(state, player, any_color);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        state,
+        player,
+        mana_spend_permission,
+    );
     state
         .players
         .iter()
@@ -12671,9 +12674,9 @@ fn auto_tap_mana_sources_inner(
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let effective_ctx = payment_context.or(spell_ctx.as_ref());
     // CR 609.4b: Auto-tap planning must use the same spend-as-any-color authority
-    // as legality dry-runs and real payment (`player_can_spend_as_any_color_for_payment`),
+    // as legality dry-runs and real payment (`player_mana_spend_permission_for_payment`),
     // including activation-source-filtered grants (Agatha's Soul Cauldron class).
-    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
         state,
         player,
         deprioritize_source,
@@ -12688,7 +12691,7 @@ fn auto_tap_mana_sources_inner(
                 &p.mana_pool,
                 cost,
                 effective_ctx,
-                any_color,
+                mana_spend_permission,
                 sub_cost_demand,
             )
         })
@@ -12741,27 +12744,57 @@ fn auto_tap_mana_sources_inner(
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
             ShardRequirement::Single(color) => {
-                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                let acceptable = if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
+                    Vec::new()
+                } else {
+                    vec![color]
+                };
                 needs.push((acceptable, false, false, false));
             }
             ShardRequirement::Phyrexian(color) => {
                 // CR 107.4f: Mark as phyrexian (4th field = true) so MCV deprioritizes it
                 // compared to strict Single color requirements. Phyrexian can be paid with
                 // life, so we should consume other mana sources for strict requirements first.
-                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                let acceptable = if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
+                    Vec::new()
+                } else {
+                    vec![color]
+                };
                 needs.push((acceptable, false, false, true));
             }
             ShardRequirement::Hybrid(a, b) => {
-                let acceptable = if any_color { Vec::new() } else { vec![a, b] };
+                let acceptable = if mana_spend_permission.is_some_and(|permission| {
+                    permission.allows_payment_as(a) || permission.allows_payment_as(b)
+                }) {
+                    Vec::new()
+                } else {
+                    vec![a, b]
+                };
                 needs.push((acceptable, false, false, false));
             }
             ShardRequirement::HybridPhyrexian(a, b) => {
                 // CR 107.4f: Hybrid Phyrexian also allows life payment, so deprioritize.
-                let acceptable = if any_color { Vec::new() } else { vec![a, b] };
+                let acceptable = if mana_spend_permission.is_some_and(|permission| {
+                    permission.allows_payment_as(a) || permission.allows_payment_as(b)
+                }) {
+                    Vec::new()
+                } else {
+                    vec![a, b]
+                };
                 needs.push((acceptable, false, false, true));
             }
             ShardRequirement::TwoGenericHybrid(color) => {
-                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                let acceptable = if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
+                    Vec::new()
+                } else {
+                    vec![color]
+                };
                 needs.push((acceptable, true, false, false));
             }
             // CR 107.4f: K'rrik promotion never reaches the auto-tap
@@ -12770,11 +12803,19 @@ fn auto_tap_mana_sources_inner(
             // tap-planning shape as the unpromoted `TwoGenericHybrid` but
             // with potential life payment, so deprioritize.
             ShardRequirement::TwoGenericHybridPhyrexian(color) => {
-                let acceptable = if any_color { Vec::new() } else { vec![color] };
+                let acceptable = if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
+                    Vec::new()
+                } else {
+                    vec![color]
+                };
                 needs.push((acceptable, true, false, true));
             }
             ShardRequirement::ColorlessHybrid(color) => {
-                let acceptable = if any_color {
+                let acceptable = if mana_spend_permission
+                    .is_some_and(|permission| permission.allows_payment_as(color))
+                {
                     Vec::new()
                 } else {
                     vec![ManaType::Colorless, color]
@@ -14045,7 +14086,7 @@ pub(super) fn apply_committed_assist(
             &probe,
             None,
             None,
-            false,
+            None,
             None,
             crate::types::mana::LifePaymentColors::EMPTY,
             &[],
@@ -15225,7 +15266,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
         .flatten();
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let effective_payment_context = payment_context.or(spell_ctx.as_ref());
-    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
         &preview,
         player,
         Some(source_id),
@@ -15234,8 +15275,11 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes
     // `life_colors` through to `compute_phyrexian_shards` so K'rrik-promoted
     // shards surface in the pause UI.
-    let permissions =
-        super::static_abilities::build_cost_permission_context(&preview, player, any_color);
+    let permissions = super::static_abilities::build_cost_permission_context(
+        &preview,
+        player,
+        mana_spend_permission,
+    );
 
     let (shards, payable) = {
         let player_data = preview.players.iter().find(|p| p.id == player)?;

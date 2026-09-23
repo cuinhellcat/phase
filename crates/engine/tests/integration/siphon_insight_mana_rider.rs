@@ -30,8 +30,15 @@
 //! `GameAction`) end to end: no optional prompt, the recorded permission
 //! carries the concession, and the granted card is actually cast with
 //! off-color lands (or, for the monarch, for free).
+//!
+//! Payment: "any type" (CR 118.14) also covers colorless mana — a colored
+//! mana may pay a `{C}` requirement through an any-type grant, never through
+//! an any-color one (CR 106.1a vs CR 106.1b). `ManaSpendPermission::
+//! allows_payment_as` is the one projection every payment path reads; before
+//! it, both permissions collapsed to "any color" and `{C}` stayed unpayable.
 
 use engine::ai_support::legal_actions;
+use engine::game::derived_views::derive_views;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{CastingPermission, ManaSpendPermission, TargetRef};
 use engine::types::actions::GameAction;
@@ -442,4 +449,168 @@ fn court_of_locthwains_exiled_card_is_castable_with_any_mana() {
 #[test]
 fn court_of_locthwains_exiled_card_is_free_for_the_monarch() {
     court_of_locthwain(true);
+}
+
+/// Exile a `{C}` sorcery from P1's library with `grant` and try to cast it from
+/// two Swamps (plus a Wastes played from hand when `wastes`). `orrery` adds
+/// Chromatic Orrery — a board-wide ANY-COLOR static that must not mask the
+/// any-type concession elected with the grant. Returns whether it was cast.
+fn colorless_requirement_case(
+    grant: &str,
+    wastes: bool,
+    orrery: bool,
+    mode: CastPaymentMode,
+) -> bool {
+    let (grant_text, expected) = match grant {
+        "Siphon Insight" => (SIPHON_INSIGHT, ManaSpendPermission::AnyColor),
+        "Bloodsoaked Insight" => (BLOODSOAKED_INSIGHT, ManaSpendPermission::AnyTypeOrColor),
+        other => unreachable!("no such grant in this file: {other}"),
+    };
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in ["Deep", "Third", "Second"] {
+        scenario.add_card_to_library_top(P1, name);
+    }
+    let colorless = {
+        let mut b = scenario.add_spell_to_library_top(P1, "Colorless Sorcery", false);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 0,
+        });
+        b.id()
+    };
+    let mut lands = vec![
+        scenario.add_basic_land(P0, ManaColor::Black),
+        scenario.add_basic_land(P0, ManaColor::Black),
+    ];
+    let wastes = wastes.then(|| {
+        scenario
+            .add_land_to_hand(P0, "Wastes")
+            .from_oracle_text("{T}: Add {C}.")
+            .id()
+    });
+    if orrery {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Chromatic Orrery",
+            "You may spend mana as though it were mana of any color.",
+        );
+    }
+    let spell = {
+        let mut b = scenario.add_spell_to_hand_from_oracle(P0, grant, false, grant_text);
+        b.with_mana_cost(ManaCost::default());
+        b.id()
+    };
+    let mut runner = scenario.build();
+    cast_and_resolve(&mut runner, spell);
+    // Reach guard: the {C} card is exiled and carries the printed concession.
+    assert_eq!(runner.state().objects[&colorless].zone, Zone::Exile);
+    assert_eq!(recorded_concessions(&runner, colorless)[0], Some(expected));
+
+    if let Some(wastes) = wastes {
+        let card_id = runner.state().objects[&wastes].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: wastes,
+                card_id,
+            })
+            .expect("Wastes is played");
+        lands.push(wastes);
+    }
+    let offered = legal_actions(runner.state()).iter().any(
+        |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == colorless),
+    );
+    let card_id = runner.state().objects[&colorless].card_id;
+    let cast = runner.act(GameAction::CastSpell {
+        object_id: colorless,
+        card_id,
+        targets: vec![],
+        payment_mode: mode,
+    });
+    if mode == CastPaymentMode::Manual && cast.is_ok() {
+        // Pin one black mana to the sole {C} pip: the pin gate and the
+        // client's remaining-cost view read the same typed permission.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: lands[0],
+                ability_index: 0,
+            })
+            .expect("a Swamp taps for {B}");
+        let pip_id = runner.state().players[0].mana_pool.mana[0].pip_id;
+        runner
+            .act(GameAction::SpendPoolMana { pip_id })
+            .expect("black mana may be pinned to {C} under any type");
+        assert_eq!(
+            derive_views(runner.state(), Some(P0)).pending_payment_remaining,
+            Some(ManaCost::NoCost),
+            "the pinned black mana covers the {{C}} pip"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the pinned payment finishes the cast");
+    }
+    let on_stack = runner.state().objects[&colorless].zone == Zone::Stack;
+    assert_eq!(
+        offered, on_stack,
+        "{grant}: the legal-action offer and the real cast agree"
+    );
+    if !on_stack {
+        assert!(cast.is_err(), "{grant}: the refused cast reports an error");
+        assert_eq!(runner.state().objects[&colorless].zone, Zone::Exile);
+        return false;
+    }
+    let object = &runner.state().objects[&colorless];
+    assert_eq!(object.mana_spent_to_cast_amount, 1, "one mana paid {{C}}");
+    // CR 609.4b: the concession never changes what mana was actually spent.
+    let black = u32::from(wastes.is_none());
+    assert_eq!(object.colors_spent_to_cast.black, black);
+    let tapped: Vec<_> = lands
+        .iter()
+        .filter(|land| runner.state().objects[land].tapped)
+        .copied()
+        .collect();
+    assert_eq!(tapped.len(), 1, "exactly one land paid {{C}}");
+    if let Some(wastes) = wastes {
+        assert_eq!(tapped, vec![wastes], "the real colorless mana paid {{C}}");
+    }
+    true
+}
+
+/// CR 118.14 + CR 106.1b: "mana of any type can be spent" pays `{C}` with a
+/// Swamp — auto-pay and a manual pin alike, with or without a board-wide
+/// any-color static beside it. Pre-fix both permissions projected to "any
+/// color", which never pays `{C}`, so the cast was refused.
+#[test]
+fn any_type_rider_pays_a_colorless_requirement_with_colored_mana() {
+    for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        for orrery in [false, true] {
+            assert!(
+                colorless_requirement_case("Bloodsoaked Insight", false, orrery, mode),
+                "{mode:?}, Orrery={orrery}: the {{C}} card is cast with a Swamp"
+            );
+        }
+    }
+}
+
+/// CR 609.4b + CR 106.1a: "as though it were mana of any color" does not reach
+/// colorless — the `{C}` card is refused with only Swamps (Orrery, also any
+/// color, changes nothing) and cast once a Wastes supplies real `{C}`. The
+/// half that keeps the any-type test above from passing on an engine that
+/// lets any mana pay anything.
+#[test]
+fn any_color_rider_still_needs_real_colorless_mana() {
+    for orrery in [false, true] {
+        assert!(
+            !colorless_requirement_case("Siphon Insight", false, orrery, CastPaymentMode::Auto),
+            "Orrery={orrery}: Swamps alone must not pay {{C}} under any color"
+        );
+    }
+    assert!(
+        colorless_requirement_case("Siphon Insight", true, false, CastPaymentMode::Auto),
+        "with a Wastes, the {{C}} card is cast"
+    );
 }
