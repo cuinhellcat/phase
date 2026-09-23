@@ -35,11 +35,11 @@ use crate::types::ability::{
     AttackSubject, CastCostModifier, CastFromZoneDriver, CastPermissionConstraint,
     CastingPermission, CombatHistoryScope, Comparator, ConjureSource, ContinuousModification,
     ControllerRef, DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
-    ManaSpendPermission, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter,
-    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
-    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
+    QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};

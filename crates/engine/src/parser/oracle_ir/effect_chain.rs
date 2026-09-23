@@ -16,9 +16,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ControllerRef,
     CostReduction, DelayedTriggerCondition, Duration, ManaSpendPermission, MultiTargetSpec,
-    OpponentMayScope, PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, UnlessPayModifier,
+    OpponentMayScope, PlayerFilter, QuantityExpr, RoundingMode, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
