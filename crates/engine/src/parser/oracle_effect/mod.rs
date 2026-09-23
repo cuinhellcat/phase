@@ -15036,7 +15036,10 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 frequency: CastFrequency::OncePerTurn,
                 source_id: None,
                 exiled_by_ability_controller: None,
-                mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                // CR 609.4b + CR 106.1a: Evelyn prints "spend mana as though it
+                // were mana of any color" — the static line parser accepts only
+                // that spelling, so the grant can never pay `{C}` with colored mana.
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,

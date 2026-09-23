@@ -59,6 +59,12 @@ card for as long as it remains exiled, and mana of any type can be spent to cast
 monarch, until end of turn, you may cast a spell from among cards exiled with this enchantment \
 without paying its mana cost.";
 
+const EVELYN_THE_COVETOUS: &str = "Flash\n\
+Whenever Evelyn or another Vampire you control enters, exile the top card of each player's library \
+with a collection counter on it.\n\
+Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an \
+ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
+
 const BLOODSOAKED_INSIGHT: &str = "Target opponent exiles the top three cards of their library. Until \
 the end of your next turn, you may play those cards. If you cast a spell this way, mana of any type \
 can be spent to cast it.";
@@ -464,6 +470,7 @@ fn colorless_requirement_case(
     let (grant_text, expected) = match grant {
         "Siphon Insight" => (SIPHON_INSIGHT, ManaSpendPermission::AnyColor),
         "Bloodsoaked Insight" => (BLOODSOAKED_INSIGHT, ManaSpendPermission::AnyTypeOrColor),
+        "Evelyn, the Covetous" => (EVELYN_THE_COVETOUS, ManaSpendPermission::AnyColor),
         other => unreachable!("no such grant in this file: {other}"),
     };
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -471,6 +478,8 @@ fn colorless_requirement_case(
     for name in ["Deep", "Third", "Second"] {
         scenario.add_card_to_library_top(P1, name);
     }
+    // Evelyn exiles the top card of EACH library.
+    scenario.add_card_to_library_top(P0, "Own Top");
     let colorless = {
         let mut b = scenario.add_spell_to_library_top(P1, "Colorless Sorcery", false);
         b.with_mana_cost(ManaCost::Cost {
@@ -497,7 +506,11 @@ fn colorless_requirement_case(
         );
     }
     let spell = {
-        let mut b = scenario.add_spell_to_hand_from_oracle(P0, grant, false, grant_text);
+        let mut b = if grant == "Evelyn, the Covetous" {
+            scenario.add_creature_to_hand_from_oracle(P0, grant, 2, 5, grant_text)
+        } else {
+            scenario.add_spell_to_hand_from_oracle(P0, grant, false, grant_text)
+        };
         b.with_mana_cost(ManaCost::default());
         b.id()
     };
@@ -600,17 +613,20 @@ fn any_type_rider_pays_a_colorless_requirement_with_colored_mana() {
 /// colorless — the `{C}` card is refused with only Swamps (Orrery, also any
 /// color, changes nothing) and cast once a Wastes supplies real `{C}`. The
 /// half that keeps the any-type test above from passing on an engine that
-/// lets any mana pay anything.
+/// lets any mana pay anything. Evelyn, the Covetous prints "any color" too;
+/// her collection-counter grant used to be recorded as any type.
 #[test]
 fn any_color_rider_still_needs_real_colorless_mana() {
-    for orrery in [false, true] {
+    for grant in ["Siphon Insight", "Evelyn, the Covetous"] {
+        for orrery in [false, true] {
+            assert!(
+                !colorless_requirement_case(grant, false, orrery, CastPaymentMode::Auto),
+                "{grant}, Orrery={orrery}: Swamps alone must not pay {{C}} under any color"
+            );
+        }
         assert!(
-            !colorless_requirement_case("Siphon Insight", false, orrery, CastPaymentMode::Auto),
-            "Orrery={orrery}: Swamps alone must not pay {{C}} under any color"
+            colorless_requirement_case(grant, true, false, CastPaymentMode::Auto),
+            "{grant}: with a Wastes, the {{C}} card is cast"
         );
     }
-    assert!(
-        colorless_requirement_case("Siphon Insight", true, false, CastPaymentMode::Auto),
-        "with a Wastes, the {{C}} card is cast"
-    );
 }

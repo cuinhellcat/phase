@@ -48675,10 +48675,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     };
     assert_eq!(*frequency, CastFrequency::OncePerTurn);
     assert_eq!(*mode, CardPlayMode::Play);
-    assert_eq!(
-        *mana_spend_permission,
-        Some(ManaSpendPermission::AnyTypeOrColor)
-    );
+    assert_eq!(*mana_spend_permission, Some(ManaSpendPermission::AnyColor));
     assert_eq!(
         target,
         &TargetFilter::TrackedSet {
