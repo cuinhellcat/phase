@@ -72071,7 +72071,7 @@ fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
 /// lowering (a pin of the untouched path, green with or without the fold). A
 /// concession narrower than "mana" after a grant ("colorless mana as though
 /// …", Abstruse Appropriation; "mana from snow sources as though …", Draugr
-/// Necromancer) is an honest gap: the grant lowers, the rider is
+/// Necromancer's wording) is an honest gap: the grant lowers, the rider is
 /// `Unimplemented`, and the grant is never widened to every mana.
 #[test]
 fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
@@ -72213,6 +72213,43 @@ fn standalone_single_kind_mana_concession_is_a_gap_not_a_widened_static() {
             (!single_kind, single_kind),
             "{text:?}: (board-wide static, honest gap); chain: {effects:?}"
         );
+    }
+}
+
+/// CR 118.14 + CR 106.1a/106.1b: the standalone static keeps the printed word —
+/// "any type" in either spelling (North Star's shape, "mana of any type can be
+/// spent") is `AnyTypeOrColor` and so pays `{C}`, "any color" stays `AnyColor`.
+#[test]
+fn standalone_any_mana_static_keeps_the_printed_concession() {
+    for (sentence, expected) in [
+        (
+            "You may spend mana as though it were mana of any type to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+        (
+            "You may spend mana as though it were mana of any color to cast that spell.",
+            ManaSpendPermission::AnyColor,
+        ),
+        (
+            "Mana of any type can be spent to cast that spell.",
+            ManaSpendPermission::AnyTypeOrColor,
+        ),
+    ] {
+        let text = format!("Draw a card. {sentence}");
+        let chain = parse_effect_chain(&text, AbilityKind::Spell);
+        let concessions: Vec<ManaSpendPermission> = collect_chain_effects(&chain)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => static_abilities.iter().find_map(|s| match s.mode {
+                    StaticMode::SpendManaAsAnyColor { concession, .. } => Some(concession),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(concessions, vec![expected], "{text:?}");
     }
 }
 

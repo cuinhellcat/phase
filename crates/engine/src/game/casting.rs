@@ -4504,14 +4504,18 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
     // against the spell object. With no spell in context (effect/activation
     // payments), only the unfiltered board-wide static applies.
     let static_grant = match source_id {
-        Some(spell_id) => super::static_abilities::player_can_spend_as_any_color_for_spell_object(
+        Some(spell_id) => super::static_abilities::player_mana_spend_permission_for_spell_object(
             state, player, spell_id,
         ),
-        None => super::static_abilities::player_can_spend_as_any_color(state, player),
+        None => super::static_abilities::player_board_wide_mana_spend_permission(state, player),
     };
-    // CR 118.14 + CR 609.4b: A global color concession must not mask the
-    // broader any-type concession attached to the elected cast permission.
-    let static_grant = static_grant.then_some(crate::types::ability::ManaSpendPermission::AnyColor);
+    // CR 118.14 + CR 609.4b: every concession in force applies to the payment,
+    // so a static and the elected cast permission combine to the broader one —
+    // a global any-color static never masks the grant's any-type concession,
+    // nor the grant a static any-type one (Vizier of the Menagerie).
+    let with_static = |elected: Option<crate::types::ability::ManaSpendPermission>| {
+        crate::types::ability::ManaSpendPermission::union_optional(elected, static_grant)
+    };
     let Some(spell_id) = source_id else {
         return static_grant;
     };
@@ -4539,8 +4543,9 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
     // CR 601.2a + CR 609.4b: The static source recorded on the elected
     // `ExilePermission` is the only static permission whose rider applies.
     if let Some(CastingVariant::ExilePermission { source, .. }) = casting_variant {
-        return exile_static_mana_spend_permission(state, player, spell_id, source)
-            .or(static_grant);
+        return with_static(exile_static_mana_spend_permission(
+            state, player, spell_id, source,
+        ));
     }
 
     let permission_index = pending
@@ -4554,16 +4559,18 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
             })
         });
     if let Some(index) = permission_index {
-        return object_cast_mana_spend_permission(state, player, spell_id, index).or(static_grant);
+        return with_static(object_cast_mana_spend_permission(
+            state, player, spell_id, index,
+        ));
     }
 
     // Static-only pre-announcement affordability: bind to the same source the
     // prepared cast will elect instead of scanning every functioning source.
-    exile_cast_permission_source(state, player, spell_id)
-        .and_then(|(source, _, _)| {
+    with_static(
+        exile_cast_permission_source(state, player, spell_id).and_then(|(source, _, _)| {
             exile_static_mana_spend_permission(state, player, spell_id, source)
-        })
-        .or(static_grant)
+        }),
+    )
 }
 
 fn object_cast_mana_spend_permission(
@@ -4612,21 +4619,16 @@ pub(super) fn player_mana_spend_permission_for_payment(
     // spell costs fall through to spell-class and exile-cast permission checks.
     match ctx {
         Some(PaymentContext::Effect) => {
-            super::static_abilities::player_can_spend_as_any_color(state, player)
-                .then_some(crate::types::ability::ManaSpendPermission::AnyColor)
+            super::static_abilities::player_board_wide_mana_spend_permission(state, player)
         }
-        Some(PaymentContext::Activation { .. }) => {
-            if source_id.is_some_and(|id| {
-                super::static_abilities::player_can_spend_as_any_color_for_activation_source(
+        Some(PaymentContext::Activation { .. }) => match source_id {
+            Some(id) => {
+                super::static_abilities::player_mana_spend_permission_for_activation_source(
                     state, player, id,
                 )
-            }) {
-                Some(crate::types::ability::ManaSpendPermission::AnyColor)
-            } else {
-                super::static_abilities::player_can_spend_as_any_color(state, player)
-                    .then_some(crate::types::ability::ManaSpendPermission::AnyColor)
             }
-        }
+            None => super::static_abilities::player_board_wide_mana_spend_permission(state, player),
+        },
         _ => player_mana_spend_permission_for_optional_spell(state, player, source_id),
     }
 }

@@ -24163,6 +24163,7 @@ fn static_players_may_spend_mana_as_any_color() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Player));
@@ -24177,6 +24178,7 @@ fn static_you_may_spend_mana_as_any_color_still_parses() {
         StaticMode::SpendManaAsAnyColor {
             spell_filter: None,
             activation_source_filter: None,
+            concession: crate::types::ability::ManaSpendPermission::AnyColor,
         }
     );
 }

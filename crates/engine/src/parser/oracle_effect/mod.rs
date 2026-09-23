@@ -18623,18 +18623,29 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
             // one kind of mana only. `SpendManaAsAnyColor` would relax every
             // mana, so the clause is an honest gap instead — the same answer
             // the rider fold gives after a grant.
-            if nom_primitives::scan_at_word_boundaries(&lower, parse_spend_as_though_any_mana)
-                == Some(ManaSpendRider::SingleKind)
-            {
-                return parsed_clause(Effect::unimplemented(
-                    UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP,
-                    text,
-                ));
-            }
+            // CR 118.14 + CR 106.1b: otherwise the printed word decides —
+            // "any type" also covers colorless, "any color" does not.
+            let concession = match nom_primitives::scan_at_word_boundaries(
+                &lower,
+                parse_spend_as_though_any_mana,
+            )
+            .or_else(|| {
+                nom_primitives::scan_at_word_boundaries(&lower, parse_any_mana_can_be_spent)
+            }) {
+                Some(ManaSpendRider::SingleKind) => {
+                    return parsed_clause(Effect::unimplemented(
+                        UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP,
+                        text,
+                    ));
+                }
+                Some(ManaSpendRider::Concession(permission)) => permission,
+                None => ManaSpendPermission::AnyColor,
+            };
             return parsed_clause(Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                     spell_filter: None,
                     activation_source_filter: None,
+                    concession,
                 })
                 .description(text.to_string())],
                 duration: None,
@@ -28765,7 +28776,8 @@ fn try_parse_cast_target_from_graveyard_any_mana(text: &str, ctx: &ParseContext)
     else {
         return None;
     };
-    // CR 118.14 + CR 609.4b: scope the concession to this specific granted cast.
+    // CR 609.4b (+ CR 118.14 for "any type"): scope the concession to this
+    // specific granted cast.
     *mana_spend_permission = Some(concession);
     // CR 608.2g: "cast target ... from a graveyard" with no duration is a
     // during-resolution paid cast, not a lingering permission.
@@ -29043,13 +29055,28 @@ fn parse_spend_as_though_any_mana(input: &str) -> OracleResult<'_, ManaSpendRide
     .parse(input)
 }
 
+/// CR 118.14 + CR 609.4b: "mana of any <color|type> can be spent" — the other
+/// spelling of the concession, shared by the rider fold and the standalone
+/// fallback like `parse_spend_as_though_any_mana`.
+fn parse_any_mana_can_be_spent(input: &str) -> OracleResult<'_, ManaSpendRider> {
+    map(
+        preceded(
+            tag("mana of any "),
+            terminated(parse_any_mana_word, tag(" can be spent")),
+        ),
+        ManaSpendRider::Concession,
+    )
+    .parse(input)
+}
+
 /// CR 118.14 + CR 609.4b: The any-color / any-type mana rider that follows a cast grant —
 /// "[you may] spend mana as though it were mana of any color to cast that
 /// spell" (Siphon Insight, Robber of the Rich), "Mana of any type can be spent
 /// to cast spells this way" (Black Cat, Cunning Thief, The Madcap Jester).
-/// The rider states no permission of its own: CR 118.14 has it apply only to
-/// mana spent casting through the PRECEDING grant, so it is a `PriorModifier`,
-/// not an effect. The word after "any" decides the permission
+/// The rider states no permission of its own: it applies only to mana spent
+/// casting through the PRECEDING grant — CR 118.14 says so for "mana of any
+/// type", and the "any color" rider names its object itself ("to cast that
+/// spell") — so it is a `PriorModifier`, not an effect. The word after "any" decides the permission
 /// (`parse_any_mana_word`); a rider that relaxes only one kind of mana is
 /// reported as `ManaSpendRider::SingleKind`.
 pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
@@ -29082,13 +29109,7 @@ pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
             opt(tag::<_, _, Vbe>("you may ")),
             parse_spend_as_though_any_mana,
         ),
-        map(
-            preceded(
-                tag("mana of any "),
-                terminated(parse_any_mana_word, tag(" can be spent")),
-            ),
-            ManaSpendRider::Concession,
-        ),
+        parse_any_mana_can_be_spent,
     ))
     .parse(trimmed)
     .ok()?;
@@ -37319,7 +37340,8 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 118.14 + CR 609.4b: Any-color / any-type mana rider — "[, and you
         // may] spend mana as though it were mana of any color to cast that
         // spell" / "Mana of any type can be spent to cast spells this way". It
-        // applies only to mana spent casting through the PRECEDING grant, so it
+        // applies only to mana spent casting through the PRECEDING grant (CR
+        // 118.14 for "any type"; the "any color" rider names "that spell"), so it
         // folds onto that grant's `mana_spend_permission` and emits no sibling. Left
         // standalone it degraded to a bare board-wide `SpendManaAsAnyColor`
         // static that no cast-time payment check ever consults — the granted

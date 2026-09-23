@@ -636,7 +636,7 @@ mod tests {
     /// `AbilityDefinition` onto the conjured duplicate's
     /// `abilities`/`base_abilities` (wrongly board-wide in scope, AND never
     /// even checked: `static_abilities.rs`'s
-    /// `player_can_spend_as_any_color_for_spell_object` only ever scans
+    /// `player_mana_spend_permission_for_spell_object` only ever scans
     /// `game_active_statics` -- battlefield + command zone -- never hand or
     /// the stack, per CR 113.6e the very zones this self-cast concession
     /// would need to function in).
@@ -779,7 +779,7 @@ mod tests {
         // action is rejected outright regardless of whether the parser gate
         // above works. NON-DISCRIMINATING (see the mutation-test note above
         // this test): `static_abilities.rs`'s
-        // `player_can_spend_as_any_color_for_spell_object` only ever scans
+        // `player_mana_spend_permission_for_spell_object` only ever scans
         // `game_active_statics` -- battlefield + command zone -- so even a
         // rejected-gate regression that let the grant install onto the
         // duplicate's HAND-zone `abilities` would never be found by that

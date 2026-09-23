@@ -3,8 +3,9 @@
 //! spend mana as though it were mana of any color to cast that spell" (Siphon
 //! Insight), "If you cast a spell this way, mana of any type can be spent to
 //! cast it" (Bloodsoaked Insight) — is a payment concession that applies only
-//! to mana spent casting through the granted permission (CR 118.14 + CR
-//! 609.4b), not an effect of its own.
+//! to mana spent casting through the granted permission (CR 609.4b; CR 118.14
+//! says so for "mana of any type", the any-color rider names "that spell"),
+//! not an effect of its own.
 //!
 //! Bug: the rider chunk reached the catch-all `SpendManaAsAnyColor` branch of
 //! `lower_imperative_clause` and became a sibling `GenericEffect` with a bare
@@ -64,6 +65,10 @@ Whenever Evelyn or another Vampire you control enters, exile the top card of eac
 with a collection counter on it.\n\
 Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an \
 ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
+
+/// Vizier of the Menagerie's concession line — "mana of any type", so a
+/// colored mana may pay a creature spell's `{C}` (CR 118.14).
+const VIZIER_CONCESSION: &str = "You can spend mana of any type to cast creature spells.";
 
 const BLOODSOAKED_INSIGHT: &str = "Target opponent exiles the top three cards of their library. Until \
 the end of your next turn, you may play those cards. If you cast a spell this way, mana of any type \
@@ -460,11 +465,15 @@ fn court_of_locthwains_exiled_card_is_free_for_the_monarch() {
 /// Exile a `{C}` sorcery from P1's library with `grant` and try to cast it from
 /// two Swamps (plus a Wastes played from hand when `wastes`). `orrery` adds
 /// Chromatic Orrery — a board-wide ANY-COLOR static that must not mask the
-/// any-type concession elected with the grant. Returns whether it was cast.
+/// any-type concession elected with the grant. `vizier` makes the exiled card a
+/// creature and adds Vizier of the Menagerie's static any-type concession for
+/// creature spells, which must combine with the grant's own. Returns whether
+/// it was cast.
 fn colorless_requirement_case(
     grant: &str,
     wastes: bool,
     orrery: bool,
+    vizier: bool,
     mode: CastPaymentMode,
 ) -> bool {
     let (grant_text, expected) = match grant {
@@ -486,8 +495,14 @@ fn colorless_requirement_case(
             shards: vec![ManaCostShard::Colorless],
             generic: 0,
         });
+        if vizier {
+            b.as_creature();
+        }
         b.id()
     };
+    if vizier {
+        scenario.add_creature_from_oracle(P0, "Vizier of the Menagerie", 3, 4, VIZIER_CONCESSION);
+    }
     let mut lands = vec![
         scenario.add_basic_land(P0, ManaColor::Black),
         scenario.add_basic_land(P0, ManaColor::Black),
@@ -602,7 +617,7 @@ fn any_type_rider_pays_a_colorless_requirement_with_colored_mana() {
     for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
         for orrery in [false, true] {
             assert!(
-                colorless_requirement_case("Bloodsoaked Insight", false, orrery, mode),
+                colorless_requirement_case("Bloodsoaked Insight", false, orrery, false, mode),
                 "{mode:?}, Orrery={orrery}: the {{C}} card is cast with a Swamp"
             );
         }
@@ -620,13 +635,101 @@ fn any_color_rider_still_needs_real_colorless_mana() {
     for grant in ["Siphon Insight", "Evelyn, the Covetous"] {
         for orrery in [false, true] {
             assert!(
-                !colorless_requirement_case(grant, false, orrery, CastPaymentMode::Auto),
+                !colorless_requirement_case(grant, false, orrery, false, CastPaymentMode::Auto),
                 "{grant}, Orrery={orrery}: Swamps alone must not pay {{C}} under any color"
             );
         }
         assert!(
-            colorless_requirement_case(grant, true, false, CastPaymentMode::Auto),
+            colorless_requirement_case(grant, true, false, false, CastPaymentMode::Auto),
             "{grant}: with a Wastes, the {{C}} card is cast"
         );
     }
+}
+
+/// CR 118.14 + CR 609.4b: Vizier of the Menagerie's STATIC "mana of any type"
+/// concession pays a creature spell's `{C}` with a Swamp — and nothing else:
+/// a `{C}` sorcery stays unpayable (the concession names creature spells), and
+/// Chromatic Orrery's any-COLOR static never pays `{C}`. Pre-fix every static
+/// concession projected to "any color", so the creature was refused too.
+#[test]
+fn vizier_static_any_type_pays_a_colorless_creature_spell() {
+    for (vizier, orrery, creature, castable) in [
+        (true, false, true, true),
+        (true, false, false, false),
+        (false, true, true, false),
+    ] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        if vizier {
+            scenario.add_creature_from_oracle(
+                P0,
+                "Vizier of the Menagerie",
+                3,
+                4,
+                VIZIER_CONCESSION,
+            );
+        }
+        if orrery {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Chromatic Orrery",
+                "You may spend mana as though it were mana of any color.",
+            );
+        }
+        let spell = {
+            let mut b = scenario.add_spell_to_hand(P0, "Colorless Card", false);
+            b.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Colorless],
+                generic: 0,
+            });
+            if creature {
+                b.as_creature();
+            }
+            b.id()
+        };
+        let mut runner = scenario.build();
+        let label = format!("Vizier={vizier}, Orrery={orrery}, creature={creature}");
+        let offered = legal_actions(runner.state()).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell),
+        );
+        assert_eq!(offered, castable, "{label}: legal-action offer");
+        let card_id = runner.state().objects[&spell].card_id;
+        let cast = runner.act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        });
+        assert_eq!(cast.is_ok(), castable, "{label}: the real cast");
+        if castable {
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+            assert!(
+                runner.state().objects[&swamp].tapped,
+                "{label}: the Swamp paid {{C}}"
+            );
+            assert_eq!(
+                runner.state().objects[&spell].colors_spent_to_cast.black,
+                1,
+                "CR 609.4b: the concession does not recolor the mana spent"
+            );
+        } else {
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+        }
+    }
+}
+
+/// CR 609.4b: every concession in force applies to one payment. Siphon
+/// Insight's grant is any COLOR, Vizier's static any TYPE for creature spells:
+/// together a Swamp pays an exiled creature's `{C}`. (Without Vizier the same
+/// cast is refused — `any_color_rider_still_needs_real_colorless_mana`.)
+#[test]
+fn a_static_any_type_concession_combines_with_an_any_color_grant() {
+    assert!(colorless_requirement_case(
+        "Siphon Insight",
+        false,
+        false,
+        true,
+        CastPaymentMode::Auto
+    ));
 }

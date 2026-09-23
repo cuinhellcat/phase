@@ -34964,12 +34964,12 @@ fn phyrexian_submit_rejects_stale_paylife_under_insufficient_life() {
     // will reject PayLife. This path is exercised through the dispatcher, not directly.
     // Here we assert the shape is correct by re-computing shards.
     let spell_meta = build_spell_meta(&state, PlayerId(0), spell);
-    let any_color =
-        crate::game::static_abilities::player_can_spend_as_any_color(&state, PlayerId(0));
+    let mana_spend_permission =
+        crate::game::static_abilities::player_board_wide_mana_spend_permission(&state, PlayerId(0));
     let permissions = crate::game::static_abilities::build_cost_permission_context(
         &state,
         PlayerId(0),
-        any_color.then_some(ManaSpendPermission::AnyColor),
+        mana_spend_permission,
     );
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let current_shards = crate::game::mana_payment::compute_phyrexian_shards(
@@ -48528,6 +48528,7 @@ fn add_vizier_filtered_any_type_source(state: &mut GameState, player: PlayerId) 
     let def = StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
         spell_filter: Some(TargetFilter::Typed(TypedFilter::creature())),
         activation_source_filter: None,
+        concession: crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
     })
     .affected(TargetFilter::Controller);
     state
@@ -48570,7 +48571,7 @@ fn add_single_blue_spell(
 /// form, the noncreature assertion below flips (a sorcery would also become
 /// payable). If the static is removed entirely, the creature assertion flips
 /// (the {U} cost becomes unpayable from a red-only pool). The seam under test
-/// is `player_can_spend_as_any_color_for_spell_object` →
+/// is `player_mana_spend_permission_for_spell_object` →
 /// `player_mana_spend_permission_for_optional_spell` →
 /// `can_pay_cost_after_auto_tap`.
 #[test]
@@ -48602,10 +48603,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     add_mana(&mut state, player, ManaType::Red, 2);
 
     // POSITIVE: a creature spell matches the filter, so off-color mana pays.
-    assert!(
-        crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, creature
         ),
+        Some(ManaSpendPermission::AnyTypeOrColor),
         "the filtered static must grant any-type-mana spend for a creature spell"
     );
     assert!(
@@ -48621,10 +48623,11 @@ fn vizier_filtered_static_grants_any_type_mana_for_creature_spells() {
     // NEGATIVE: a noncreature spell does NOT match the filter — off-color mana
     // must NOT help. This is what distinguishes the filtered static from the
     // unfiltered board-wide form.
-    assert!(
-        !crate::game::static_abilities::player_can_spend_as_any_color_for_spell_object(
+    assert_eq!(
+        crate::game::static_abilities::player_mana_spend_permission_for_spell_object(
             &state, player, sorcery
         ),
+        None,
         "the filtered static must NOT grant any-type-mana spend for a noncreature spell"
     );
     assert!(

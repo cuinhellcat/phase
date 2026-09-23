@@ -5120,11 +5120,12 @@ pub enum PlayPermissionInvalidation {
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaSpendPermission {
     /// CR 609.4b + CR 106.1a: Mana may be spent as though it were mana of any
     /// color for this payment. This relaxes colored requirements but does not
     /// make colored mana satisfy a colorless (`{C}`) or snow (`{S}`) requirement.
+    #[default]
     AnyColor,
     /// CR 118.14 + CR 106.1b: "Mana of any type can be spent" — mana may be
     /// spent as though it were colorless mana or mana of any color, so it also
@@ -5143,6 +5144,31 @@ impl ManaSpendPermission {
             Self::AnyColor => !matches!(required, crate::types::mana::ManaType::Colorless),
             Self::AnyTypeOrColor => true,
         }
+    }
+
+    /// CR 609.4b: each concession only changes how the cost may be paid; with
+    /// several in force the payment may use any of them, so the broader decides
+    /// ("any type" covers "any color").
+    pub const fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AnyColor, Self::AnyColor) => Self::AnyColor,
+            _ => Self::AnyTypeOrColor,
+        }
+    }
+
+    /// CR 609.4b: `union` over optional concessions — `None` means "no
+    /// concession" and yields to the other side.
+    pub const fn union_optional(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.union(b)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+
+    /// Serde helper: `AnyColor` is the default a static concession omits.
+    pub const fn is_any_color(&self) -> bool {
+        matches!(self, Self::AnyColor)
     }
 }
 
@@ -15543,7 +15569,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // (every spell the controller casts), not "this spell" -- a real
             // rules defect, not just a coverage gap; and (2) even a correctly
             // self-scoped static would still need a NEW self-referential runtime
-            // check, because `player_can_spend_as_any_color_for_spell_object`
+            // check, because `player_mana_spend_permission_for_spell_object`
             // (static_abilities.rs) only scans `game_active_statics`
             // (battlefield + command zone) for a granting permanent's OWN
             // static, while CR 113.6e says an ability that modifies how that

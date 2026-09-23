@@ -770,7 +770,8 @@ pub(crate) enum PriorModifier {
     /// spell", Siphon Insight; "Mana of any type can be spent to cast a spell
     /// this way", Gonti, Night Minister) onto the prior cast grant — a
     /// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` — since
-    /// it applies only to mana spent casting through that grant. The rider
+    /// it applies only to mana spent casting through that grant (CR 118.14 for
+    /// "any type"; the "any color" rider names its own object). The rider
     /// states no permission of its own.
     ManaSpendPermission(ManaSpendPermission),
     /// CR 508.4 / CR 614.1: mark the prior token/copy/zone-change to enter tapped
