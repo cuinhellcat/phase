@@ -10151,6 +10151,14 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        // CR 608.2d: "you may transform/convert ~. If you do, …" cannot be
+        // chosen once the transform is impossible — accepting would record a
+        // performed effect for a no-op and still run the "If you do" rider
+        // (Megatron, Tyrant).
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+            ..
+        } => transform_effect::optional_self_transform_is_impossible(state, ability),
         Effect::PayCost {
             cost: cost @ AbilityCost::TapCreatures { .. },
             payer,
