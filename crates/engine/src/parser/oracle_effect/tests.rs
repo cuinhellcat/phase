@@ -72128,6 +72128,22 @@ fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
         assert!(
             effects.iter().any(|effect| matches!(
                 effect,
+                Effect::CastFromZone {
+                    mana_spend_permission: None,
+                    ..
+                } | Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mana_spend_permission: None,
+                        ..
+                    },
+                    ..
+                }
+            )),
+            "the grant the rider follows still lowers, without a concession: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
                 Effect::Unimplemented { name, .. }
                     if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
             )),
@@ -72140,6 +72156,121 @@ fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
             "no bare board-wide static survives: {effects:?}"
         );
     }
+}
+
+/// CR 609.4b + CR 106.1b: a single-kind concession with NO cast grant before it
+/// ("spend colorless mana …", "mana from snow sources …", False Dawn's "white
+/// mana", Quicksilver Elemental's "blue mana") is the same honest gap as after a
+/// grant — never the board-wide `SpendManaAsAnyColor` that relaxes every mana.
+/// The plain "spend mana …" sentence on the same route still lowers to that
+/// static (the positive half).
+#[test]
+fn standalone_single_kind_mana_concession_is_a_gap_not_a_widened_static() {
+    for (text, single_kind) in [
+        (
+            "Draw a card. You may spend colorless mana as though it were mana of any color to \
+             cast that spell.",
+            true,
+        ),
+        (
+            "Draw a card. You may spend mana from snow sources as though it were mana of any \
+             type to cast those spells.",
+            true,
+        ),
+        (
+            "Until end of turn, you may spend white mana as though it were mana of any color.",
+            true,
+        ),
+        (
+            "You may spend blue mana as though it were mana of any color to pay the activation \
+             costs of this creature's abilities.",
+            true,
+        ),
+        (
+            "Draw a card. You may spend mana as though it were mana of any color to cast that \
+             spell.",
+            false,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        let widened = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            )
+        });
+        let gap = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Unimplemented { name, .. }
+                    if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+            )
+        });
+        assert_eq!(
+            (widened, gap),
+            (!single_kind, single_kind),
+            "{text:?}: (board-wide static, honest gap); chain: {effects:?}"
+        );
+    }
+}
+
+/// CR 609.4b: admission and stamp share ONE traversal
+/// (`awaiting_mana_spend_grant_depth`). With an eligible grant both at the top
+/// and in `sub_ability`, the rider goes to the deeper one — the grant it
+/// follows in text order — and the outer grant stays untouched.
+#[test]
+fn mana_spend_rider_admission_and_stamp_pick_the_same_grant() {
+    let siphon = parse_effect_chain(
+        "Look at the top two cards of target opponent's library. Exile one of them face down \
+         and put the other on the bottom of that library. You may play the exiled card for as \
+         long as it remains exiled.",
+        AbilityKind::Spell,
+    );
+    let grant = collect_chain_effects(&siphon)
+        .into_iter()
+        .find(|effect| effect_awaits_mana_spend_permission(effect))
+        .cloned()
+        .expect("the play grant lowers without a concession");
+    let mut outer = AbilityDefinition::new(AbilityKind::Spell, grant.clone());
+    outer.sub_ability = Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, grant)));
+    assert_eq!(
+        awaiting_mana_spend_grant_depth(&outer.effect, outer.sub_ability.as_deref()),
+        Some(1),
+        "the deeper grant is the one the rider follows"
+    );
+
+    let mut defs = vec![outer];
+    assert!(attach_mana_spend_permission_to_prior_cast_grant(
+        &mut defs,
+        ManaSpendPermission::AnyColor
+    ));
+    let outer = &defs[0];
+    let inner = outer.sub_ability.as_deref().expect("sub_ability kept");
+    assert!(
+        effect_awaits_mana_spend_permission(&outer.effect),
+        "the outer grant is not the one admitted, so it stays unstamped: {outer:?}"
+    );
+    assert!(
+        matches!(
+            &*inner.effect,
+            Effect::CastFromZone {
+                mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                ..
+            } | Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+                    ..
+                },
+                ..
+            }
+        ),
+        "the admitted (deeper) grant carries the concession: {inner:?}"
+    );
 }
 
 /// CR 609.4b: the rider grammar — subject, concession, and cast object are

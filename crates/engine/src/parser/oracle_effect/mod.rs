@@ -18609,13 +18609,25 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // in the chunk sequence (a rider after a grant is folded onto the grant by
     // `try_parse_mana_spend_rider` earlier). Produce a GenericEffect with
     // SpendManaAsAnyColor static.
-    // Variants: "spend colorless mana as though..." / "mana of any color to cast..."
     {
         let lower = text.to_lowercase();
         if nom_primitives::scan_contains(&lower, "as though it were mana of any color")
             || nom_primitives::scan_contains(&lower, "as though it were mana of any type")
             || nom_primitives::scan_contains(&lower, "mana of any type can be spent to cast")
         {
+            // A subject narrower than "mana" ("spend white mana as though …",
+            // False Dawn; "spend blue mana …", Quicksilver Elemental) relaxes
+            // one kind of mana only. `SpendManaAsAnyColor` would relax every
+            // mana, so the clause is an honest gap instead — the same answer
+            // the rider fold gives after a grant.
+            if nom_primitives::scan_at_word_boundaries(&lower, parse_spend_as_though_any_mana)
+                == Some(ManaSpendRider::SingleKind)
+            {
+                return parsed_clause(Effect::unimplemented(
+                    UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP,
+                    text,
+                ));
+            }
             return parsed_clause(Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor {
                     spell_filter: None,
@@ -29000,6 +29012,34 @@ fn parse_any_mana_word(input: &str) -> OracleResult<'_, ManaSpendPermission> {
     .parse(input)
 }
 
+/// CR 609.4b: "spend <subject> as though it were mana of any <color|type>" —
+/// "spend mana" is the concession `ManaSpendPermission` models; any other
+/// subject ("colorless mana", "white mana", "mana from snow sources") relaxes a
+/// single kind of mana and is reported as `ManaSpendRider::SingleKind`. The
+/// rider fold and the standalone static fallback in `lower_imperative_clause`
+/// both classify through this, so a single-kind subject is never widened.
+fn parse_spend_as_though_any_mana(input: &str) -> OracleResult<'_, ManaSpendRider> {
+    alt((
+        map(
+            preceded(
+                tag("spend mana as though it were mana of any "),
+                parse_any_mana_word,
+            ),
+            ManaSpendRider::Concession,
+        ),
+        value(
+            ManaSpendRider::SingleKind,
+            (
+                tag("spend "),
+                take_until(" as though it were mana of any "),
+                tag(" as though it were mana of any "),
+                parse_any_mana_word,
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
 /// CR 118.14 + CR 609.4b: The any-color / any-type mana rider that follows a cast grant —
 /// "[you may] spend mana as though it were mana of any color to cast that
 /// spell" (Siphon Insight, Robber of the Rich), "Mana of any type can be spent
@@ -29034,29 +29074,10 @@ pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
     )))
     .parse(trimmed)
     .ok()?;
-    // "spend <what> as though it were mana of any …": "spend mana" is the
-    // concession the engine models; any other subject ("colorless mana",
-    // "mana from snow sources") relaxes a single kind.
     let (rest, rider) = alt((
-        map(
-            preceded(
-                (
-                    opt(tag::<_, _, Vbe>("you may ")),
-                    tag("spend mana as though it were mana of any "),
-                ),
-                parse_any_mana_word,
-            ),
-            ManaSpendRider::Concession,
-        ),
-        value(
-            ManaSpendRider::SingleKind,
-            (
-                opt(tag::<_, _, Vbe>("you may ")),
-                tag("spend "),
-                take_until(" as though it were mana of any "),
-                tag(" as though it were mana of any "),
-                parse_any_mana_word,
-            ),
+        preceded(
+            opt(tag::<_, _, Vbe>("you may ")),
+            parse_spend_as_though_any_mana,
         ),
         map(
             preceded(
@@ -29074,78 +29095,98 @@ pub(crate) fn try_parse_mana_spend_rider(text: &str) -> Option<ManaSpendRider> {
     Some(rider)
 }
 
-/// CR 609.4b: Does the most recently emitted clause (descending its
-/// `sub_ability` chain) grant a cast the mana rider can attach to — a
+/// CR 609.4b: Is `effect` a cast grant the mana rider can attach to — a
 /// `CastFromZone` or a `GrantCastingPermission { PlayFromExile }` that carries
-/// no `mana_spend_permission` yet? The rider only ever modifies the grant it
-/// follows, so a rider with no such antecedent keeps today's standalone
-/// lowering instead of folding onto an unrelated earlier grant.
-fn prior_clause_grants_a_cast_without_mana_spend_permission(clauses: &[ClauseIr]) -> bool {
-    fn effect_awaits(effect: &Effect) -> bool {
-        matches!(
-            effect,
-            Effect::CastFromZone {
+/// no `mana_spend_permission` yet?
+fn effect_awaits_mana_spend_permission(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CastFromZone {
+            mana_spend_permission: None,
+            ..
+        } | Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
                 mana_spend_permission: None,
                 ..
-            } | Effect::GrantCastingPermission {
-                permission: CastingPermission::PlayFromExile {
-                    mana_spend_permission: None,
-                    ..
-                },
-                ..
-            }
-        )
-    }
-    fn def_awaits(def: &AbilityDefinition) -> bool {
-        def.sub_ability.as_deref().is_some_and(def_awaits) || effect_awaits(&def.effect)
-    }
+            },
+            ..
+        }
+    )
+}
+
+/// CR 609.4b: The ONE traversal that picks the grant a mana rider modifies:
+/// the deepest awaiting grant under `effect` + `sub_ability` — the last one in
+/// text order, i.e. the grant the rider follows. Returns its depth in the
+/// `sub_ability` chain (0 = `effect` itself). The admission check and the stamp
+/// both call this, so they can never name different grants.
+fn awaiting_mana_spend_grant_depth(
+    effect: &Effect,
+    sub_ability: Option<&AbilityDefinition>,
+) -> Option<usize> {
+    sub_ability
+        .and_then(|sub| awaiting_mana_spend_grant_depth(&sub.effect, sub.sub_ability.as_deref()))
+        .map(|depth| depth + 1)
+        .or_else(|| effect_awaits_mana_spend_permission(effect).then_some(0))
+}
+
+/// CR 609.4b: Does the most recently emitted clause hold a cast grant the mana
+/// rider can attach to (`awaiting_mana_spend_grant_depth`)? The rider only ever
+/// modifies the grant it follows, so a rider with no such antecedent keeps
+/// today's standalone lowering instead of folding onto an unrelated earlier
+/// grant.
+fn prior_clause_grants_a_cast_without_mana_spend_permission(clauses: &[ClauseIr]) -> bool {
     clauses
         .iter()
         .rev()
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
         .is_some_and(|clause| {
-            effect_awaits(&clause.parsed.effect)
-                || clause.parsed.sub_ability.as_deref().is_some_and(def_awaits)
+            awaiting_mana_spend_grant_depth(
+                &clause.parsed.effect,
+                clause.parsed.sub_ability.as_deref(),
+            )
+            .is_some()
         })
 }
 
-/// CR 609.4b: Stamp `permission` onto the cast grant the rider follows — the
-/// LAST emitted def, descending its `sub_ability` chain to the deepest
-/// `CastFromZone` or `GrantCastingPermission { PlayFromExile }` that carries no
-/// `mana_spend_permission`. The same def
-/// `prior_clause_grants_a_cast_without_mana_spend_permission` admitted the
-/// rider for, so the two never name different grants. Returns `true` when a
-/// grant was stamped.
+/// CR 609.4b: Stamp `permission` onto the cast grant the rider follows — in
+/// the LAST emitted def, the grant `awaiting_mana_spend_grant_depth` picks (the
+/// same traversal `prior_clause_grants_a_cast_without_mana_spend_permission`
+/// admitted the rider with). Returns `true` when a grant was stamped.
 pub(crate) fn attach_mana_spend_permission_to_prior_cast_grant(
     defs: &mut [AbilityDefinition],
     permission: ManaSpendPermission,
 ) -> bool {
-    fn walk(def: &mut AbilityDefinition, permission: ManaSpendPermission) -> bool {
-        if let Some(sub) = def.sub_ability.as_mut() {
-            if walk(sub, permission) {
-                return true;
-            }
-        }
-        match &mut *def.effect {
-            Effect::CastFromZone {
-                mana_spend_permission: slot @ None,
-                ..
-            }
-            | Effect::GrantCastingPermission {
-                permission:
-                    CastingPermission::PlayFromExile {
-                        mana_spend_permission: slot @ None,
-                        ..
-                    },
-                ..
-            } => {
-                *slot = Some(permission);
-                true
-            }
-            _ => false,
-        }
+    let Some(mut def) = defs.last_mut() else {
+        return false;
+    };
+    let Some(depth) = awaiting_mana_spend_grant_depth(&def.effect, def.sub_ability.as_deref())
+    else {
+        return false;
+    };
+    for _ in 0..depth {
+        let Some(sub) = def.sub_ability.as_deref_mut() else {
+            return false;
+        };
+        def = sub;
     }
-    defs.last_mut().is_some_and(|def| walk(def, permission))
+    match &mut *def.effect {
+        Effect::CastFromZone {
+            mana_spend_permission: slot @ None,
+            ..
+        }
+        | Effect::GrantCastingPermission {
+            permission:
+                CastingPermission::PlayFromExile {
+                    mana_spend_permission: slot @ None,
+                    ..
+                },
+            ..
+        } => {
+            *slot = Some(permission);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// CR 106.4 + CR 514.2: Recognise mana-retention riders that modify the mana
