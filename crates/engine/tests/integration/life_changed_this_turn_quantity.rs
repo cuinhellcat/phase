@@ -85,12 +85,19 @@ fn bloodsoaked_life_cost_case(
     next_turn: bool,
     expected_payment: usize,
 ) {
-    bloodsoaked_life_cost_case_with(targets, next_turn, false, expected_payment);
+    bloodsoaked_life_cost_case_with(
+        BLOODSOAKED_INSIGHT_WITH_REDUCTION,
+        targets,
+        next_turn,
+        false,
+        expected_payment,
+    );
 }
 
 /// `first_target_dies`: the first target starts at 2 life, so the setup Shock
 /// makes that opponent lose the game (CR 104.3b) before Insight is cast.
 fn bloodsoaked_life_cost_case_with(
+    oracle: &str,
     targets: &[engine::types::PlayerId],
     next_turn: bool,
     first_target_dies: bool,
@@ -128,12 +135,7 @@ fn bloodsoaked_life_cost_case_with(
         })
         .collect();
     let insight = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Bloodsoaked Insight",
-            false,
-            BLOODSOAKED_INSIGHT_WITH_REDUCTION,
-        )
+        .add_spell_to_hand_from_oracle(P0, "Bloodsoaked Insight", false, oracle)
         .with_mana_cost(ManaCost::Cost {
             generic: 5,
             shards: vec![ManaCostShard::BlackRed, ManaCostShard::BlackRed],
@@ -224,7 +226,22 @@ fn bloodsoaked_life_loss_reduction_expires_at_turn_boundary() {
 /// the game (CR 800.4i).
 #[test]
 fn bloodsoaked_counts_an_opponent_who_lost_the_game() {
-    bloodsoaked_life_cost_case_with(&[P1, engine::types::PlayerId(2)], false, true, 3);
+    bloodsoaked_life_cost_case_with(
+        BLOODSOAKED_INSIGHT_WITH_REDUCTION,
+        &[P1, engine::types::PlayerId(2)],
+        false,
+        true,
+        3,
+    );
+}
+
+/// The spelled-out "for each one life … this turn" reads the same life history
+/// as "for each 1 life … this turn".
+#[test]
+fn bloodsoaked_word_form_one_life_reads_this_turns_life_loss() {
+    let oracle = BLOODSOAKED_INSIGHT_WITH_REDUCTION.replacen("each 1 life", "each one life", 1);
+    assert_ne!(oracle, BLOODSOAKED_INSIGHT_WITH_REDUCTION);
+    bloodsoaked_life_cost_case_with(&oracle, &[P1], false, false, 5);
 }
 
 #[test]
@@ -594,6 +611,125 @@ fn megatron_adds_nothing_when_it_is_not_double_faced() {
         megatron_case(MegatronChoice::NotDoubleFaced),
         (0, false, false)
     );
+}
+
+const OPTIONAL_SELF_TRANSFORM_WITH_ALTERNATIVE: &str = "At the beginning of each of your postcombat main phases, you may transform Moonlit Test Wolf. If you don't, you gain 3 life.";
+
+/// The parser writes "If you don't, …" as a `Not(EffectOutcome)`-gated
+/// sub-ability. The decline authority also honors an explicit `else_ability`,
+/// which the regular resolver runs only when the ability's own condition is
+/// false; move the printed alternative there.
+fn move_alternative_into_else_ability(trigger: &mut engine::types::ability::TriggerDefinition) {
+    let transform = trigger.execute.as_mut().expect("trigger body");
+    assert!(
+        transform.optional,
+        "the transform is the optional instruction"
+    );
+    let mut alternative = transform.sub_ability.take().expect("If you don't");
+    assert!(matches!(
+        alternative.condition,
+        Some(engine::types::ability::AbilityCondition::Not { .. })
+    ));
+    alternative.condition = None;
+    transform.else_ability = Some(alternative);
+}
+
+/// Returns (life gained, whether it transformed, whether the "you may
+/// transform" prompt was offered).
+fn optional_self_transform_case(
+    double_faced: bool,
+    accept: bool,
+    alternative_as_else: bool,
+) -> (i32, bool, bool) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let wolf = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Moonlit Test Wolf",
+            2,
+            2,
+            OPTIONAL_SELF_TRANSFORM_WITH_ALTERNATIVE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let wolf_object = runner.state_mut().objects.get_mut(&wolf).unwrap();
+    if double_faced {
+        wolf_object.back_face = Some(megatron_back_face());
+    }
+    if alternative_as_else {
+        move_alternative_into_else_ability(&mut wolf_object.trigger_definitions[0].definition);
+        move_alternative_into_else_ability(
+            &mut std::sync::Arc::make_mut(&mut wolf_object.base_trigger_definitions)[0],
+        );
+    }
+    let before = runner.life(P0);
+
+    let mut offered = false;
+    let mut triggered = false;
+    for _ in 0..80 {
+        let state = runner.state();
+        if state.phase == Phase::PostCombatMain && !state.stack.is_empty() {
+            triggered = true;
+        }
+        if triggered
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match state.waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::OptionalEffectChoice { .. } => {
+                offered = true;
+                GameAction::DecideOptionalEffect { accept }
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        runner.act(action).unwrap();
+    }
+    assert!(triggered, "the postcombat trigger must fire");
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    let transformed = runner.state().objects[&wolf].transformed;
+    (runner.life(P0) - before, transformed, offered)
+}
+
+#[test]
+fn optional_self_transform_accepted_skips_the_alternative() {
+    for alternative_as_else in [false, true] {
+        assert_eq!(
+            optional_self_transform_case(true, true, alternative_as_else),
+            (0, true, true)
+        );
+    }
+}
+
+#[test]
+fn optional_self_transform_declined_runs_the_alternative() {
+    for alternative_as_else in [false, true] {
+        assert_eq!(
+            optional_self_transform_case(true, false, alternative_as_else),
+            (3, false, true)
+        );
+    }
+}
+
+/// CR 608.2d: an impossible self-transform is not offered, and it resolves
+/// like a decline, so "If you don't" still happens. The parsed gated form also
+/// passed before the decline routing; the `else_ability` form needs it.
+#[test]
+fn impossible_optional_self_transform_runs_the_alternative() {
+    for alternative_as_else in [false, true] {
+        assert_eq!(
+            optional_self_transform_case(false, true, alternative_as_else),
+            (3, false, false),
+            "alternative_as_else = {alternative_as_else}"
+        );
+    }
 }
 
 /// Belbe, Corrupted Observer ruling: "If an opponent lost life and subsequently

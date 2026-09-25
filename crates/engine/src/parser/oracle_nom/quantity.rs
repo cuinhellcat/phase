@@ -3445,7 +3445,7 @@ fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, Quantit
 /// after "1 " is `parse_for_each_one_life_changed`'s event-scoped class. This
 /// grammar requires the literal "this turn", so it never claims that class.
 fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("1 life ").parse(input)?;
+    let (rest, _) = alt((tag("1 life "), tag("one life "))).parse(input)?;
     let (rest, player) = alt((
         value(
             PlayerScope::Opponent {
@@ -8705,6 +8705,52 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 119.3: "for each 1 life … this turn" (and its spelled-out "one life"
+    /// form) is the per-player life history, not the triggering event's amount.
+    #[test]
+    fn parse_for_each_one_life_changed_this_turn_reads_life_history() {
+        use crate::parser::oracle_quantity::parse_for_each_clause;
+
+        let opponents = PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        };
+        for prefix in ["1", "one"] {
+            for (tail, expected) in [
+                (
+                    "life your opponents have lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life your opponents have gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: opponents.clone(),
+                    },
+                ),
+                (
+                    "life you lost this turn",
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+                (
+                    "life you gained this turn",
+                    QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+            ] {
+                let clause = format!("{prefix} {tail}");
+                assert_eq!(
+                    parse_for_each_clause(&clause),
+                    Some(expected),
+                    "{clause:?} must read this turn's life history",
+                );
+            }
+        }
     }
 
     #[test]
