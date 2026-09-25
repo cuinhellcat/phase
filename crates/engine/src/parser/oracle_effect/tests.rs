@@ -42817,6 +42817,32 @@ fn perpetual_grant_ability_rejects_unsupported_triggered_body() {
     );
 }
 
+/// Fail-closed pin for `PerpetualGrantModification::try_from`'s
+/// `GenericEffect`-static arm: a quoted body that lowers to a resolution-time
+/// `GenericEffect` with statics is a continuous-effect grant the perpetual
+/// installer cannot route, so the whole clause fails closed.
+#[test]
+fn perpetual_grant_ability_rejects_resolution_time_generic_effect_body() {
+    let body = "Until end of turn, creatures you control gain flying.";
+    let classified = crate::parser::oracle_static::classify_quoted_inner(body);
+    assert!(
+        classified.iter().any(|m| matches!(
+            m,
+            ContinuousModification::GrantAbility { definition }
+                if crate::game::coverage::ability_tree_any(definition, &|d| matches!(
+                    &*d.effect,
+                    Effect::GenericEffect { static_abilities, .. } if !static_abilities.is_empty()
+                ))
+        )),
+        "reach guard: the body lowers to a GenericEffect with statics: {classified:?}"
+    );
+    let e = parse_effect(&format!("~ perpetually gains \"{body}\""));
+    assert!(
+        matches!(e, Effect::Unimplemented { .. }),
+        "a resolution-time GenericEffect grant must fail closed, got {e:?}"
+    );
+}
+
 /// Regression (PR #8494 blocker, ntindle/matthewevans): Boareskyr Tollkeeper's
 /// full Oracle text (verified against MTGJSON's `AtomicCards.json`) is "When
 /// this creature enters, target opponent reveals all creature and land cards
@@ -72109,13 +72135,54 @@ fn mana_spend_rider_folds_onto_the_preceding_cast_grant() {
     );
 }
 
+/// CR 609.4b: a mana-spend concession with no cast grant to fold onto is an
+/// honest gap, never a `SpendManaAsAnyColor` static — an effect-granted one has
+/// no payment-time carrier, and none could carry a scope or a one-use limit
+/// such as North Star's "For one spell this turn, … to pay that spell's mana
+/// cost". After a grant, the same wording still folds onto it
+/// (`mana_spend_rider_folds_onto_the_preceding_cast_grant`).
+#[test]
+fn standalone_mana_spend_concession_is_a_gap() {
+    for text in [
+        "Until end of turn, you may spend mana as though it were mana of any type.",
+        "Until end of turn, you may spend mana as though it were mana of any color.",
+        "For one spell this turn, you may spend mana as though it were mana of any type to pay \
+         that spell's mana cost.",
+        "You may spend mana as though it were mana of any color to cast Case spells.",
+        "You may spend mana as though it were mana of any color the next time you cast that \
+         card.",
+        "Until end of turn, you may cast spells from among those cards, and mana of any type can \
+         be spent to cast those spells.",
+    ] {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let effects = collect_chain_effects(&chain);
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities.iter().any(|s| matches!(
+                        s.mode,
+                        StaticMode::SpendManaAsAnyColor { .. }
+                    ))
+            )),
+            "no concession static: {text:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Unimplemented { name, .. } if name == STANDALONE_MANA_SPEND_CONCESSION_GAP
+            )),
+            "honest gap: {text:?} -> {effects:?}"
+        );
+    }
+}
+
 /// CR 609.4b: the rider modifies the grant it FOLLOWS. Without a cast grant
-/// directly before it nothing is folded and the clause keeps its standalone
-/// lowering (a pin of the untouched path, green with or without the fold). A
-/// concession narrower than "mana" after a grant ("colorless mana as though
-/// …", Abstruse Appropriation; "mana from snow sources as though …", Draugr
-/// Necromancer's wording) is an honest gap: the grant lowers, the rider is
-/// `Unimplemented`, and the grant is never widened to every mana.
+/// directly before it nothing is folded and the clause is the standalone
+/// concession gap. A concession narrower than "mana" after a grant ("colorless
+/// mana as though …", Abstruse Appropriation; "mana from snow sources as though
+/// …", Draugr Necromancer's wording) is an honest gap: the grant lowers, the
+/// rider is `Unimplemented`, and the grant is never widened to every mana.
 #[test]
 fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
     let without_grant = parse_effect_chain(
@@ -72124,16 +72191,20 @@ fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
         AbilityKind::Spell,
     );
     let effects = collect_chain_effects(&without_grant);
+    // No grant to fold onto, and "to cast that spell" is a scope the unfiltered
+    // standalone static cannot carry: an honest gap, never a board-wide static.
     assert!(
         effects.iter().any(|effect| matches!(
             effect,
-            Effect::GenericEffect { static_abilities, .. }
-                if static_abilities.iter().any(|s| matches!(
-                    s.mode,
-                    StaticMode::SpendManaAsAnyColor { .. }
-                ))
+            Effect::Unimplemented { name, .. } if name == STANDALONE_MANA_SPEND_CONCESSION_GAP
         )),
-        "no grant to fold onto: the rider keeps today's standalone lowering: {effects:?}"
+        "no grant to fold onto: the scoped rider is a gap: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GenericEffect { .. })),
+        "no board-wide static: {effects:?}"
     );
 
     for narrower in [
@@ -72202,8 +72273,8 @@ fn mana_spend_rider_folds_nothing_without_a_matching_grant() {
 /// ("spend colorless mana …", "mana from snow sources …", False Dawn's "white
 /// mana", Quicksilver Elemental's "blue mana") is the same honest gap as after a
 /// grant — never the board-wide `SpendManaAsAnyColor` that relaxes every mana.
-/// The plain "spend mana …" sentence on the same route still lowers to that
-/// static (the positive half).
+/// The plain "spend mana …" sentence on the same route is the standalone gap
+/// instead (the other half of the classification).
 #[test]
 fn standalone_single_kind_mana_concession_is_a_gap_not_a_widened_static() {
     for (text, single_kind) in [
@@ -72244,55 +72315,20 @@ fn standalone_single_kind_mana_concession_is_a_gap_not_a_widened_static() {
                     ))
             )
         });
-        let gap = effects.iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::Unimplemented { name, .. }
-                    if name == UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
-            )
+        let gap = effects.iter().find_map(|effect| match effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
         });
+        let expected_gap = if single_kind {
+            UNREPRESENTABLE_MANA_SPEND_CONCESSION_GAP
+        } else {
+            STANDALONE_MANA_SPEND_CONCESSION_GAP
+        };
         assert_eq!(
             (widened, gap),
-            (!single_kind, single_kind),
-            "{text:?}: (board-wide static, honest gap); chain: {effects:?}"
+            (false, Some(expected_gap)),
+            "{text:?}: (board-wide static, gap); chain: {effects:?}"
         );
-    }
-}
-
-/// CR 118.14 + CR 106.1a/106.1b: the standalone static keeps the printed word —
-/// "any type" in either spelling (North Star's shape, "mana of any type can be
-/// spent") is `AnyTypeOrColor` and so pays `{C}`, "any color" stays `AnyColor`.
-#[test]
-fn standalone_any_mana_static_keeps_the_printed_concession() {
-    for (sentence, expected) in [
-        (
-            "You may spend mana as though it were mana of any type to cast that spell.",
-            ManaSpendPermission::AnyTypeOrColor,
-        ),
-        (
-            "You may spend mana as though it were mana of any color to cast that spell.",
-            ManaSpendPermission::AnyColor,
-        ),
-        (
-            "Mana of any type can be spent to cast that spell.",
-            ManaSpendPermission::AnyTypeOrColor,
-        ),
-    ] {
-        let text = format!("Draw a card. {sentence}");
-        let chain = parse_effect_chain(&text, AbilityKind::Spell);
-        let concessions: Vec<ManaSpendPermission> = collect_chain_effects(&chain)
-            .into_iter()
-            .filter_map(|effect| match effect {
-                Effect::GenericEffect {
-                    static_abilities, ..
-                } => static_abilities.iter().find_map(|s| match s.mode {
-                    StaticMode::SpendManaAsAnyColor { concession, .. } => Some(concession),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(concessions, vec![expected], "{text:?}");
     }
 }
 

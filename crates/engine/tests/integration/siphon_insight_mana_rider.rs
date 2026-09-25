@@ -733,3 +733,78 @@ fn a_static_any_type_concession_combines_with_an_any_color_grant() {
         CastPaymentMode::Auto
     ));
 }
+
+/// North Star's line: a one-spell, mana-cost-only concession.
+const NORTH_STAR: &str = "{4}, {T}: For one spell this turn, you may spend mana as though it were \
+mana of any type to pay that spell's mana cost. (Additional costs are still paid normally.)";
+
+/// North Star's concession covers ONE spell's mana cost; by CR 118.14 Swamps
+/// could pay that spell's `{C}`. The clause is now the standalone concession
+/// gap and grants nothing, so even the first `{C}` spell is refused, as are a
+/// second one and a `{C}` activation — each checked through the legal-action
+/// offer and the real action. Flip the first spell once North Star is
+/// supported. This also held before the clause became a gap: the board-wide
+/// static it used to lower to never reached a payment. The discriminating pin
+/// is `standalone_mana_spend_concession_is_a_gap`.
+#[test]
+fn north_star_gap_grants_no_payment() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let swamps: Vec<_> = (0..7)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+        .collect();
+    let colorless_spells: Vec<_> = ["First Colorless Card", "Second Colorless Card"]
+        .into_iter()
+        .map(|name| {
+            scenario
+                .add_spell_to_hand(P0, name, false)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Colorless],
+                    generic: 0,
+                })
+                .id()
+        })
+        .collect();
+    let engine_artifact = scenario
+        .add_artifact_from_oracle(P0, "Colorless Engine", "{C}, {T}: You gain 1 life.")
+        .id();
+    let north_star = scenario
+        .add_artifact_from_oracle(P0, "North Star", NORTH_STAR)
+        .id();
+    let mut runner = scenario.build();
+    runner.activate(north_star, 0).resolve();
+    // Reach guard: the ability was activated and resolved — North Star and
+    // four Swamps are tapped, the stack is empty.
+    assert!(runner.state().objects[&north_star].tapped);
+    let tapped = swamps
+        .iter()
+        .filter(|swamp| runner.state().objects[swamp].tapped)
+        .count();
+    assert_eq!(tapped, 4, "North Star's {{4}} was paid");
+    assert!(runner.state().stack.is_empty());
+
+    for &spell in &colorless_spells {
+        let offered = legal_actions(runner.state()).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell),
+        );
+        let card_id = runner.state().objects[&spell].card_id;
+        let cast = runner.act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        });
+        assert!(!offered, "a {{C}} spell is not offered");
+        assert!(cast.is_err(), "a {{C}} spell is refused");
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    }
+    let offered = legal_actions(runner.state()).iter().any(|action| {
+        matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == engine_artifact)
+    });
+    let activation = runner.act(GameAction::ActivateAbility {
+        source_id: engine_artifact,
+        ability_index: 0,
+    });
+    assert!(!offered, "a {{C}} activation is not offered");
+    assert!(activation.is_err(), "a {{C}} activation is refused");
+}

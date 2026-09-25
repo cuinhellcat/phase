@@ -3843,6 +3843,11 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// EFFECT-SHAPED, NEVER TEXT-SHAPED. It must never inspect `Unimplemented`'s `name`
 /// or `description`. A guard keyed on "play lands" would be a single-card carve-out;
 /// this one is keyed on the variant and admits every future card of the same class.
+/// ONE CLASS-WIDE EXCEPTION, keyed on a grammar and not on a card: a conjunct
+/// carrying an every-mana concession (`mana_spend_concession_is_single_kind` →
+/// `Some(false)`) keeps the verdict it had while that clause lowered to a static —
+/// understood — because after a cast grant the chunk loop's rider fold handles it;
+/// alone, the generic detector now reports the standalone concession gap.
 ///
 /// SCOPE OF THE PROBE — IT IS A LOWER BOUND, AND THAT IS DELIBERATE.
 /// `strip_leading_sequence_connector(..).trim()` reproduces the LOOP-HEAD
@@ -3852,11 +3857,14 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// downstream (the `starting with you, ` strip) and reaches the generic detector only
 /// after a long `try_parse_*` cascade of special-case recognizers. So this guard asks
 /// "would the GENERIC detector understand this conjunct?", which is weaker than "would
-/// production understand it?". The error is one-directional and safe: the guard can
-/// over-decline a boundary a special-case recognizer would have handled, and can never
-/// wrongly accept one. Measured today that divergent set is EMPTY.
+/// production understand it?". The error is safe in practice: the guard can
+/// over-decline a boundary a special-case recognizer would have handled, and can
+/// wrongly accept one only through the concession exception, which does not check
+/// for a preceding grant (alone, such a conjunct still surfaces as the standalone
+/// gap). Measured today the exception answers exactly one conjunct, the one of
+/// You Find Some Prisoners, which follows a grant.
 ///
-/// Measured corpus reach: exactly ONE decline, on The Belligerent
+/// Measured corpus reach (re-measured with the exception): exactly ONE decline, on The Belligerent
 /// ("Until end of turn, you may look at the top card of your library any time, and
 /// you may play lands and cast spells from the top of your library") — whose
 /// recovered conjunct "and you may play lands" parses to a bare
@@ -3866,6 +3874,14 @@ fn head_ends_with_dangling_phase_trigger(head: &str) -> bool {
 /// and the 13-card deferred class together.
 fn recovered_conjunct_is_unparsed(text: &str, ctx: &ParseContext) -> bool {
     let t = super::lower::strip_leading_sequence_connector(text).trim();
+    // An every-mana concession ("and you may spend mana as though it were mana
+    // of any color to cast it", You Find Some Prisoners) is understood:
+    // after a cast grant the chunk loop folds it onto that grant. Alone the
+    // generic detector reports it as the standalone concession gap — a
+    // representation limit, not ignorance of the conjunct.
+    if super::mana_spend_concession_is_single_kind(&t.to_lowercase()) == Some(false) {
+        return false;
+    }
     matches!(
         super::parse_effect_clause(t, &mut ctx.clone()).effect,
         Effect::Unimplemented { .. }
@@ -14994,7 +15010,7 @@ mod leading_duration_guard_tests_7923 {
         for t in must_split {
             assert!(
                 !recovered_conjunct_is_unparsed(t, &ctx),
-                "{t:?} is understood by the generic detector and must still split"
+                "{t:?} is understood (generic detector, or the concession exception) and must still split"
             );
         }
     }

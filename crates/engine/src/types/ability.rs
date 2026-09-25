@@ -5214,7 +5214,9 @@ impl ManaSpendPermission {
     pub const fn union(self, other: Self) -> Self {
         match (self, other) {
             (Self::AnyColor, Self::AnyColor) => Self::AnyColor,
-            _ => Self::AnyTypeOrColor,
+            (Self::AnyColor, Self::AnyTypeOrColor)
+            | (Self::AnyTypeOrColor, Self::AnyColor)
+            | (Self::AnyTypeOrColor, Self::AnyTypeOrColor) => Self::AnyTypeOrColor,
         }
     }
 
@@ -15797,9 +15799,10 @@ pub enum PerpetualGrantModification {
     /// `abilities` + `base_abilities`. Agent of Raffine's superficially similar
     /// "You may spend mana as though it were mana of any color to cast this
     /// spell." is REJECTED before it ever reaches this variant — see
-    /// `TryFrom<ContinuousModification>`'s `GenericEffect`-static gate below,
-    /// which fails the whole grant closed rather than install a board-wide
-    /// mana concession under a "this spell only" card.
+    /// `TryFrom<ContinuousModification>`'s `Unimplemented` gate below (the quoted
+    /// concession is the standalone concession gap), which fails the whole grant
+    /// closed rather than install a board-wide mana concession under a "this
+    /// spell only" card.
     GrantAbility { definition: Box<AbilityDefinition> },
 }
 
@@ -15869,16 +15872,20 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // the static this clause describes is never installed as a
             // functioning ability by that arm.
             //
-            // Agent of Raffine (MTGJSON-verified) is the regression case: "It
-            // perpetually gains \"You may spend mana as though it were mana of
-            // any color to cast this spell.\"" has no cost separator, so
-            // `parse_quoted_ability` treats the whole quoted sentence as a
-            // spell-like effect chain and `classify_quoted_inner` falls through
-            // its default `GrantAbility` fallback (no static/trigger/keyword
-            // recognizer matched), wrapping
-            // `Effect::GenericEffect { static_abilities: [SpendManaAsAnyColor
-            // { spell_filter: None, .. }], target: Some(Controller), .. }`.
-            // Accepting it here would look green (`Effect::ApplyPerpetual`,
+            // Pinned by `perpetual_grant_ability_rejects_resolution_time_generic_effect_body`
+            // ("Until end of turn, creatures you control gain flying."). Agent
+            // of Raffine (MTGJSON-verified) was the original case — its quoted
+            // concession is now the standalone concession gap, rejected by the
+            // `Unimplemented` arm above. "It perpetually gains \"You may spend
+            // mana as though it were mana of any color to cast this spell.\""
+            // has no cost separator, so `parse_quoted_ability` treats the whole
+            // quoted sentence as a spell-like effect chain and
+            // `classify_quoted_inner` falls through its default `GrantAbility`
+            // fallback (no static/trigger/keyword recognizer matched), which
+            // wrapped `Effect::GenericEffect { static_abilities:
+            // [SpendManaAsAnyColor { spell_filter: None, .. }], target:
+            // Some(Controller), .. }` until that clause became the gap.
+            // Accepting such a grant here would look green (`Effect::ApplyPerpetual`,
             // never `Effect::Unimplemented`) while being wrong on TWO independent
             // axes: (1) `spell_filter: None` is the documented BOARD-WIDE path
             // (every spell the controller casts), not "this spell" -- a real
@@ -15993,8 +16000,8 @@ pub enum PerpetualModification {
     /// conjured duplicate is the architectural motivator for that LastCreated
     /// antecedent, but Agent of Raffine's OWN granted ability text ("You may
     /// spend mana as though it were mana of any color to cast this spell.") is
-    /// currently REJECTED by `PerpetualGrantModification::try_from`'s
-    /// `GenericEffect`-static gate (see its doc comment), so Agent of Raffine
+    /// currently REJECTED by `PerpetualGrantModification::try_from` (the quoted
+    /// concession is the standalone concession gap), so Agent of Raffine
     /// does not itself reach `Effect::ApplyPerpetual` — it fails closed to
     /// `Effect::Unimplemented` — a future card whose conjured-duplicate grant
     /// classifies to an installable kind would exercise this binding end to
