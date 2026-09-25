@@ -16391,6 +16391,21 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
                 return None;
             }
         }
+        // CR 115.1 + CR 608.2c: "Draw three cards and reveal them. You may
+        // cast one of them without paying its mana cost" (Mad Wizard's Lair)
+        // names no "target" — the pick is chosen at resolution from the cards
+        // the same resolution revealed (`EffectZoneChoice` over
+        // `LastRevealed`). At stack-push time nothing is revealed yet, so
+        // surfacing a slot builds a required pick with zero legal candidates
+        // and the whole trigger is dropped for lack of a legal target before
+        // it can resolve. Deliberately NOT folded into `is_context_ref`:
+        // that predicate also drives the optional-frame stash injector
+        // (`ability_with_event_context_targets`), which would singular-bind
+        // the first revealed card and collapse the choose-one-of-many into a
+        // forced pick.
+        if matches!(target, TargetFilter::LastRevealed) {
+            return None;
+        }
     }
     // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
     // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
@@ -17803,6 +17818,7 @@ pub mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: controller,
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -22463,6 +22479,7 @@ pub mod tests {
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: P0,
             source_id,
+            decision_subject_id: None,
             description: None,
             may_trigger_key: None,
             same_card_may_trigger_choice_available: false,
@@ -39315,6 +39332,7 @@ pub mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: ObjectId(1),
+                decision_subject_id: None,
                 description: None,
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,
@@ -39844,6 +39862,7 @@ pub mod tests {
             WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: observer,
+                decision_subject_id: None,
                 description: Some("paused".to_string()),
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,
@@ -44955,6 +44974,7 @@ pub mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],

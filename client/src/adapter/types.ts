@@ -507,6 +507,7 @@ export interface JoinTargetInfo {
   filled_seats: number;
   reservation_token?: string | null;
   reservation_expires_at_ms?: number | null;
+  draft_metadata?: DraftLobbyMetadata | null;
 }
 
 // ── Match / Series ───────────────────────────────────────────────────────
@@ -2467,10 +2468,10 @@ export type WaitingFor =
     }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
+  | { type: "OptionalEffectChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
-  | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
+  | { type: "OpponentMayChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
@@ -4632,6 +4633,14 @@ export interface ViewerSnapshot {
    */
   stuckDiagnostic?: StuckDecisionDiagnostic;
   viewerInteraction?: ViewerInteraction;
+}
+
+/**
+ * ViewerSnapshot paired with the engine-filtered events from the same
+ * transition. The legacy state-only snapshot remains unchanged.
+ */
+export interface ViewerTransitionSnapshot extends ViewerSnapshot {
+  events: GameEvent[];
 }
 
 /**
