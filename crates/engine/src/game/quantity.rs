@@ -4567,7 +4567,8 @@ fn resolve_ref(
             })
             .map(u32_to_i32_saturating)
             .unwrap_or(0),
-        // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
+        // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
+        // scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
             resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
@@ -5845,7 +5846,8 @@ fn resolve_ref(
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
             usize_to_i32_saturating(p.bending_types_this_turn.len())
         }),
-        // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
+        // CR 119.3 + CR 800.4i: Life gained this turn, including departed players,
+        // scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
             resolve_per_player_life_history(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
