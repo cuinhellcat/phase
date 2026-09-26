@@ -10146,13 +10146,9 @@ pub(super) fn parse_exile_ast(
     // top" (singular); this arm requires the plural "cards" of the dynamic class,
     // so it never shadows (a)/(b) and declines (returns None) on anything that is
     // not exactly "[dynamic count] cards from the top of <owner>'s library".
-    //
-    // DEFERRED (honest gap): this arm fixes only the exile COUNT and library
-    // OWNER. Rakdos, the Muscle's trailing "mana of any type can be spent to cast
-    // those spells" rider is a SEPARATE `PlayFromExile.mana_spend_permission` grant
-    // concern the exile parser never touches — it remains dropped
-    // (`mana_spend_permission: None`), not upgraded to a false-supported `Some(..)`.
-    // The `rakdos_*` runtime drive asserts that drop stays fail-closed.
+    // Rakdos, the Muscle's trailing "mana of any type can be spent to cast those
+    // spells" rider is no concern of this arm: it rides the play grant it
+    // follows (`starts_mana_spend_rider_conjunct`).
     if let Some((after_lib, player, count)) = parse_dynamic_exile_from_top(rest_lower, ctx) {
         // CR 406.3: honor a trailing "face down" suffix (Flamewar) exactly as the
         // qualified top-of-library patterns above.

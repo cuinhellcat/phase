@@ -117,6 +117,7 @@ mod cartographers_hawk_relative_damage_recipient;
 mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;
+mod cast_grant_mana_rider_conjunct;
 mod cast_this_way_gate_8721;
 mod cavern_hoard_dragon_cost_reduction;
 mod cda_counted_quantities_pt;
