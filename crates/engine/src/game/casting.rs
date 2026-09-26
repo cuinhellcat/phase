@@ -1753,12 +1753,12 @@ fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
 
 /// CR 702.137a: Spectacle's gate — whether any opponent of `caster` lost life
 /// this turn. Mirrors the existing `LifeLostThisTurn`/"an opponent lost life"
-/// predicate (see `game/quantity.rs`) so no new state tracking is introduced.
+/// predicate (see `game/quantity.rs`) so no new state tracking is introduced;
+/// like it, a Two-Headed Giant teammate is not an opponent (CR 102.3).
 fn an_opponent_lost_life_this_turn(state: &GameState, caster: PlayerId) -> bool {
-    state
-        .players
-        .iter()
-        .any(|p| p.id != caster && p.life_lost_this_turn > 0)
+    state.players.iter().any(|p| {
+        crate::game::players::is_opponent(state, caster, p.id) && p.life_lost_this_turn > 0
+    })
 }
 
 /// CR 702.76a: Prowl's gate — whether `player` controlled a creature that dealt
@@ -14129,6 +14129,45 @@ pub fn handle_prowl_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.117a + CR 601.2b: Resolve the player's Normal-vs-Surge choice.
+/// `Alternative` takes the variant and face from the same authority that
+/// offered them (`casting_variant_choice_set`) rather than from the prompt;
+/// the missing-option error is defensive only — nothing changes state
+/// between the prompt and this answer. `Normal` casts for the printed cost.
+pub fn handle_surge_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let option = casting_variant_choice_set(state, player, object_id, None)
+                .options
+                .into_iter()
+                .find(|option| option.variant == CastingVariant::Surge)
+                .ok_or_else(|| {
+                    EngineError::ActionNotAllowed("Surge cost is not available".to_string())
+                })?;
+            continue_cast_with_variant(
+                state,
+                player,
+                object_id,
+                option.variant,
+                option.face,
+                payment_mode,
+                events,
+            )
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
 /// Shared continuation: call prepare_spell_cast and run the standard casting
 /// pipeline (modal → targeting → payment). Extracted so handle_warp_cost_choice
 /// and handle_cast_spell can share the same post-prepare logic.
@@ -15731,7 +15770,9 @@ pub fn handle_cast_spell_with_payment_mode(
     // cost-choice handler: ExilePermission and Freerunning. The fall-through below
     // routes single-candidate Warp/Evoke/Dash hand casts through their own
     // cost-choice `WaitingFor` handlers; electing those here would preempt those
-    // prompts. Widen only after auditing those handlers for pre-election.
+    // prompts. Widen only after auditing those handlers for pre-election. Surge
+    // is deliberately not pre-elected here: the block below offers normal vs.
+    // Surge itself.
     if let Some(option) = variant_choices.options.first().filter(|option| {
         matches!(
             option.variant,
@@ -15744,6 +15785,49 @@ pub fn handle_cast_spell_with_payment_mode(
             object_id,
             option.variant,
             option.face,
+            payment_mode,
+            events,
+        );
+    }
+
+    // CR 702.117a + CR 118.9 + CR 601.2b: Surge — the sole prepared option is the
+    // surge variant (the candidate gate already required a hand card with an
+    // effective Surge keyword and another spell cast this turn by the caster or a
+    // teammate; `can_cast_prepared_now` already proved the surge cost payable).
+    // Offer the printed cost alongside it when that is payable too; otherwise the
+    // surge cost is the only way to cast it, so elect it directly.
+    if let Some(option) = variant_choices
+        .options
+        .first()
+        .filter(|option| option.variant == CastingVariant::Surge)
+    {
+        let (variant, face, surge_cost) = (option.variant, option.face, option.mana_cost.clone());
+        let obj = state.objects.get(&object_id).ok_or_else(|| {
+            EngineError::InvalidAction(format!("Object {object_id:?} does not exist"))
+        })?;
+        // CR 601.2f + CR 118.9a: the shared normal-path authority (cost modifiers,
+        // free-cast permissions, unpayable NoCost).
+        let (normal_cost, normal_affordable) =
+            normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+        if normal_affordable {
+            return Ok(WaitingFor::AlternativeCastChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+                keyword: crate::types::game_state::AlternativeCastKeyword::Surge,
+                normal_cost,
+                alternative_cost: Some(surge_cost),
+                alternative_additional_cost: None,
+                alternative_additional_cost_description: None,
+            });
+        }
+        return continue_cast_with_variant(
+            state,
+            player,
+            object_id,
+            variant,
+            face,
             payment_mode,
             events,
         );
@@ -23405,8 +23489,9 @@ fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
 }
 
 fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
-    // A player axis is concrete (resolvable now) unless it needs a chosen target
-    // or an outer scoped-player iteration context.
+    // Keep the existing sibling-ref admission rule; StartingLifeTotal has its
+    // own player-axis check below because its quantity resolver cannot read
+    // duration-only or resolution-bound scopes in this preview.
     let player_is_concrete =
         |p: &PlayerScope| !matches!(p, PlayerScope::Target | PlayerScope::ScopedPlayer);
     match qty {
@@ -23416,7 +23501,10 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player } => player_is_concrete(player),
-        QuantityRef::LifeAboveStarting | QuantityRef::StartingLifeTotal => true,
+        QuantityRef::StartingLifeTotal { player } => {
+            super::quantity::player_scope_is_source_context_previewable(player)
+        }
+        QuantityRef::LifeAboveStarting => true,
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. } => !filter_references_target_player(filter),
@@ -23452,6 +23540,56 @@ fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
         // cast/trigger-event context, etc.) makes the condition non-evaluable
         // before activation, so the helper returns `None`.
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod starting_life_board_state_tests {
+    use super::*;
+
+    #[test]
+    fn starting_life_pre_activation_check_requires_a_bound_player() {
+        let state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 0);
+        let condition = |player| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::StartingLifeTotal { player },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 30 },
+        };
+
+        assert!(ability_condition_is_board_state_evaluable(&condition(
+            PlayerScope::Controller,
+        )));
+        for (player, expected) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            let AbilityCondition::QuantityCheck { lhs, .. } = condition(PlayerScope::Controller)
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                crate::game::quantity::resolve_quantity(&state, &lhs, player, ObjectId(0)),
+                expected,
+            );
+        }
+        for scope in [
+            PlayerScope::Target,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::RecipientController,
+            PlayerScope::ParentObjectTargetController,
+        ] {
+            assert!(!ability_condition_is_board_state_evaluable(&condition(
+                scope
+            )));
+        }
+        for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
+            assert_eq!(
+                state.format_config.starting_life_total_for_player(id),
+                baseline
+            );
+            assert!(!ability_condition_is_board_state_evaluable(&condition(
+                PlayerScope::SpecificPlayer { id },
+            )));
+        }
     }
 }
 
