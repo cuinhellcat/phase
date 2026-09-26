@@ -8399,8 +8399,13 @@ where
     F: FnMut(&crate::types::player::Player) -> i32,
 {
     match scope {
+        // CR 102.3: opponents are the players not on the controller's team, so
+        // a Two-Headed Giant teammate's life change never counts.
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
-            state.players.iter().filter(|p| p.id != controller),
+            state
+                .players
+                .iter()
+                .filter(|p| crate::game::players::is_opponent(state, controller, p.id)),
             *aggregate,
             &mut extract,
         ),
@@ -8940,11 +8945,15 @@ pub(crate) fn resolve_player_count(
                                 |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
                             )
                         }
+                        // CR 102.3: a Two-Headed Giant teammate is not an
+                        // opponent, whatever its life history.
                         PlayerFilter::OpponentLostLife => {
-                            p.id != controller && p.life_lost_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_lost_this_turn > 0
                         }
                         PlayerFilter::OpponentGainedLife => {
-                            p.id != controller && p.life_gained_this_turn > 0
+                            crate::game::players::is_opponent(state, controller, p.id)
+                                && p.life_gained_this_turn > 0
                         }
                         // Handled by the early return above; unreachable here.
                         PlayerFilter::HasLostTheGame => false,

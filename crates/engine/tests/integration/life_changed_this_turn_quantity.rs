@@ -970,3 +970,152 @@ At the beginning of your end step, if a player lost 4 or more life this turn, pu
         "the departed opponent's 4 life lost this turn counts"
     );
 }
+
+/// Two-Headed Giant seating (`FormatConfig::two_headed_giant()`, 4 players):
+/// P0+P1 are one team, P2+P3 the other.
+const TEAMMATE: engine::types::PlayerId = engine::types::PlayerId(1);
+const OPPOSING: engine::types::PlayerId = engine::types::PlayerId(2);
+
+/// Life changes happen to each player individually (CR 810.9), and a player's
+/// opponents are the players not on their team (CR 102.3). `Change` spells hit
+/// `who` through real casts before P0's postcombat trigger adds `{C}` per the
+/// printed `trigger` line; returns the `{C}` added.
+fn team_game_life_history_case(trigger: &str, change: &str, who: engine::types::PlayerId) -> usize {
+    use engine::types::format::FormatConfig;
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Life Ledger", 2, 2, trigger);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Life Changer", true, change)
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_player(who).resolve();
+    // Reach guard: the life change is recorded on exactly `who`.
+    for player in &runner.state().players {
+        let changed = player.life_lost_this_turn > 0 || player.life_gained_this_turn > 0;
+        assert_eq!(changed, player.id == who, "{:?}", player.id);
+    }
+
+    let mut triggered = false;
+    for _ in 0..60 {
+        let state = runner.state();
+        if state.phase == Phase::PostCombatMain && !state.stack.is_empty() {
+            triggered = true;
+        }
+        if triggered
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match state.waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        runner.act(action).unwrap();
+    }
+    assert!(triggered, "the postcombat trigger must fire");
+    runner.state().players[0]
+        .mana_pool
+        .count_color(engine::types::mana::ManaType::Colorless)
+}
+
+const SHOCK: &str = "Shock deals 2 damage to any target.";
+const GAIN_THREE: &str = "Target player gains 3 life.";
+
+/// CR 102.3 + CR 810.9: in Two-Headed Giant a teammate's life change is not an
+/// opponent's — neither for "each 1 life your opponents have lost/gained this
+/// turn" (`PlayerScope::Opponent`) nor for "each of your opponents who
+/// lost/gained life this turn" (`OpponentLostLife` / `OpponentGainedLife`). The
+/// same change on a player of the opposing team counts.
+#[test]
+fn team_game_life_history_counts_opponents_not_the_teammate() {
+    let prefix = "At the beginning of each of your postcombat main phases, add {C} for each ";
+    for (tail, change, opposing) in [
+        ("1 life your opponents have lost this turn.", SHOCK, 2),
+        (
+            "1 life your opponents have gained this turn.",
+            GAIN_THREE,
+            3,
+        ),
+        ("of your opponents who lost life this turn.", SHOCK, 1),
+        (
+            "of your opponents who gained life this turn.",
+            GAIN_THREE,
+            1,
+        ),
+    ] {
+        let trigger = format!("{prefix}{tail}");
+        assert_eq!(
+            team_game_life_history_case(&trigger, change, TEAMMATE),
+            0,
+            "teammate: {tail}"
+        );
+        assert_eq!(
+            team_game_life_history_case(&trigger, change, OPPOSING),
+            opposing,
+            "opposing team: {tail}"
+        );
+    }
+}
+
+/// CR 702.137a + CR 102.3: Spectacle's "if an opponent lost life this turn"
+/// reads the same life history, so in Two-Headed Giant a teammate's loss does
+/// not open it. P0 has one Mountain; Skewer the Critics costs {2}{R}, so it can
+/// only be cast for its spectacle cost {R}.
+fn team_game_spectacle_castable_after_shock(who: engine::types::PlayerId) -> bool {
+    use engine::types::format::FormatConfig;
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .with_mana_cost(ManaCost::default())
+        .id();
+    let skewer = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Skewer the Critics",
+            false,
+            "Spectacle {R}\nSkewer the Critics deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(shock).target_player(who).resolve();
+    assert!(runner.state().players[usize::from(who.0)].life_lost_this_turn > 0);
+    let card_id = runner.state().objects[&skewer].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: skewer,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .and_then(|_| {
+            runner.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(OPPOSING)],
+            })
+        });
+    let on_stack = runner.state().objects[&skewer].zone == Zone::Stack;
+    assert_eq!(
+        cast.is_ok(),
+        on_stack,
+        "the cast either lands or is refused"
+    );
+    on_stack
+}
+
+#[test]
+fn team_game_spectacle_opens_for_an_opposing_player_not_the_teammate() {
+    assert!(!team_game_spectacle_castable_after_shock(TEAMMATE));
+    assert!(team_game_spectacle_castable_after_shock(OPPOSING));
+}
