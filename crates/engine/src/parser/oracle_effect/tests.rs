@@ -72606,7 +72606,8 @@ fn cast_a_type_list_card_exiled_with_self_is_a_gap() {
 /// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
 /// from that player's graveyard" (Sorcerous Squall, where "that player" is the
 /// spell's target opponent) is not bound this way, nor is the targeted
-/// sentence outside a trigger.
+/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
+/// mentions that player's graveyard only later.
 #[test]
 fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     fn cast_target(parsed: &crate::parser::oracle::ParsedAbilities) -> TypedFilter {
@@ -72645,6 +72646,39 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     assert!(
         wrexial.properties.contains(&owned_by_triggering_player),
         "{wrexial:?}"
+    );
+    // The owner is read off the origin phrase itself: a triggered "from a
+    // graveyard" stays unbound even when a later part of the same clause
+    // mentions that player's graveyard; the same clause with "from that
+    // player's graveyard" as its origin is bound.
+    let triggered_cast_target = |origin: &str| {
+        cast_target(&parse_oracle_text(
+            &format!(
+                "Whenever this creature deals combat damage to a player, you may cast target \
+                 instant card from {origin} with mana value less than or equal to the number \
+                 of cards in that player's graveyard without paying its mana cost."
+            ),
+            "Probe",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        ))
+    };
+    let any_graveyard = triggered_cast_target("a graveyard");
+    assert!(
+        any_graveyard.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }) && !any_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{any_graveyard:?}"
+    );
+    let that_players_graveyard = triggered_cast_target("that player's graveyard");
+    assert!(
+        that_players_graveyard
+            .properties
+            .contains(&owned_by_triggering_player),
+        "{that_players_graveyard:?}"
     );
     let squall = cast_target(&parse_oracle_text(
         "Delve (Each card you exile from your graveyard while casting this spell pays for \

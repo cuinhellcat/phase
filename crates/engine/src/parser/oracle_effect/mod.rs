@@ -28799,13 +28799,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // Risen Deep) chooses the card as the trigger goes on the stack, in the
         // graveyard of the player its event names — and a graveyard holds only
         // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
-        // `InZone { Graveyard }`, so the owner is bound here; without it any
-        // graveyard's card is a legal target. (`relative_player_scope` does not
-        // name that player here: `relative_player_scope_for_condition` reads a
-        // "~ deals combat damage to a player" head as `TargetPlayer`.)
+        // `InZone { Graveyard }`, so the owner is bound here, read off the same
+        // origin phrase the zone came from; without it any graveyard's card is a
+        // legal target. (`relative_player_scope` does not name that player here:
+        // `relative_player_scope_for_condition` reads a "~ deals combat damage
+        // to a player" head as `TargetPlayer`.)
         if ctx.in_trigger
             && cast_target_is_chosen_graveyard_card(rest, &filter)
-            && scan_contains_phrase(rest, "that player's graveyard")
+            && cast_origin_is_that_players_graveyard(rest)
         {
             add_cast_target_props(
                 &mut filter,
@@ -28996,6 +28997,22 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     .ok()?;
     eof::<_, E>(tail.trim_end_matches('.')).ok()?;
     Some(cost)
+}
+
+/// The origin phrase `apply_cast_target_suffixes` took the cast target's zone
+/// from (the first zone phrase of the clause) is exactly "from that player's
+/// graveyard" — not a later mention of that graveyard elsewhere in the clause.
+fn cast_origin_is_that_players_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from that player's graveyard"),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
 }
 
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
