@@ -10174,8 +10174,9 @@ pub(crate) fn scan_zone_phrase_span(
                 FilterProp::InZone { zone } => Some(*zone),
                 _ => None,
             })?;
-            // `consumed` counts bytes of the lowercased phrase; a case fold that
-            // changes byte length leaves the span empty (fail-closed for callers).
+            // `consumed` counts bytes of the lowercased phrase, so the span is exact
+            // only for text whose lowercase keeps its byte length (callers pass
+            // lowercased text); otherwise it may be empty.
             let span = text[offset..].get(..consumed).unwrap_or_default();
             return Some((span, zone, ctrl, props));
         }
