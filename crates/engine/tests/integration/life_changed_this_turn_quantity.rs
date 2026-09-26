@@ -14,6 +14,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -981,7 +982,6 @@ const OPPOSING: engine::types::PlayerId = engine::types::PlayerId(2);
 /// `who` through real casts before P0's postcombat trigger adds `{C}` per the
 /// printed `trigger` line; returns the `{C}` added.
 fn team_game_life_history_case(trigger: &str, change: &str, who: engine::types::PlayerId) -> usize {
-    use engine::types::format::FormatConfig;
     let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Life Ledger", 2, 2, trigger);
@@ -1069,7 +1069,6 @@ fn team_game_life_history_counts_opponents_not_the_teammate() {
 /// not open it. P0 has one Mountain; Skewer the Critics costs {2}{R}, so it can
 /// only be cast for its spectacle cost {R}.
 fn team_game_spectacle_castable_after_shock(who: engine::types::PlayerId) -> bool {
-    use engine::types::format::FormatConfig;
     let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::Red);
