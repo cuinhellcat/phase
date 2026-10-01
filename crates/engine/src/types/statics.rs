@@ -3400,12 +3400,16 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 graveyard_destination_replacement,
                 extra_cost,
+                pool,
                 // CR 122.1: the enters-with counter payload rides on serde, not
                 // the Display round-trip (mirrors `extra_cost`); FromStr
                 // defaults it to None.
                 ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
+                if matches!(pool, GraveyardPermissionPool::AnyGraveyard) {
+                    write!(f, ",pool=any_graveyard")?;
+                }
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
                     write!(f, ",exile_on_graveyard")?;
                 }
@@ -3935,7 +3939,11 @@ impl FromStr for StaticMode {
                         extra_cost: None,
                         enters_with_counter: None,
                         required_cast_keyword: None,
-                        pool: GraveyardPermissionPool::OwnGraveyard,
+                        pool: if rest.contains(&"pool=any_graveyard") {
+                            GraveyardPermissionPool::AnyGraveyard
+                        } else {
+                            GraveyardPermissionPool::OwnGraveyard
+                        },
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -5049,6 +5057,15 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+            },
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: Some(Zone::Exile),
+                extra_cost: None,
+                enters_with_counter: None,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::AnyGraveyard,
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
