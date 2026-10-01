@@ -32,13 +32,18 @@ use engine::game::printed_cards::snapshot_object_face;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::{transform, zones};
+use engine::types::ability::{CardPlayMode, TargetFilter, TypeFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::{FlashbackCost, Keyword};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
 use engine::types::zones::Zone;
+use engine::types::{CardId, StaticDefinition};
 
 /// The Great Work, verbatim.
 const THE_GREAT_WORK: &str =
@@ -250,10 +255,6 @@ fn great_work_chapter_three_casts_from_any_graveyard_until_end_of_turn() {
 /// graveyard card still is. The YES/NO pair at one board.
 #[test]
 fn great_work_offers_no_flashback_for_an_opponents_card() {
-    use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind};
-    use engine::types::keywords::{FlashbackCost, Keyword};
-    use engine::types::mana::ManaCost;
-
     fn give_flashback(runner: &mut GameRunner, object_id: ObjectId) {
         let flashback = Keyword::Flashback(FlashbackCost::Mana(ManaCost::zero()));
         let obj = runner.state_mut().objects.get_mut(&object_id).unwrap();
@@ -378,10 +379,6 @@ fn a_your_graveyard_grant_does_not_reach_the_opponents_graveyard() {
 /// is refused.
 #[test]
 fn a_printed_own_graveyard_permission_refuses_the_opponents_card_at_cast() {
-    use engine::types::ability::{CardPlayMode, TargetFilter, TypeFilter, TypedFilter};
-    use engine::types::statics::{CastFrequency, GraveyardPermissionPool, StaticMode};
-    use engine::types::{CardId, StaticDefinition};
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let own_instant = scenario
