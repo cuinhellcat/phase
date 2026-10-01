@@ -1420,10 +1420,12 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         })
     }));
 
+    let permission_sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
     objects.extend(graveyard_spell_objects_available_to_cast(
         state,
         player,
         &player_data.graveyard,
+        &permission_sources,
     ));
 
     // CR 601.2a: the same object-tagged `PlayFromExile` grant, on a card in
@@ -1439,7 +1441,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     // CR 601.3 + CR 404.1: a "from any graveyard" permission (The Great Work)
     // reaches cards in other players' graveyards, which the owner-scoped walk
     // above never visits.
-    objects.extend(non_owner_graveyard_permission_objects(state, player));
+    objects.extend(non_owner_graveyard_permission_objects(
+        state,
+        player,
+        &permission_sources,
+    ));
 
     // CR 601.2a + CR 113.6b + CR 118.9: Cards in exile castable via a
     // `StaticMode::ExileCastPermission` static from a battlefield permanent
@@ -1552,10 +1558,13 @@ fn non_owner_graveyard_play_from_exile_grants(
 /// graveyard-cast keywords and the other owner-scoped routes of
 /// `graveyard_spell_objects_available_to_cast` stay with the card's owner,
 /// for this offer and for the cast itself (`graveyard_keyword_routes_open`).
-fn non_owner_graveyard_permission_objects(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+fn non_owner_graveyard_permission_objects(
+    state: &GameState,
+    player: PlayerId,
+    sources: &[GraveyardPermissionSource<'_>],
+) -> Vec<ObjectId> {
     // No whose-turn gate, as in the owner-scoped walk: a permission's own
     // condition says whose turn it must be (CR 601.3).
-    let sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
     if sources.iter().all(|source| source.pool.is_own_graveyard()) {
         return Vec::new();
     }
@@ -1566,9 +1575,7 @@ fn non_owner_graveyard_permission_objects(state: &GameState, player: PlayerId) -
         .flat_map(|other| other.graveyard.iter().copied())
         .filter(|&obj_id| {
             state.objects.get(&obj_id).is_some_and(|obj| {
-                graveyard_object_castable_by_permission_sources(
-                    state, player, obj_id, obj, &sources,
-                )
+                graveyard_object_castable_by_permission_sources(state, player, obj_id, obj, sources)
             })
         })
         .collect()
@@ -1578,13 +1585,13 @@ fn graveyard_spell_objects_available_to_cast(
     state: &GameState,
     player: PlayerId,
     graveyard: &im::Vector<ObjectId>,
+    permission_sources: &[GraveyardPermissionSource<'_>],
 ) -> Vec<ObjectId> {
     // CR 601.3 + CR 702.8a + CR 117.1a: no blanket whose-turn gate here. A
     // permission that says "during your turn" / "during each of your turns"
     // carries `StaticCondition::DuringYourTurn`, which `graveyard_permission_sources`
     // evaluates through `active_static_definitions`. One without turn words lets a
     // Flash or instant card be cast from the graveyard on any turn.
-    let permission_sources = graveyard_permission_sources(state, player, Some(CardPlayMode::Cast));
     let mut keyword_objects = Vec::new();
     let mut permission_objects = Vec::new();
     let mut timed_permission_objects = Vec::new();
@@ -1644,7 +1651,7 @@ fn graveyard_spell_objects_available_to_cast(
             player,
             obj_id,
             obj,
-            &permission_sources,
+            permission_sources,
         ) {
             permission_objects.push(obj_id);
         }
