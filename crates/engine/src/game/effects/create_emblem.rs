@@ -200,6 +200,7 @@ mod tests {
             extra_cost: None,
             enters_with_counter: None,
             required_cast_keyword: None,
+            pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,

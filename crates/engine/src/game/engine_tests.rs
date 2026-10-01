@@ -2998,6 +2998,7 @@ fn a_room_cast_from_the_graveyard_offers_the_face_choice_per_cast() {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Any),
         );
@@ -11703,6 +11704,7 @@ fn grant_graveyard_creature_cast_and_bury(
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
             })
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),

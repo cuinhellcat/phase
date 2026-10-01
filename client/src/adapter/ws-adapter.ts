@@ -210,6 +210,11 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 98 — GraveyardCastPermission gains pool (GraveyardPermissionPool):
+ *      AnyGraveyard is "from any graveyard" (CR 404.1 + CR 601.3 — The Great
+ *      Work). A v97 peer would default it to the own graveyard and refuse a
+ *      cast the permission allows; the exact-match handshake refuses the
+ *      pairing. P2P moves in lockstep (wire 80); lobby messages are unchanged.
  * 97 — ResolvedAbility.target_reads and AbilityDefinition.target_reads
  *      (TargetReadOrigin) are serialized: a ParentAnnouncement instruction
  *      reads the object its immediately preceding instruction announced
@@ -650,7 +655,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 97;
+export const PROTOCOL_VERSION = 98;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
