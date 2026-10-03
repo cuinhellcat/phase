@@ -19736,7 +19736,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 /// Gated on a same-chain exile-until loop (`chain_prior_exile_until_match`):
 /// that loop hands its found cards on as targets, which is the batch "one of
 /// them" names. When a clause between the loop and this one may replace those
-/// targets (`chain_exile_until_hits_are_parent_targets` is false), the clause
+/// targets (`chain_exile_until_hits_source` is unbound), the clause
 /// fails closed as unimplemented. Without a loop it is left to the general
 /// parse.
 fn try_parse_put_one_exiled_card_into_hand(
@@ -19756,12 +19756,14 @@ fn try_parse_put_one_exiled_card_into_hand(
     )
         .parse(lower.as_str())
         .ok()?;
-    if !ctx.chain_exile_until_hits_are_parent_targets {
+    let Some(candidate_source @ ZoneChoiceCandidateSource::ParentTargets) =
+        ctx.chain_exile_until_hits_source
+    else {
         return Some(parsed_clause(Effect::unimplemented(
             "put_one_of_exile_until_batch_into_hand",
             text,
         )));
-    }
+    };
     let mut clause = parsed_clause(Effect::ChooseFromZone {
         count: 1,
         zone: Zone::Exile,
@@ -19769,7 +19771,7 @@ fn try_parse_put_one_exiled_card_into_hand(
         zone_owner: ZoneOwner::Controller,
         filter: None,
         chooser: crate::types::ability::Chooser::Controller.into(),
-        candidate_source: crate::types::ability::ZoneChoiceCandidateSource::ParentTargets,
+        candidate_source,
         reciprocal_role: None,
         up_to: false,
         selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -33121,7 +33123,7 @@ fn clause_ir_is_self_library_peek(clause: &ClauseIr) -> bool {
 /// that batch ("You may cast one of those two cards without paying its mana
 /// cost", Invasion of Alara) passes them on unchanged. Any other clause after
 /// the loop — or a loop carried by a delayed trigger — fails closed.
-fn chain_exile_until_hits_are_parent_targets(clauses: &[ClauseIr]) -> bool {
+fn chain_exile_until_hits_source(clauses: &[ClauseIr]) -> Option<ZoneChoiceCandidateSource> {
     for clause in clauses.iter().rev() {
         if clause.delayed_condition.is_some()
             || clause.prefix_delayed_condition.is_some()
@@ -33129,13 +33131,13 @@ fn chain_exile_until_hits_are_parent_targets(clauses: &[ClauseIr]) -> bool {
             || clause.player_scope.is_some()
             || clause.parsed.sub_ability.is_some()
         {
-            return false;
+            return None;
         }
         match &clause.parsed.effect {
             Effect::ExileFromTopUntil {
                 until: UntilCondition::NextMatches { .. },
                 ..
-            } => return true,
+            } => return Some(ZoneChoiceCandidateSource::ParentTargets),
             Effect::CastFromZone {
                 target: TargetFilter::ParentTarget,
                 driver:
@@ -33147,10 +33149,10 @@ fn chain_exile_until_hits_are_parent_targets(clauses: &[ClauseIr]) -> bool {
                     },
                 ..
             } => {}
-            _ => return false,
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 /// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
@@ -41687,9 +41689,7 @@ fn parse_effect_chain_ir_body(
                     _ => None,
                 }
             }),
-            chain_exile_until_hits_are_parent_targets: chain_exile_until_hits_are_parent_targets(
-                builder.clauses(),
-            ),
+            chain_exile_until_hits_source: chain_exile_until_hits_source(builder.clauses()),
             // CR 400.7j + CR 608.2c + CR 608.2d: the nearest earlier single-card
             // exile partition of this chain, with its candidate provenance. When
             // that provenance is the source-bound cost-paid pile (Coin of Fate),
