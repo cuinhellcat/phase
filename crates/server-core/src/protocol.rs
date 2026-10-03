@@ -3321,8 +3321,8 @@ mod tests {
     /// `UntilCondition::NextMatches.count` (CR 608.2c), the paused loop's `hits`,
     /// `ZoneChoiceCandidateSource::ParentTargets` and
     /// `SpellContext.exile_until_batch` are new in serialized
-    /// full-game state; a v102 peer would run a counted loop as a one-card loop,
-    /// so it must be refused before it receives v103 state.
+    /// full-game state; a v103 peer would run a counted loop as a one-card loop,
+    /// so it must be refused before it receives v104 state.
     /// `GameEvent::AbilityActivated` now carries `kind: "Mana"` for mana-ability
     /// activations and an optional `departed_source_lki`; a v100 peer cannot
     /// parse the `Mana` kind, so it must be refused before it receives v101 state.
