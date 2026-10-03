@@ -29875,8 +29875,11 @@ enum CastAnaphor {
     /// "cards exiled …" — splits further on its tail (see
     /// `parse_host_anchored_exiled_cards_tail`).
     PluralCardsExiled,
-    /// "one of those [N] cards" — ONE card chosen from the batch the chain
-    /// handed over (Invasion of Alara: "one of those two cards").
+    /// "one of those N cards" — ONE card chosen from the batch the chain
+    /// handed over (Invasion of Alara: "one of those two cards"). Only the
+    /// free, immediate cast keeps that one-card bound (a one-cast resolution
+    /// window); any other form fails closed. The unnumbered "one of those
+    /// cards" stays `Other`, as before.
     OneOfBatch,
     /// Every other anaphor; keeps `TargetFilter::ParentTarget`.
     Other,
@@ -29980,10 +29983,11 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             CastAnaphor::OneOfBatch,
             (
                 tag::<_, _, E>("one of those "),
-                opt(terminated(nom_primitives::parse_number, tag(" "))),
+                terminated(nom_primitives::parse_number, tag(" ")),
                 tag("cards"),
             ),
         ),
+        value(CastAnaphor::Other, tag("one of those cards")),
         value(CastAnaphor::SingularExiledCard, tag("the exiled card")),
         value(CastAnaphor::Other, tag("those cards")),
         value(CastAnaphor::PluralCardsExiled, tag("cards exiled")),
@@ -30050,20 +30054,27 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             && duration.is_none()
             && constraint.is_none()
             && (without_paying || ctx.parent_target_is_chosen);
-        let driver =
-            if resolves_now && without_paying && matches!(matched_anaphor, CastAnaphor::OneOfBatch)
-            {
-                crate::types::ability::CastFromZoneDriver::ResolutionWindow {
-                    bounds: crate::types::ability::ResolutionCastWindow {
-                        max_casts: Some(1),
-                        max_total_mv: None,
-                    },
-                }
-            } else if resolves_now {
-                crate::types::ability::CastFromZoneDriver::DuringResolution
-            } else {
-                crate::types::ability::CastFromZoneDriver::LingeringPermission
-            };
+        let one_cast_window = resolves_now && without_paying;
+        // CR 608.2g: only the one-cast window carries "one of those N cards"'s
+        // one-card bound. A paid or Play form (or a duration that reaches this
+        // parser; printed leading and trailing durations are refused earlier
+        // by the duration seam) would fall back to a permission per card, so
+        // it fails closed instead.
+        if matches!(matched_anaphor, CastAnaphor::OneOfBatch) && !one_cast_window {
+            return Some(Effect::unimplemented("bounded_batch_cast", lower));
+        }
+        let driver = if one_cast_window && matches!(matched_anaphor, CastAnaphor::OneOfBatch) {
+            crate::types::ability::CastFromZoneDriver::ResolutionWindow {
+                bounds: crate::types::ability::ResolutionCastWindow {
+                    max_casts: Some(1),
+                    max_total_mv: None,
+                },
+            }
+        } else if resolves_now {
+            crate::types::ability::CastFromZoneDriver::DuringResolution
+        } else {
+            crate::types::ability::CastFromZoneDriver::LingeringPermission
+        };
         // CR 406.6 + CR 607.2a + CR 608.2c: a singular "the exiled card"
         // anaphor binds durably to `ExiledBySource` when no earlier clause in
         // this SAME chain produced the exile (e.g. Windbrisk Heights /

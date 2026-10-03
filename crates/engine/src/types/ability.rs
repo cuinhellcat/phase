@@ -23580,8 +23580,8 @@ impl Effect {
                 )
                 | None => {}
             },
-            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity and the
-            // match count are resolved up-front when the until-loop starts
+            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity is
+            // resolved up-front when the until-loop starts
             // (`game/effects/exile_from_top_until.rs`).
             Effect::ExileFromTopUntil { until, .. } => match until {
                 UntilCondition::NextMatches { count, .. } => f(count),

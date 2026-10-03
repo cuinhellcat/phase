@@ -80122,3 +80122,85 @@ fn each_other_card_exiled_this_way_after_an_exile_until_loop_is_the_rest() {
     );
     assert_eq!(count, QuantityExpr::Fixed { value: 0 });
 }
+
+/// CR 608.2g + CR 608.2c: "cast one of those two cards" keeps its one-card
+/// bound only as the free cast during resolution (a one-cast window). A paid or
+/// Play form would fall back to a permission per card, so it fails closed; a
+/// durational form is already rejected by the duration seam. The unnumbered
+/// "one of those cards" keeps its earlier reading.
+#[test]
+fn one_of_those_two_cards_is_bounded_only_as_a_free_immediate_cast() {
+    let cast_step = |tail: &str| {
+        let def = parse_effect_chain(
+            &format!(
+                "Exile cards from the top of your library until you exile two nonland cards. {tail}"
+            ),
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileFromTopUntil {
+                    until: UntilCondition::NextMatches { .. },
+                    ..
+                }
+            ),
+            "reach guard: the loop parsed, got {:?}",
+            def.effect
+        );
+        *def.sub_ability.expect("cast step").effect
+    };
+
+    let free = cast_step("You may cast one of those two cards without paying its mana cost.");
+    assert!(
+        matches!(
+            &free,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                driver: CastFromZoneDriver::ResolutionWindow {
+                    bounds: ResolutionCastWindow {
+                        max_casts: Some(1),
+                        ..
+                    },
+                },
+                ..
+            }
+        ),
+        "got {free:?}"
+    );
+    for tail in [
+        "You may cast one of those two cards.",
+        "You may play one of those two cards without paying its mana cost.",
+    ] {
+        let effect = cast_step(tail);
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. } if name == "bounded_batch_cast"),
+            "{tail}: got {effect:?}"
+        );
+    }
+    // A duration, leading or trailing, is split off before this parser runs
+    // and is rejected by the existing duration seam instead.
+    for tail in [
+        "Until end of turn, you may cast one of those two cards without paying its mana cost.",
+        "You may cast one of those two cards without paying its mana cost this turn.",
+    ] {
+        let effect = cast_step(tail);
+        assert!(
+            matches!(&effect, Effect::Unimplemented { name, .. } if name == "duration_scoped_cast_bound"),
+            "{tail}: got {effect:?}"
+        );
+    }
+    let unnumbered = cast_step("Until end of turn, you may play one of those cards.");
+    assert!(
+        matches!(
+            &unnumbered,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                mode: CardPlayMode::Play,
+                driver: CastFromZoneDriver::LingeringPermission,
+                ..
+            }
+        ),
+        "got {unnumbered:?}"
+    );
+}

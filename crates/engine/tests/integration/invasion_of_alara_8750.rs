@@ -45,6 +45,10 @@ struct Board {
 /// second hit (MV 1) above an unreached card (MV 1), or a last land, so the
 /// loop runs to the bottom with one hit.
 fn board(second_hit: bool) -> Board {
+    board_with(ALARA_TRIGGER, second_hit)
+}
+
+fn board_with(trigger: &str, second_hit: bool) -> Board {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
@@ -57,7 +61,7 @@ fn board(second_hit: bool) -> Board {
         )],
     );
     let siege = scenario
-        .add_creature_to_hand_from_oracle(P0, "Alara Siege", 1, 1, ALARA_TRIGGER)
+        .add_creature_to_hand_from_oracle(P0, "Alara Siege", 1, 1, trigger)
         .with_mana_cost(ManaCost::generic(1))
         .id();
     // `add_*_library_top` puts each new card on top, so build bottom-up.
@@ -917,4 +921,58 @@ fn an_announced_x_sets_how_many_matches_end_the_loop() {
 #[test]
 fn an_announced_x_of_zero_exiles_nothing() {
     assert_eq!(x_loop(0), [Zone::Library; 4]);
+}
+
+/// CR 608.2g: only the free, immediate cast keeps "one of those two cards" to
+/// one card. "Play" would fall back to a lingering permission on each found
+/// card, so it fails closed: the trigger still exiles both found cards but
+/// grants no permission to play either. Yes-partner: the printed free cast on
+/// the same board opens the one-cast window.
+#[test]
+fn playing_one_of_those_two_cards_grants_no_permission() {
+    const PLAY: &str = "When this creature enters, exile cards from the top of your \
+library until you exile two nonland cards with mana value 4 or less. You may play one of \
+those two cards without paying its mana cost.";
+    let mut b = board_with(PLAY, true);
+    // Accept every "you may", so a granted permission would show.
+    for _ in 0..8 {
+        advance_to_choice(&mut b.runner);
+        if !matches!(
+            b.runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            break;
+        }
+        b.runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accepting the optional instruction must succeed");
+    }
+    b.runner.advance_until_stack_empty();
+    for hit in [b.hit_one, b.hit_two.unwrap()] {
+        assert_eq!(
+            zone(&b.runner, hit),
+            Zone::Exile,
+            "reach guard: the loop ran"
+        );
+        assert!(
+            b.runner.state().objects[&hit]
+                .casting_permissions
+                .is_empty(),
+            "no per-card permission"
+        );
+    }
+
+    let mut free = board(true);
+    advance_to_choice(&mut free.runner);
+    assert!(
+        matches!(
+            free.runner.state().waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
+            }
+        ),
+        "got {:?}",
+        free.runner.state().waiting_for
+    );
 }
