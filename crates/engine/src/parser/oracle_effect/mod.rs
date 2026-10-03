@@ -19733,9 +19733,12 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 /// of that batch still in exile — a card cast from it is on the stack and no
 /// longer a candidate — and that card goes to hand.
 ///
-/// Gated on a same-chain exile-until loop (`chain_prior_exile_until_match`): that
-/// loop hands its found cards on as targets, which is the batch "one of them"
-/// names. Without one the clause is left to the general parse.
+/// Gated on a same-chain exile-until loop (`chain_prior_exile_until_match`):
+/// that loop hands its found cards on as targets, which is the batch "one of
+/// them" names. When a clause between the loop and this one may replace those
+/// targets (`chain_exile_until_hits_are_parent_targets` is false), the clause
+/// fails closed as unimplemented. Without a loop it is left to the general
+/// parse.
 fn try_parse_put_one_exiled_card_into_hand(
     text: &str,
     ctx: &ParseContext,
@@ -19753,6 +19756,12 @@ fn try_parse_put_one_exiled_card_into_hand(
     )
         .parse(lower.as_str())
         .ok()?;
+    if !ctx.chain_exile_until_hits_are_parent_targets {
+        return Some(parsed_clause(Effect::unimplemented(
+            "put_one_of_exile_until_batch_into_hand",
+            text,
+        )));
+    }
     let mut clause = parsed_clause(Effect::ChooseFromZone {
         count: 1,
         zone: Zone::Exile,
@@ -33106,6 +33115,44 @@ fn clause_ir_is_self_library_peek(clause: &ClauseIr) -> bool {
         )
 }
 
+/// CR 608.2c: whether the cards found by an earlier same-chain
+/// `NextMatches` loop still arrive at the next clause as its parent targets.
+/// The loop hands its matches on as targets, and only the one-cast window over
+/// that batch ("You may cast one of those two cards without paying its mana
+/// cost", Invasion of Alara) passes them on unchanged. Any other clause after
+/// the loop — or a loop carried by a delayed trigger — fails closed.
+fn chain_exile_until_hits_are_parent_targets(clauses: &[ClauseIr]) -> bool {
+    for clause in clauses.iter().rev() {
+        if clause.delayed_condition.is_some()
+            || clause.prefix_delayed_condition.is_some()
+            || clause.repeat_for.is_some()
+            || clause.player_scope.is_some()
+            || clause.parsed.sub_ability.is_some()
+        {
+            return false;
+        }
+        match &clause.parsed.effect {
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches { .. },
+                ..
+            } => return true,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                driver:
+                    CastFromZoneDriver::ResolutionWindow {
+                        bounds:
+                            ResolutionCastWindow {
+                                max_casts: Some(1), ..
+                            },
+                    },
+                ..
+            } => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
 /// ("look at"/"reveal" a possessive hand), return the player it looked at.
 /// Feeds `ParseContext::chain_prior_hand_reveal_target` so a later same-chain
@@ -41640,6 +41687,9 @@ fn parse_effect_chain_ir_body(
                     _ => None,
                 }
             }),
+            chain_exile_until_hits_are_parent_targets: chain_exile_until_hits_are_parent_targets(
+                builder.clauses(),
+            ),
             // CR 400.7j + CR 608.2c + CR 608.2d: the nearest earlier single-card
             // exile partition of this chain, with its candidate provenance. When
             // that provenance is the source-bound cost-paid pile (Coin of Fate),

@@ -299,11 +299,9 @@ fn a_single_hit_that_is_cast_leaves_nothing_for_hand() {
         .expect("casting the only hit must succeed");
     assert_eq!(zone(&b.runner, b.hit_one), Zone::Stack);
     assert!(
-        !matches!(
-            b.runner.state().waiting_for,
-            WaitingFor::ChooseFromZoneChoice { .. }
-        ),
-        "no card is left to choose for hand"
+        matches!(b.runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no card is left to choose for hand: {:?}",
+        b.runner.state().waiting_for
     );
     b.runner.advance_until_stack_empty();
 
@@ -809,7 +807,9 @@ fn possibility_storm_without_a_match_bottoms_the_exiled_spell_too() {
             vec![],
         )],
     );
-    scenario.add_enchantment_from_oracle(P0, "Possibility Storm", POSSIBILITY_STORM);
+    let storm = scenario
+        .add_enchantment_from_oracle(P0, "Possibility Storm", POSSIBILITY_STORM)
+        .id();
     let spell = scenario
         .add_spell_to_hand(P0, "Cast Sorcery", false)
         .from_oracle_text("You gain 1 life.")
@@ -830,10 +830,91 @@ fn possibility_storm_without_a_match_bottoms_the_exiled_spell_too() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the spell must succeed");
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == storm),
+        "reach guard: the Possibility Storm trigger is on the stack"
+    );
     runner.advance_until_stack_empty();
 
     let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
     for card in [spell, instant, land] {
         assert!(library.contains(&card), "goes to the bottom");
     }
+}
+
+const X_LOOP: &str =
+    "{X}, {T}: Exile cards from the top of your library until you exile X nonland cards.";
+
+/// Library, top first: land, two nonland cards, an unreached nonland card.
+/// Activates the X loop with `x` announced and returns each card's zone.
+fn x_loop(x: u32) -> [Zone; 4] {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..x)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let source = scenario.add_artifact_from_oracle(P0, "X Loop", X_LOOP).id();
+    let unreached = scenario
+        .add_spell_to_library_top(P0, "Unreached", true)
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    let second = scenario
+        .add_spell_to_library_top(P0, "Second", true)
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    let first = scenario
+        .add_spell_to_library_top(P0, "First", true)
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    let land = scenario.add_land_to_library_top(P0, "Miss Land").id();
+    let mut runner = scenario.build();
+    let waiting = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+        })
+        .expect("activating the X loop must succeed");
+    assert!(
+        matches!(waiting.waiting_for, WaitingFor::ChooseXValue { .. }),
+        "reach guard: X is announced: {:?}",
+        waiting.waiting_for
+    );
+    runner
+        .act(GameAction::ChooseX { value: x })
+        .expect("announcing X must succeed");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("paying X must succeed");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the activation is on the stack"
+    );
+    runner.advance_until_stack_empty();
+    [land, first, second, unreached].map(|id| zone(&runner, id))
+}
+
+/// CR 107.3a + CR 608.2c: "until you exile X nonland cards" counts the X the
+/// controller announced while activating the ability.
+#[test]
+fn an_announced_x_sets_how_many_matches_end_the_loop() {
+    assert_eq!(
+        x_loop(2),
+        [Zone::Exile, Zone::Exile, Zone::Exile, Zone::Library]
+    );
+}
+
+/// CR 107.3a + CR 608.2c: X = 0 is met before the first card moves.
+#[test]
+fn an_announced_x_of_zero_exiles_nothing() {
+    assert_eq!(x_loop(0), [Zone::Library; 4]);
 }

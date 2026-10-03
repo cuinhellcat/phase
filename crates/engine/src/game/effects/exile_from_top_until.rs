@@ -1,5 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetFilter, TargetRef,
     UntilCondition,
@@ -86,24 +86,18 @@ pub fn resolve(
     // dynamic refs read from the same context the ability is resolving in.
     let threshold_value: Option<i32> = match until {
         UntilCondition::NextMatches { .. } => None,
-        UntilCondition::CumulativeThreshold { threshold, .. } => Some(resolve_quantity(
-            state,
-            threshold,
-            ability.controller,
-            ability.source_id,
-        )),
+        UntilCondition::CumulativeThreshold { threshold, .. } => {
+            Some(resolve_quantity_with_targets(state, threshold, ability))
+        }
     };
 
-    // CR 608.2c: how many matching cards end a `NextMatches` loop ("until you
-    // exile two nonland cards …"), resolved once like the threshold above.
+    // CR 608.2c + CR 107.3a: how many matching cards end a `NextMatches` loop
+    // ("until you exile two nonland cards …"), resolved once in the resolving
+    // ability's context so an X count reads the X its controller announced.
     let match_count: usize = match until {
-        UntilCondition::NextMatches { count, .. } => usize::try_from(resolve_quantity(
-            state,
-            count,
-            ability.controller,
-            ability.source_id,
-        ))
-        .unwrap_or(0),
+        UntilCondition::NextMatches { count, .. } => {
+            usize::try_from(resolve_quantity_with_targets(state, count, ability)).unwrap_or(0)
+        }
         UntilCondition::CumulativeThreshold { .. } => 0,
     };
 
@@ -1997,6 +1991,51 @@ mod tests {
             Zone::Library,
             "card after the threshold was reached should remain in the library"
         );
+    }
+
+    /// CR 107.3a: an X threshold reads the X announced for the resolving
+    /// ability. No printed card parses an X threshold, so this drives the
+    /// resolver directly.
+    #[test]
+    fn cumulative_threshold_reads_the_announced_x() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "X Threshold".to_string(),
+            Zone::Battlefield,
+        );
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "Three", 3);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Four", 4);
+        let c3 = add_library_card_with_mv(&mut state, PlayerId(0), "Five", 5);
+        state.players[0].library = crate::im::vector![c1, c2, c3];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(7);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 3 + 4 = 7 reaches X = 7; with X read as zero only the first card moves.
+        assert_eq!(state.objects[&c1].zone, Zone::Exile);
+        assert_eq!(state.objects[&c2].zone, Zone::Exile);
+        assert_eq!(state.objects[&c3].zone, Zone::Library);
     }
 
     /// CR 202.3 + CR 107.3e: When the library cannot reach the threshold even

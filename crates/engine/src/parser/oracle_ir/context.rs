@@ -639,6 +639,13 @@ pub(crate) struct ParseContext {
     /// ones it found, and "the other cards exiled this way" are the rest
     /// (Invasion of Alara). `None` when the chain has no such loop.
     pub chain_prior_exile_until_match: Option<TargetFilter>,
+    /// CR 608.2c: whether the cards that `NextMatches` loop found
+    /// still reach this clause as its parent targets — true only when every
+    /// clause after the loop is the one-cast window over its batch (Invasion
+    /// of Alara's "You may cast one of those two cards …"), which hands those
+    /// targets on unchanged. Any other clause in between may target or choose
+    /// its own objects, so "put one of them into your hand" stays unbound.
+    pub chain_exile_until_hits_are_parent_targets: bool,
     /// CR 400.7j + CR 608.2c + CR 608.2d: the NEAREST earlier single-card exile
     /// partition in this same effect chain, carrying that pile's
     /// [`ZoneChoiceCandidateSource`] — `None` when the chain has none.

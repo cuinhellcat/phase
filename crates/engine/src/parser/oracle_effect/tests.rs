@@ -79462,7 +79462,24 @@ fn batch_readings_need_a_prior_exile_until_loop() {
         "Exile the top two cards of your library. Put one of them into your hand.",
         AbilityKind::Spell,
     );
-    let mut node = Some(&def);
+    // Reach guard: the first clause parsed as the fixed-count top exile.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    assert_no_batch_hand_choice(&def);
+}
+
+fn assert_no_batch_hand_choice(def: &AbilityDefinition) {
+    let mut node = Some(def);
     while let Some(ability) = node {
         assert!(
             !matches!(
@@ -79477,6 +79494,67 @@ fn batch_readings_need_a_prior_exile_until_loop() {
         );
         node = ability.sub_ability.as_deref();
     }
+}
+
+/// CR 608.2c + CR 608.2d: "put one of them into your hand" reads the loop's
+/// found cards from its parent targets, so it binds only when nothing between
+/// the loop and it may replace those targets. With a targeting clause in
+/// between it fails closed; the same text without that clause binds.
+#[test]
+fn a_clause_between_the_loop_and_the_hand_choice_fails_closed() {
+    let loop_then = |middle: &str| {
+        parse_effect_chain(
+            &format!(
+                "Exile cards from the top of your library until you exile two nonland cards.{middle} \
+                 Put one of them into your hand."
+            ),
+            AbilityKind::Spell,
+        )
+    };
+    let is_counted_loop = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    ..
+                },
+                ..
+            }
+        )
+    };
+
+    let blocked = loop_then(" Tap target creature.");
+    assert!(is_counted_loop(&blocked.effect), "got {:?}", blocked.effect);
+    let tap = blocked.sub_ability.as_deref().expect("tap step");
+    assert!(
+        matches!(&*tap.effect, Effect::SetTapState { .. }),
+        "got {:?}",
+        tap.effect
+    );
+    let hand = tap.sub_ability.as_deref().expect("hand step");
+    assert!(
+        matches!(&*hand.effect, Effect::Unimplemented { .. }),
+        "got {:?}",
+        hand.effect
+    );
+    assert_no_batch_hand_choice(&blocked);
+
+    // Yes-partner: the same loop with nothing in between binds the choice.
+    let bound = loop_then("");
+    assert!(is_counted_loop(&bound.effect), "got {:?}", bound.effect);
+    let hand = bound.sub_ability.as_deref().expect("hand step");
+    assert!(
+        matches!(
+            &*hand.effect,
+            Effect::ChooseFromZone {
+                candidate_source: ZoneChoiceCandidateSource::ParentTargets,
+                ..
+            }
+        ),
+        "got {:?}",
+        hand.effect
+    );
 }
 
 /// CR 608.2c: "each other card exiled this way" after an exile-until loop
