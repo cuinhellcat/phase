@@ -14625,7 +14625,7 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::parse_where_x_quantity_expression;
+    use super::{parse_where_x_quantity_expression, strip_trailing_duration};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
         DigSource, Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtValue, QuantityExpr,
@@ -14712,8 +14712,6 @@ mod where_x_tests {
     /// granting clause's own.
     #[test]
     fn strip_trailing_duration_leaves_a_quoted_abilitys_duration_alone() {
-        use super::strip_trailing_duration;
-
         let quoted = "creatures you control gain \"Whenever ~ deals combat damage to a player, exile the top card of that player's library. You may play that card for as long as it remains exiled.\"";
         let (stripped, duration) = strip_trailing_duration(quoted);
         assert_eq!(duration, None, "the quoted ability keeps its duration");
