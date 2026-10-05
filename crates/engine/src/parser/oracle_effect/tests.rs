@@ -2,6 +2,7 @@ use super::gap_diagnosis::diagnose_clause_gap;
 use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
+use super::sequence::split_clause_sequence;
 use super::*;
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
@@ -25958,22 +25959,173 @@ fn inline_delayed_trigger_an_exiled_card_enters_uses_tracked_set() {
     );
     match e {
         Effect::CreateDelayedTrigger {
-            condition:
-                DelayedTriggerCondition::WhenEntersBattlefield {
-                    filter: TargetFilter::ParentTarget,
-                },
+            condition: DelayedTriggerCondition::WhenEntersBattlefield { filter },
             effect,
             uses_tracked_set: true,
-        } => match &*effect.effect {
-            Effect::PutCounter { target, .. } => assert_eq!(
-                target,
-                &TargetFilter::TriggeringSource,
-                "delayed trigger body 'it' must bind to the entering card"
-            ),
-            other => panic!("expected PutCounter delayed effect, got {other:?}"),
-        },
+        } => {
+            assert_eq!(
+                filter,
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ParentTarget,
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    ],
+                },
+                "the tracked entry must also require the creating controller's control"
+            );
+            match &*effect.effect {
+                Effect::PutCounter { target, .. } => assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringSource,
+                    "delayed trigger body 'it' must bind to the entering card"
+                ),
+                other => panic!("expected PutCounter delayed effect, got {other:?}"),
+            }
+        }
         other => panic!("Expected tracked-set enters delayed trigger, got {other:?}"),
     }
+}
+
+#[test]
+fn inline_delayed_tracked_subject_controller_qualifies_each_zone_event() {
+    for (text, event) in [
+        ("When that creature you control dies, draw a card", "dies"),
+        (
+            "When that creature you control leaves the battlefield, draw a card",
+            "leaves",
+        ),
+        (
+            "When an exiled card enters under your control this way, draw a card",
+            "enters",
+        ),
+    ] {
+        let effect = parse_effect(text);
+        let Effect::CreateDelayedTrigger {
+            condition,
+            uses_tracked_set: true,
+            ..
+        } = effect
+        else {
+            panic!("expected tracked delayed {event} condition, got {effect:?}");
+        };
+        let filter = match condition {
+            DelayedTriggerCondition::WhenDies { filter } if event == "dies" => filter,
+            DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } if event == "leaves" => {
+                filter
+            }
+            DelayedTriggerCondition::WhenEntersBattlefield { filter } if event == "enters" => {
+                filter
+            }
+            other => panic!("expected delayed {event} event, got {other:?}"),
+        };
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTarget,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                ],
+            },
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn inline_delayed_self_subject_control_keeps_bare_self_ref() {
+    let effect = parse_effect("When it dies under your control this turn, draw two cards");
+    assert!(
+        matches!(
+            effect,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::SelfRef,
+                },
+                uses_tracked_set: false,
+                ..
+            }
+        ),
+        "expected a bare SelfRef death condition, got {effect:?}"
+    );
+}
+
+#[test]
+fn inline_delayed_owner_and_another_subjects_do_not_acquire_you_controller() {
+    let owner =
+        parse_effect("When an exiled card enters under its owner's control this way, draw a card");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WhenEntersBattlefield { filter },
+        uses_tracked_set: true,
+        ..
+    } = owner
+    else {
+        panic!("expected tracked owner-control entry condition, got {owner:?}");
+    };
+    assert_eq!(
+        filter,
+        TargetFilter::ParentTarget,
+        "owner control must not be misread as the delayed creator's control"
+    );
+
+    let another = parse_effect("When another creature you control dies, draw a card");
+    assert!(matches!(another, Effect::Unimplemented { .. }));
+}
+
+#[test]
+fn lagrella_full_oracle_keeps_exile_tracking_entry_controller_and_counter_payload() {
+    const ORACLE: &str = "When Lagrella enters, exile any number of other target creatures controlled by different players until Lagrella leaves the battlefield. When an exiled card enters under your control this way, put two +1/+1 counters on it.";
+    let parsed = parse_named_face(ORACLE, "Lagrella, the Magpie", &["Creature"]);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let etb = parsed.triggers[0].execute.as_deref().expect("Lagrella ETB");
+    let nodes = chain_nodes(etb);
+    assert!(nodes
+        .iter()
+        .all(|node| !matches!(node.effect.as_ref(), Effect::Unimplemented { .. })));
+    assert!(nodes.iter().any(|node| matches!(
+        node.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        } if node.duration == Some(Duration::UntilHostLeavesPlay)
+    )));
+
+    let delayed = nodes
+        .iter()
+        .find_map(|node| match node.effect.as_ref() {
+            Effect::CreateDelayedTrigger {
+                condition,
+                effect,
+                uses_tracked_set,
+            } => Some((condition, effect, uses_tracked_set)),
+            _ => None,
+        })
+        .expect("inline delayed entry trigger");
+    assert!(*delayed.2);
+    assert_eq!(
+        delayed.0,
+        &DelayedTriggerCondition::WhenEntersBattlefield {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ParentTarget,
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                ],
+            },
+        }
+    );
+    assert!(matches!(
+        delayed.1.effect.as_ref(),
+        Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
 }
 
 // -----------------------------------------------------------------------
@@ -26099,6 +26251,84 @@ fn become_creature_type_of_choice_in_addition_to_other_types() {
     );
 }
 
+// CR 205.1a + CR 613.1d: without the "in addition to its other types" marker
+// (Mistform Stalker) the chosen creature type REPLACES the object's creature
+// types — RemoveAllSubtypes then AddChosenSubtype, in the order written.
+#[test]
+fn become_creature_type_of_choice_sets_creature_type() {
+    let clause = parse_effect_clause(
+        "~ becomes the creature type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType { .. },
+                ..
+            }
+        ),
+        "Expected Choose {{ CreatureType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        ]
+    );
+}
+
+// CR 305.7: without the marker (Jinx) the chosen basic land type SETS the
+// land's type — SetChosenBasicLandType, not the additive AddChosenSubtype.
+#[test]
+fn become_basic_land_type_of_choice_sets_land_type() {
+    let clause = parse_effect_clause(
+        "target land becomes the basic land type of your choice until end of turn",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ),
+        "Expected Choose {{ BasicLandType }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*apply.effect
+    else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(
+        static_abilities[0].modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+}
+
 // No-regression guard: the pre-existing "and <keyword grant>" trailing form
 // (Mondo Gecko) must still parse — the new marker-strip must not interfere
 // when no "in addition to its other types" marker is present.
@@ -26148,6 +26378,214 @@ fn become_color_of_choice_still_chains_trailing_keyword_grant() {
         "trailing keyword grant must still chain: {:?}",
         static_abilities[0].modifications
     );
+}
+
+/// The apply half's two windows below the `Choose` link of a become-choice
+/// chain: the apply definition's own `duration` and the `GenericEffect`'s
+/// embedded one.
+fn become_choice_apply_windows(def: &AbilityDefinition) -> (Option<Duration>, Option<Duration>) {
+    let choose = std::iter::successors(Some(def), |link| link.sub_ability.as_deref())
+        .find(|link| matches!(*link.effect, Effect::Choose { .. }))
+        .unwrap_or_else(|| panic!("reach guard: the chain must carry a Choose link: {def:?}"));
+    let apply = choose
+        .sub_ability
+        .as_deref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    (apply.duration.clone(), duration.clone())
+}
+
+/// CR 611.2a: the printed trailing window of a "becomes the <axis> of your
+/// choice" clause reaches the APPLY half — its own definition and the
+/// `GenericEffect`'s embedded duration — not only the `Choose` head. The
+/// resolver reads the apply half's definition before its embedded window, so a
+/// window stamped on the head alone installed a permanent effect (Mistform
+/// Stalker, backlog §25). Runtime pin:
+/// `tests/integration/become_choice_trailing_duration.rs`.
+#[test]
+fn become_choice_trailing_window_reaches_apply_half() {
+    let rows = [
+        (
+            "Target creature becomes the creature type of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target land becomes the basic land type of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color or colors of your choice until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "target creature becomes the creature type of your choice in addition to its other \
+             types until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color of your choice and gains hexproof from that color \
+             until end of turn",
+            Duration::UntilEndOfTurn,
+        ),
+        (
+            "Target creature becomes the color of your choice until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+    ];
+    for (text, expected) in rows {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Choose { .. }),
+            "reach guard: {text:?} must head on Choose, got {:?}",
+            clause.effect
+        );
+        let apply = clause
+            .sub_ability
+            .as_ref()
+            .expect("choice must chain an apply sub-ability");
+        let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+            panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+        };
+        assert_eq!(
+            apply.duration,
+            Some(expected.clone()),
+            "{text:?}: apply-half definition window"
+        );
+        assert_eq!(
+            *duration,
+            Some(expected.clone()),
+            "{text:?}: apply-half embedded window"
+        );
+        assert_eq!(
+            clause.duration,
+            Some(expected),
+            "{text:?}: Choose head window"
+        );
+    }
+
+    // CR 611.2a: the LEADING position reaches the apply half too (both the
+    // context channel and `with_clause_chain_duration` carry it) — a regression
+    // pin, not a revert discriminator.
+    let def = parse_effect_chain(
+        "Until end of turn, target creature becomes the color of your choice and gains hexproof \
+         from that color.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !ability_chain_has_unimplemented(&def),
+        "reach guard: the leading form must lower without a gap: {def:?}"
+    );
+    let (apply_window, embedded_window) = become_choice_apply_windows(&def);
+    assert_eq!(apply_window, Some(Duration::UntilEndOfTurn));
+    assert_eq!(embedded_window, Some(Duration::UntilEndOfTurn));
+}
+
+/// CR 611.2a: "If no duration is stated, it lasts until the end of the game" —
+/// a become-choice clause that prints no window leaves the apply definition
+/// unset and keeps the embedded `Permanent` default (Alchor's Tomb).
+#[test]
+fn become_choice_without_window_stays_permanent() {
+    let clause = parse_effect_clause(
+        "Target permanent you control becomes the color of your choice",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        ),
+        "reach guard: expected Choose {{ Color }}, got {:?}",
+        clause.effect
+    );
+    let apply = clause
+        .sub_ability
+        .as_ref()
+        .expect("choice must chain an apply sub-ability");
+    let Effect::GenericEffect { duration, .. } = &*apply.effect else {
+        panic!("expected GenericEffect apply half, got {:?}", apply.effect);
+    };
+    assert_eq!(apply.duration, None);
+    assert_eq!(*duration, Some(Duration::Permanent));
+    assert_eq!(clause.duration, Some(Duration::Permanent));
+}
+
+/// CR 611.2a: a window printed by an EARLIER sentence of the same chain is that
+/// sentence's own; it must not reach a later become-choice clause that prints
+/// none (`ParseContext::stated_clause_duration` is save/restore per clause).
+#[test]
+fn become_choice_does_not_inherit_a_previous_clauses_window() {
+    let def = parse_effect_chain(
+        "Target creature gets +1/+1 until end of turn. Target permanent you control becomes \
+         the color of your choice.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !ability_chain_has_unimplemented(&def),
+        "reach guard: the chain must lower without a gap: {def:?}"
+    );
+    assert!(
+        matches!(*def.effect, Effect::Pump { .. }),
+        "reach guard: expected the Pump head, got {:?}",
+        def.effect
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfTurn),
+        "reach guard: the first sentence carries its own window"
+    );
+    let (apply_window, embedded_window) = become_choice_apply_windows(&def);
+    assert_eq!(apply_window, None);
+    assert_eq!(embedded_window, Some(Duration::Permanent));
+}
+
+/// CR 611.2a + CR 700.2: Trickery Charm's creature-type mode keeps its printed
+/// "until end of turn" on the apply half when parsed as one mode of a modal
+/// spell.
+#[test]
+fn trickery_charm_creature_type_mode_window_reaches_apply_half() {
+    let parsed = parse_oracle_text(
+        "Choose one —\n\
+         • Target creature gains flying until end of turn.\n\
+         • Target creature becomes the creature type of your choice until end of turn.\n\
+         • Look at the top four cards of your library, then put them back in any order.",
+        "Trickery Charm",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        3,
+        "reach guard: the three modes lower to three top-level abilities"
+    );
+    assert!(
+        !parsed.abilities.iter().any(ability_chain_has_unimplemented),
+        "reach guard: no mode may lower to a gap: {:?}",
+        parsed.abilities
+    );
+    let mode = parsed
+        .abilities
+        .iter()
+        .find(|ability| {
+            matches!(
+                *ability.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::CreatureType { .. },
+                    ..
+                }
+            )
+        })
+        .expect("reach guard: the creature-type mode must head on Choose { CreatureType }");
+    let (apply_window, embedded_window) = become_choice_apply_windows(mode);
+    assert_eq!(apply_window, Some(Duration::UntilEndOfTurn));
+    assert_eq!(embedded_window, Some(Duration::UntilEndOfTurn));
 }
 
 #[test]
@@ -42029,6 +42467,302 @@ fn reveal_until_x_permanent_cards_choose_any_number_aurora() {
     );
     assert_eq!(*kept_destination, Zone::Battlefield);
     assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// Parse a full card's Oracle text and assert (reach guard) that no part of it
+/// lowered to `Effect::Unimplemented` — including payloads nested in delayed
+/// or triggered abilities.
+fn parse_card_fully(name: &str, card_type: &str, oracle: &str) -> CardFace {
+    let parsed = parse_oracle_text(oracle, name, &[], &[card_type.to_string()], &[]);
+    let face = CardFace {
+        name: name.to_string(),
+        oracle_text: Some(oracle.to_string()),
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        ..Default::default()
+    };
+    assert!(
+        !card_face_has_unimplemented_parts(&face),
+        "{name} must parse with no Unimplemented part: {face:#?}"
+    );
+    face
+}
+
+/// Assert the reveal-until "that many creature cards" → matched set onto the
+/// battlefield → shuffle chain shared by Mass Polymorph and Synthetic Destiny.
+fn assert_that_many_creatures_onto_battlefield_then_shuffle(reveal: &AbilityDefinition) {
+    let Effect::RevealUntil {
+        player,
+        filter,
+        count,
+        matched_disposition,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*reveal.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", reveal.effect);
+    };
+    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount
+        },
+        "\"that many\" is the preceding instruction's count"
+    );
+    assert_eq!(*matched_disposition, RevealUntilDisposition::KeepEach);
+    assert_eq!(
+        *kept_destination,
+        Zone::Battlefield,
+        "\"put all creature cards revealed this way onto the battlefield\" is the matched set"
+    );
+    assert_eq!(*rest_destination, Zone::Library);
+    let shuffle = reveal
+        .sub_ability
+        .as_deref()
+        .expect("RevealUntil must chain into the shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        },
+        "the matched set is absorbed (no ChangeZoneAll sibling); the shuffle follows"
+    );
+    assert!(shuffle.sub_ability.is_none());
+}
+
+/// CR 608.2c + CR 608.2h + CR 701.20a: Mass Polymorph (verbatim) — the count
+/// slot "that many" delegates to the demonstrative-amount authority, and "put
+/// all creature cards revealed this way onto the battlefield" names the matched
+/// set, so the RevealUntil keeps its hits on the battlefield.
+#[test]
+fn reveal_until_that_many_mass_polymorph() {
+    let face = parse_card_fully(
+        "Mass Polymorph",
+        "Sorcery",
+        "Exile all creatures you control, then reveal cards from the top of your library until you reveal that many creature cards. Put all creature cards revealed this way onto the battlefield, then shuffle the rest of the revealed cards into your library.",
+    );
+    let root = face.abilities.first().expect("spell ability");
+    let Effect::ChangeZoneAll {
+        destination,
+        target,
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected ChangeZoneAll root, got {:?}", root.effect);
+    };
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(
+        *target,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    );
+    let reveal = root
+        .sub_ability
+        .as_deref()
+        .expect("exile must chain into RevealUntil");
+    assert_that_many_creatures_onto_battlefield_then_shuffle(reveal);
+}
+
+/// CR 603.7a + CR 608.2c: Synthetic Destiny (verbatim) — the same reveal chain
+/// inside the end-step delayed trigger created by the spell.
+#[test]
+fn reveal_until_that_many_synthetic_destiny() {
+    let face = parse_card_fully(
+        "Synthetic Destiny",
+        "Instant",
+        "Exile all creatures you control. At the beginning of the next end step, reveal cards from the top of your library until you reveal that many creature cards, put all creature cards revealed this way onto the battlefield, then shuffle the rest of the revealed cards into your library.",
+    );
+    let root = face.abilities.first().expect("spell ability");
+    assert!(
+        matches!(
+            &*root.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "expected the exile root, got {:?}",
+        root.effect
+    );
+    let delayed = root
+        .sub_ability
+        .as_deref()
+        .expect("exile must chain into the delayed trigger");
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*delayed.effect
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+    );
+    assert_that_many_creatures_onto_battlefield_then_shuffle(effect);
+}
+
+/// CR 701.20a + CR 608.2c: Old Stickfingers (full verbatim text) — "Put all
+/// creature cards revealed this way into your graveyard" is the matched set's
+/// disposition: the kept zone is the graveyard (not the default hand plus a
+/// stray ChangeZoneAll), and the rest go to the bottom in a random order.
+#[test]
+fn reveal_until_x_matched_set_into_graveyard_old_stickfingers() {
+    let face = parse_card_fully(
+        "Old Stickfingers",
+        "Creature",
+        "When you cast this spell, reveal cards from the top of your library until you reveal X creature cards. Put all creature cards revealed this way into your graveyard, then put the rest on the bottom of your library in a random order.\nOld Stickfingers's power and toughness are each equal to the number of creature cards in your graveyard.",
+    );
+    let trigger = face.triggers.first().expect("cast trigger");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    let Effect::RevealUntil {
+        count,
+        filter,
+        kept_destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*execute.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string()
+            }
+        }
+    );
+    assert_eq!(*filter, TargetFilter::Typed(TypedFilter::creature()));
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Library);
+    assert_eq!(*rest_order, DigRestOrder::Random);
+    assert!(
+        execute.sub_ability.is_none(),
+        "the matched set is absorbed — no ChangeZoneAll sibling: {:?}",
+        execute.sub_ability
+    );
+}
+
+/// CR 701.20a: "put all <filter> cards revealed this way" names the matched set
+/// only when <filter> is the until-filter. A different filter is a different
+/// set and must not be absorbed as the kept disposition. Paired positive: the
+/// same sentence with the until-filter is absorbed.
+#[test]
+fn reveal_until_matched_set_requires_the_until_filter() {
+    let mismatched = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a creature card. Put all land cards revealed this way onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination, ..
+    } = &*mismatched.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", mismatched.effect);
+    };
+    assert_ne!(
+        *kept_destination,
+        Zone::Battlefield,
+        "a land-card phrase must not become the creature hit's disposition"
+    );
+
+    let matched = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a creature card. Put all creature cards revealed this way onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination, ..
+    } = &*matched.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", matched.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Battlefield);
+}
+
+/// CR 701.20a: an until-filter phrase the parser cannot type ("a white card")
+/// degrades to `TargetFilter::Any`, and so does an unparsed "all green cards"
+/// phrase — equal filters that do not establish that both name the same set.
+/// The green-card sentence must not be absorbed as the matched set's
+/// disposition. Paired positive: the same call shape with the typed until-filter
+/// is absorbed.
+#[test]
+fn reveal_until_matched_set_refuses_an_untyped_filter_phrase() {
+    let untyped = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a white card. Put all green cards revealed this way onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        filter,
+        kept_destination,
+        ..
+    } = &*untyped.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", untyped.effect);
+    };
+    assert_eq!(
+        *filter,
+        TargetFilter::Any,
+        "fixture precondition: the until-filter phrase degrades to Any"
+    );
+    assert_ne!(
+        *kept_destination,
+        Zone::Battlefield,
+        "an untyped green-card phrase must not become the white hit's disposition"
+    );
+
+    let matched = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a creature card. Put all creature cards revealed this way onto the battlefield.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        kept_destination, ..
+    } = &*matched.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", matched.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Battlefield);
+}
+
+/// CR 608.2c: "Put all other cards revealed this way into your graveyard" names
+/// the REST of the revealed pile (Dance, Pathetic Marionette; Sharp Eraser), never
+/// the matched set — even when the until-filter is one the bare word "other"
+/// would build ("a white card" builds the same filter as "other"). The rest pile
+/// goes to the graveyard and the hit keeps its own destination.
+#[test]
+fn reveal_until_all_other_cards_revealed_this_way_is_the_rest_pile() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a white card. Put all other cards revealed this way into your graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        filter,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *filter,
+        build_reveal_until_filter("other"),
+        "fixture precondition: the until-filter is the one \"other\" would build"
+    );
+    assert_eq!(
+        *rest_destination,
+        Zone::Graveyard,
+        "reach guard: the rest-pile clause reached the PutRest arm"
+    );
+    assert_ne!(
+        *kept_destination,
+        Zone::Graveyard,
+        "\"all other cards\" must not become the matched set's disposition"
+    );
 }
 
 /// CR 701.20a + CR 608.2c: Explosive Revelation has a transparent damage
@@ -80203,4 +80937,37 @@ fn one_of_those_two_cards_is_bounded_only_as_a_free_immediate_cast() {
         ),
         "got {unnumbered:?}"
     );
+}
+
+/// CR 602.2b + CR 601.2f: a self cost-modification sentence ("This ability costs
+/// {N} less/more to activate …") after a sentence-ending closed quote belongs to
+/// the outer activated ability, so the chunker closes the quoted grant before it
+/// (Llanowar Greenwidow). Reach guard: an anaphoric continuation after the same
+/// quote still stays attached, proving the split is selective rather than a
+/// blanket "every closed quote ends the clause".
+#[test]
+fn self_cost_modification_after_closed_quote_is_its_own_chunk() {
+    let chunk_texts = |text: &str| -> Vec<String> {
+        split_clause_sequence(text)
+            .into_iter()
+            .map(|chunk| chunk.text)
+            .collect()
+    };
+    let grant = "it gains \"If ~ would leave the battlefield, exile it instead of putting it \
+        anywhere else.\"";
+
+    for rider in [
+        "This ability costs {1} less to activate for each basic land type among lands you control",
+        "This ability costs {2} more to activate",
+    ] {
+        let chunks = chunk_texts(&format!("{grant} {rider}."));
+        assert_eq!(
+            chunks,
+            vec![grant.to_string(), rider.to_string()],
+            "{rider}"
+        );
+    }
+
+    let anaphoric = chunk_texts(&format!("{grant} The token is goaded."));
+    assert_eq!(anaphoric.len(), 1, "{anaphoric:?}");
 }
