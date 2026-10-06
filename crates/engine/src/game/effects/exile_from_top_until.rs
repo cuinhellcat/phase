@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetFilter, TargetRef,
-    UntilCondition,
+    Effect, EffectError, EffectKind, ObjectProperty, QuantityExpr, ResolvedAbility, TargetFilter,
+    TargetRef, UntilCondition,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -161,7 +161,14 @@ pub fn resolve(
                         hits,
                     },
                 ));
-                super::append_to_pending_continuation(state, Some(Box::new(ability.clone())));
+                super::append_to_pending_continuation(
+                    state,
+                    Some(Box::new(ability_with_resolved_until(
+                        ability,
+                        match_count,
+                        threshold_value,
+                    ))),
+                );
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
@@ -342,6 +349,35 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// CR 608.2h: the loop's match count and cumulative threshold are determined
+/// once, when the effect is applied. A loop paused for a replacement choice
+/// resumes from this clone, which carries both as the fixed values this
+/// resolution resolved, so a population that changed during the pause ("until
+/// you exile X cards, where X is the number of cards in your graveyard") cannot
+/// move the stopping point.
+fn ability_with_resolved_until(
+    ability: &ResolvedAbility,
+    match_count: usize,
+    threshold_value: Option<i32>,
+) -> ResolvedAbility {
+    let mut parked = ability.clone();
+    if let Effect::ExileFromTopUntil { until, .. } = &mut parked.effect {
+        match until {
+            UntilCondition::NextMatches { count, .. } => {
+                *count = QuantityExpr::Fixed {
+                    value: i32::try_from(match_count).unwrap_or(i32::MAX),
+                };
+            }
+            UntilCondition::CumulativeThreshold { threshold, .. } => {
+                if let Some(value) = threshold_value {
+                    *threshold = QuantityExpr::Fixed { value };
+                }
+            }
+        }
+    }
+    parked
 }
 
 /// CR 608.2c: Decide whether the sub-ability's effect filter forwards the
@@ -994,6 +1030,172 @@ mod tests {
             Zone::Library,
             "the loop stops on its second match"
         );
+    }
+
+    /// A source whose two identical replacements send `card` to its owner's
+    /// graveyard instead of exile, so that card's move pauses for a
+    /// replacement choice (CR 616.1).
+    fn redirect_to_graveyard_source(state: &mut GameState, card: ObjectId) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.replacement_definitions.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: Zone::Graveyard,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .destination_zone(Zone::Exile)
+                .valid_card(TargetFilter::SpecificObject { id: card }),
+        );
+        obj.replacement_definitions
+            .push(obj.replacement_definitions[0].clone());
+        source
+    }
+
+    /// Four mana-value-1 cards on top of P0's library, the second of which a
+    /// replacement sends to the graveyard; two cards already in that
+    /// graveyard. Returns the source and the cards, top first.
+    fn graveyard_count_board(state: &mut GameState) -> (ObjectId, [ObjectId; 4]) {
+        let cards = ["First", "Redirected", "Second", "Third"]
+            .map(|name| add_library_card_with_mv(state, PlayerId(0), name, 1));
+        state.players[0].library = cards.iter().copied().collect();
+        for name in ["Old One", "Old Two"] {
+            let id = add_library_card(state, PlayerId(0), name, true);
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        }
+        let source = redirect_to_graveyard_source(state, cards[1]);
+        (source, cards)
+    }
+
+    fn graveyard_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: crate::parser::oracle_quantity::parse_quantity_ref(
+                "the number of cards in your graveyard",
+            )
+            .expect("graveyard count quantity"),
+        }
+    }
+
+    /// Resolve `until` over [`graveyard_count_board`], declining nothing: the
+    /// replacement choice pauses the second move and sends that card to the
+    /// graveyard, which grows the counted population from two to three.
+    fn resolve_through_the_pause(
+        until: UntilCondition,
+        chosen_x: Option<u32>,
+    ) -> (GameState, [ObjectId; 4]) {
+        let mut state = GameState::new_two_player(42);
+        let (source, cards) = graveyard_count_board(&mut state);
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.chosen_x = chosen_x;
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "reach guard: the second move paused for the replacement choice"
+        );
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseReplacement { index: 0 },
+            )
+            .unwrap();
+        }
+        assert_eq!(state.objects[&cards[1]].zone, Zone::Graveyard);
+        assert_eq!(state.players[0].graveyard.len(), 3, "the population grew");
+        (state, cards)
+    }
+
+    /// CR 608.2h: the match count is determined once, when the effect is
+    /// applied — two, the graveyard's size then. A count read again on resume
+    /// would be three, and the loop would run on to the third card.
+    #[test]
+    fn a_paused_counted_loop_keeps_the_count_it_resolved_before_the_pause() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::NextMatches {
+                count: graveyard_count(),
+                filter: nonland_filter(),
+            },
+            None,
+        );
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&third].zone,
+            Zone::Library,
+            "the loop stops on the two matches its count resolved to"
+        );
+    }
+
+    /// CR 608.2h: the same for a cumulative threshold — total mana value two,
+    /// reached by the first and second card.
+    #[test]
+    fn a_paused_threshold_loop_keeps_the_threshold_it_resolved_before_the_pause() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::CumulativeThreshold {
+                property: ObjectProperty::ManaValue,
+                comparator: Comparator::GE,
+                threshold: graveyard_count(),
+            },
+            None,
+        );
+        assert_eq!(state.objects[&first].zone, Zone::Exile);
+        assert_eq!(state.objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            state.objects[&third].zone,
+            Zone::Library,
+            "the loop stops on the total its threshold resolved to"
+        );
+    }
+
+    /// Control: an announced X count crosses the same pause unchanged (CR
+    /// 107.3a). X = 3 reaches the third card although the counted graveyard
+    /// plays no part. Green with or without the snapshot, since the parked
+    /// clone keeps the same `chosen_x`.
+    #[test]
+    fn a_paused_announced_x_loop_keeps_its_x() {
+        let (state, [first, _, second, third]) = resolve_through_the_pause(
+            UntilCondition::NextMatches {
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                filter: nonland_filter(),
+            },
+            Some(3),
+        );
+        for card in [first, second, third] {
+            assert_eq!(state.objects[&card].zone, Zone::Exile);
+        }
     }
 
     #[test]

@@ -80704,6 +80704,19 @@ fn batch_readings_need_a_prior_exile_until_loop() {
          the bottom of your library in a random order.",
         AbilityKind::Spell,
     );
+    // Reach guard: the first clause parsed as the fixed-count top exile.
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
     let bottom = def.sub_ability.as_deref().expect("bottom step");
     assert!(
         matches!(
