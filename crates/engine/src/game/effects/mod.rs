@@ -10604,6 +10604,25 @@ fn filter_refs_same_name_as_parent_target(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: how many times a member-driven loop runs over the chain's
+/// tracked set — once for a bare `TrackedSetSize` count, `factor` times for
+/// `Multiply { factor, TrackedSetSize }` ("copy each of those spells twice").
+/// `None` for any other count.
+fn tracked_set_member_repetitions(qty: &QuantityExpr) -> Option<usize> {
+    match qty {
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        } => Some(1),
+        QuantityExpr::Multiply { factor, inner } => match inner.as_ref() {
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            } => usize::try_from(*factor).ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
     if matches!(
         effect,
@@ -14822,18 +14841,18 @@ fn is_bound_attach_remainder_for(pending: &PendingContinuation, ability: &Resolv
 /// - `CreateDelayedTrigger` — Helmut Zemo, driven in
 ///   `cast_this_way_gate_8721::zemo_pays_out_the_counter_once_the_granted_spell_is_actually_cast`.
 ///
-/// Absent on purpose: `PutAtLibraryPosition` and `CopySpell` (Finale of
-/// Promise). Both are single-link tails, so the rule above would admit them:
+/// Absent on purpose: `PutAtLibraryPosition` and `CopySpell`. Both are
+/// single-link tails, so the rule above would admit them, but no card reaches
+/// this list with either:
 ///
-/// - `PutAtLibraryPosition`: no card reaches this branch with it. Invasion of
-///   Alara, the one that did, casts from a window over the cards its exile loop
-///   found and bottoms the rest itself (issue #8750), so there is no card to
-///   drive this family with.
-/// - Finale of Promise's tail targets `TrackedSetFiltered { id: 0 }`, the
-///   parser's sentinel, whose documented fallback in
-///   `targeting::resolve_tracked_set_id` is the latest non-empty published set —
-///   so it can copy an unrelated set from earlier in the same resolution, and
-///   it could not be driven to its tail in a `GameScenario` (issue #8750).
+/// - `PutAtLibraryPosition`: Invasion of Alara, the one that did, casts from a
+///   window over the cards its exile loop found and bottoms the rest itself
+///   (issue #8750).
+/// - `CopySpell`: Finale of Promise, the one that did, is a multi-slot cast whose
+///   head resolves every slot through one cast window
+///   (`cast_from_zone::cast_slot_group`); like the per-opponent fanout, that
+///   window owns its tail, so the tail is parked behind the window without this
+///   list being consulted. It is driven in `finale_of_promise_8750`.
 ///
 /// Adding a variant to this list without a test that fails when the branch is
 /// reverted is the mistake it was introduced to prevent.
@@ -16397,43 +16416,92 @@ fn resolve_chain_body(
             // including the empty case (0 members ⇒ 0 iterations). The
             // `TrackedSetSize` path keeps the existing quantity-driven count.
             let mut member_driven = false;
-            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
-                match &ability.repeat_for {
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::TrackedSetSize,
-                    }) if effect_refs_parent_target(&effective.effect) => state
-                        .chain_tracked_set_id
-                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                        .unwrap_or_default(),
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter },
-                    }) if effect_iterates_over_parent_target(&effective.effect) => {
-                        member_driven = true;
-                        // Same resolver as `QuantityRef::ObjectCount`'s count, on
-                        // the same `effective` ability, so members and count match
-                        // (including `OtherThanTriggerObject` handling).
-                        let ctx = filter::FilterContext::from_ability(effective);
-                        if let Some(candidate_ids) =
-                            effective.context.parent_target_iteration_members.clone()
-                        {
-                            crate::game::quantity::object_count_matching_candidate_ids(
-                                state,
-                                candidate_ids,
-                                filter,
-                                &ctx,
-                                effective.source_id,
-                            )
-                        } else {
-                            crate::game::quantity::object_count_matching_ids(
-                                state,
-                                filter,
-                                &ctx,
-                                effective.source_id,
-                            )
+            // Set by the "copy each of those spells" arm, which folds the copy
+            // replacements into each member's own count.
+            let mut per_member_copy_counts = false;
+            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = match &ability
+                .repeat_for
+            {
+                // CR 707.10 + CR 608.2c: a copy of "each of those spells"
+                // (Finale of Promise) iterates the members of the chain's
+                // set that are spells on the stack — a member the player
+                // chose not to cast never became one of "those spells" —
+                // once per printed repetition. Count and bindings come from
+                // this one snapshot.
+                //
+                // CR 614.1a + CR 707.10: copying each spell is its own copy
+                // event, so a "copy it that many times plus an additional
+                // time" replacement (Twinning Staff) adds to each member's
+                // count, not once to the whole loop.
+                Some(qty)
+                    if matches!(
+                        effective.effect,
+                        Effect::CopySpell {
+                            target: TargetFilter::ParentTarget,
+                            ..
                         }
+                    ) && tracked_set_member_repetitions(qty).is_some() =>
+                {
+                    member_driven = true;
+                    per_member_copy_counts = true;
+                    let repetitions = tracked_set_member_repetitions(qty).unwrap_or(0);
+                    let spells: Vec<crate::types::identifiers::ObjectId> = state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id))
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|id| state.stack.iter().any(|entry| entry.id == *id))
+                        .collect();
+                    spells
+                        .iter()
+                        .flat_map(|&spell| {
+                            let copies = if ability.copy_count_status.is_pending() {
+                                let mut bound = effective.clone();
+                                rebind_member_driven_parent_target(&mut bound, spell);
+                                copy_spell::copy_count_with_replacements(state, &bound, repetitions)
+                            } else {
+                                repetitions
+                            };
+                            std::iter::repeat_n(spell, copies)
+                        })
+                        .collect()
+                }
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                }) if effect_refs_parent_target(&effective.effect) => state
+                    .chain_tracked_set_id
+                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                    .unwrap_or_default(),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                }) if effect_iterates_over_parent_target(&effective.effect) => {
+                    member_driven = true;
+                    // Same resolver as `QuantityRef::ObjectCount`'s count, on
+                    // the same `effective` ability, so members and count match
+                    // (including `OtherThanTriggerObject` handling).
+                    let ctx = filter::FilterContext::from_ability(effective);
+                    if let Some(candidate_ids) =
+                        effective.context.parent_target_iteration_members.clone()
+                    {
+                        crate::game::quantity::object_count_matching_candidate_ids(
+                            state,
+                            candidate_ids,
+                            filter,
+                            &ctx,
+                            effective.source_id,
+                        )
+                    } else {
+                        crate::game::quantity::object_count_matching_ids(
+                            state,
+                            filter,
+                            &ctx,
+                            effective.source_id,
+                        )
                     }
-                    _ => Vec::new(),
-                };
+                }
+                _ => Vec::new(),
+            };
 
             // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
             // loop iterates once per distinct counter kind on filter-matched
@@ -16480,7 +16548,9 @@ fn resolve_chain_body(
 
             // CR 707.10 + CR 614.1a: "copy an additional time" replacement
             // effects (Twinning Staff) increase how many copies a copy-a-spell
-            // effect produces. Applied once here at the copy-count site because
+            // effect produces (except for the "copy each of those spells" arm
+            // above, which folds them into each member's own count). Applied
+            // once here at the copy-count site because
             // copies are created through this `repeat_for` loop, not the
             // `ProposedEvent` replacement pipeline. The adjusted count flows into
             // `total_iterations` and the resume stash below, so each additional
@@ -16495,6 +16565,7 @@ fn resolve_chain_body(
             // so the bonus applies to the copy event once, not per individual copy).
             let iterations = if matches!(ability.effect, Effect::CopySpell { .. })
                 && ability.copy_count_status.is_pending()
+                && !per_member_copy_counts
             {
                 copy_spell::copy_count_with_replacements(state, ability, base_iterations)
             } else {
@@ -17271,10 +17342,28 @@ fn resolve_chain_body(
         // Counter only ever carries the exile sub-ability rider (its
         // library/hand redirect rides `countered_spell_zone`) and consumes it
         // during `counter::resolve` (stack -> exile directly).
+        //
+        // CR 601.2c + CR 608.2g: a multi-slot free cast (Finale of Promise)
+        // already resolved its later slot links inside the head's cast window
+        // (`cast_from_zone::cast_slot_group`), so they are skipped like the
+        // rider: the tail hangs off the rider after the last slot, or off the
+        // last slot itself when no rider is printed.
+        let cast_slots = cast_from_zone::cast_slot_group(ability);
+        let is_rider = |link: &ResolvedAbility| {
+            cast_from_zone::graveyard_destination_rider(&link.effect).is_some()
+        };
+        let tail_parent: Option<&ResolvedAbility> = match cast_slots.last() {
+            Some(last) => Some(
+                last.sub_ability
+                    .as_deref()
+                    .filter(|link| is_rider(link))
+                    .unwrap_or(last),
+            ),
+            None => Some(&**sub).filter(|link| is_rider(link)),
+        };
         let direct_cast_from_zone_graveyard_rider =
-            matches!(&ability.effect, Effect::CastFromZone { .. })
-                && cast_from_zone::graveyard_destination_rider(&sub.effect).is_some();
-        if direct_cast_from_zone_graveyard_rider {
+            matches!(&ability.effect, Effect::CastFromZone { .. }) && tail_parent.is_some();
+        if let Some(tail_parent) = tail_parent.filter(|_| direct_cast_from_zone_graveyard_rider) {
             // The RIDER is metadata, but the chain does not end with it.
             // Whatever the parser hung after the rider as a `SequentialSibling`
             // is a further printed instruction of this same spell — "Exile ~."
@@ -17307,9 +17396,10 @@ fn resolve_chain_body(
             // the form that card data can actually settle: not one of the six tail
             // carriers declares a hand- or library-restricted pick. Three restrict
             // their target to the graveyard (Sins of the Past, Helmut Zemo, Ogre
-            // Battlecaster); the other three carry no zone restriction at all —
-            // `Typed` instant/sorcery on The Great Work, a bare `Any` on Invasion
-            // of Alara and Finale of Promise. An earlier version of this comment
+            // Battlecaster); of the other three, The Great Work carries a `Typed`
+            // instant/sorcery and Invasion of Alara a bare `Any`, neither with a
+            // zone restriction, and Finale of Promise's slots are restricted to
+            // the graveyard. An earlier version of this comment
             // split the six four-and-two and put The Great Work on the wrong side;
             // the split is dropped rather than repaired, because the zone
             // restriction is the only half that bears on this guard. (Whether a
@@ -17335,14 +17425,14 @@ fn resolve_chain_body(
             let is_per_opponent_fanout =
                 crate::game::ability_utils::is_per_opponent_target_fanout(ability);
             let tail_is_in_scope = |tail: &ResolvedAbility| {
-                if is_per_opponent_fanout {
+                if is_per_opponent_fanout || !cast_slots.is_empty() {
                     return true;
                 }
                 !hand_pick_continuation_is_active
                     && tail.sub_ability.is_none()
                     && tail_family_has_runtime_evidence(&tail.effect)
             };
-            let mut direct_sequential_tail = sub
+            let mut direct_sequential_tail = tail_parent
                 .sub_ability
                 .as_deref()
                 .filter(|tail| tail.sub_link == SubAbilityLink::SequentialSibling)
@@ -17390,8 +17480,9 @@ fn resolve_chain_body(
             // them: it carries `duration: UntilEndOfTurn`, so both
             // during-resolution gates are false, and its target is already in
             // a graveyard, which `grant_lingering_permissions` routes in place,
-            // so `NeedsChoice` cannot fire. (Finale of Promise satisfies the
-            // free gate's conditions but is stopped by the family allowlist.)
+            // so `NeedsChoice` cannot fire. (Finale of Promise never reaches it:
+            // its head resolves every slot through one free-cast window,
+            // `cast_from_zone::cast_slot_group`.)
             //
             // Site without a demonstrated consequence for those, so this stays
             // the pre-#8721 condition rather than being widened on speculation;
@@ -21872,9 +21963,9 @@ mod tests {
         let bottom_of_library = effect(
             r#"{"type":"PutAtLibraryPosition","target":{"type":"ExiledBySource"},"count":{"type":"Ref","qty":{"type":"CardsExiledBySource"}},"position":{"type":"Bottom"}}"#,
         );
-        // Finale of Promise — likewise, and its `TrackedSetFiltered` target reads
-        // resolution state that no zone-move measurement can stand in for.
-        let finale_of_promise = effect(
+        // A copy tail: Finale of Promise, the one card that carried it, now
+        // resolves it behind its own cast window without consulting this list.
+        let copy_spell = effect(
             r#"{"type":"CopySpell","target":{"type":"TrackedSetFiltered","id":0,"filter":{"type":"Typed","type_filters":["Card"],"controller":null,"properties":[]}},"retarget":{"type":"MayChooseNewTargets"}}"#,
         );
 
@@ -21891,9 +21982,9 @@ mod tests {
             "PutAtLibraryPosition has no test that fails when the branch is reverted"
         );
         assert!(
-            !tail_family_has_runtime_evidence(&finale_of_promise),
-            "CopySpell has no test that fails when the branch is reverted — admitting it \
-             would change Finale of Promise on an unmeasured path (issue #8750)"
+            !tail_family_has_runtime_evidence(&copy_spell),
+            "CopySpell has no single-slot head driven end to end — admitting it would \
+             change a head on an unmeasured path (issue #8750)"
         );
     }
 
