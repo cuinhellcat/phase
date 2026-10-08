@@ -64,7 +64,10 @@ pub struct TournamentRequestId(pub u64);
 ///       its zone while it is paused on its own free-cast window (CR 608.2n +
 ///       CR 608.2g: Finale of Promise, Collected Conjuring). An older peer
 ///       would leave the spell on the stack in no zone after the window, so
-///       full-game and P2P refuse the mismatch (wire 92).
+///       full-game and P2P refuse the mismatch (wire 92). The same bump adds
+///       `WaitingFor::SpellCopyOrderChoice` and
+///       `PendingRepeatIteration.copy_order_fixed` (CR 405.3: the controller
+///       orders a batch of spell copies).
 /// 109 — CR 201.5a granter binding: `ObjectScope::GrantingObject` and
 ///      `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
 ///      `PlayerFilter::GrantingObjectCaster`, plus the `granting_object` stamp on
