@@ -2784,6 +2784,13 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
+    /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
+    /// on the stack as one batch. `Some(n)`: the controller has already fixed
+    /// the order of `tracked_members[..n]`, and picks the spell for iteration
+    /// `n` before it runs (`WaitingFor::SpellCopyOrderChoice`). `None` for
+    /// every other loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_order_fixed: Option<usize>,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -14666,6 +14673,18 @@ pub enum WaitingFor {
         choices: Vec<ObjectId>,
         count: u32,
     },
+    /// CR 405.3 + CR 707.10: an effect that puts copies of several spells on
+    /// the stack at once ("copy each of those spells twice" — Finale of
+    /// Promise) lets their controller choose the copies' relative order. Asked
+    /// one copy at a time: `choices` are the distinct spells that still have a
+    /// copy to make, and the chosen spell's next copy goes on the stack next,
+    /// above the copies already made. Raised only while two or more spells
+    /// remain; the answer is a single-object `SelectCards`.
+    SpellCopyOrderChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
+    },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
     ChooseOneOfBranch {
@@ -16836,6 +16855,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
+            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -17000,6 +17020,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
             | WaitingFor::EmpowerJaceChoice { player, .. }
+            | WaitingFor::SpellCopyOrderChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -17353,6 +17374,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }

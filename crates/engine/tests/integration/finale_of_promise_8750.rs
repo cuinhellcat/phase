@@ -8,8 +8,8 @@
 //!   twice. You may choose new targets for the copies.
 //!
 //! Rulings this file pins: the chosen cards are cast as Finale resolves, in
-//! either order; with X 10 or more each of them is then copied twice; the
-//! copies are not cast.
+//! either order; with X 10 or more each of them is then copied twice, and the
+//! copies go on the stack in any order; the copies are not cast.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
@@ -43,6 +43,16 @@ fn board(x: u32, instant_text: &str) -> Board {
 
 /// `board`, with `extra` adding to the scenario before it is built.
 fn board_with(x: u32, instant_text: &str, extra: impl FnOnce(&mut GameScenario)) -> Board {
+    board_with_sorcery(x, instant_text, "You gain 3 life.", extra)
+}
+
+/// `board_with`, with `sorcery_text` as the sorcery's rules text.
+fn board_with_sorcery(
+    x: u32,
+    instant_text: &str,
+    sorcery_text: &str,
+    extra: impl FnOnce(&mut GameScenario),
+) -> Board {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let finale = scenario
@@ -60,7 +70,7 @@ fn board_with(x: u32, instant_text: &str, extra: impl FnOnce(&mut GameScenario))
     let sorcery = scenario
         .add_spell_to_graveyard(P0, "Graveyard Sorcery", false)
         .with_mana_cost(ManaCost::generic(3))
-        .from_oracle_text("You gain 3 life.")
+        .from_oracle_text(sorcery_text)
         .id();
     let source = ObjectId(0);
     let mut pool = vec![
@@ -110,7 +120,7 @@ fn cast_finale(b: &mut Board, x: u32, picks: [Option<ObjectId>; 2]) -> Vec<Vec<T
                 panic!("Finale must not ask \"you may\" before its cast window")
             }
             _ => {
-                // CR 608.2n: Finale is still resolving while its window is open.
+                // CR 608.2g: Finale is still resolving while its window is open.
                 assert_eq!(zone(&b.runner, b.finale), Zone::Stack);
                 return legal;
             }
@@ -136,6 +146,25 @@ fn cast_from_window(runner: &mut GameRunner, selection: Option<ObjectId>) {
     runner
         .act(GameAction::FreeCastWindowChoice { selection })
         .expect("the window choice must succeed");
+}
+
+/// CR 405.3: answer the copy-order prompts with `picks`, one per prompt, and
+/// return how many prompts there were. Each prompt must offer its pick.
+fn order_copies(runner: &mut GameRunner, picks: &[ObjectId]) -> usize {
+    let mut asked = 0;
+    while let WaitingFor::SpellCopyOrderChoice {
+        player, choices, ..
+    } = &runner.state().waiting_for
+    {
+        assert_eq!(*player, P0);
+        let pick = picks[asked];
+        assert!(choices.contains(&pick), "{pick:?} not offered: {choices:?}");
+        runner
+            .act(GameAction::SelectCards { cards: vec![pick] })
+            .expect("a copy-order pick must succeed");
+        asked += 1;
+    }
+    asked
 }
 
 fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
@@ -221,6 +250,11 @@ fn x_ten_copies_each_spell_cast_this_way_twice() {
     cast_finale(&mut b, 10, picks);
     cast_from_window(&mut b.runner, Some(b.instant));
     cast_from_window(&mut b.runner, Some(b.sorcery));
+    assert_eq!(
+        order_copies(&mut b.runner, &[b.instant, b.instant]),
+        2,
+        "no prompt once only the sorcery has copies left"
+    );
     assert_eq!(
         b.runner.state().stack.len(),
         6,
@@ -369,6 +403,10 @@ fn twinning_staff_adds_a_copy_to_each_spell() {
     cast_from_window(&mut b.runner, Some(b.instant));
     cast_from_window(&mut b.runner, Some(b.sorcery));
     assert_eq!(
+        order_copies(&mut b.runner, &[b.instant, b.instant, b.instant]),
+        3
+    );
+    assert_eq!(
         b.runner.state().stack.len(),
         2 + 2 * 3,
         "two originals and three copies of each: {:?}",
@@ -377,4 +415,58 @@ fn twinning_staff_adds_a_copy_to_each_spell() {
     b.runner.advance_until_stack_empty();
 
     assert_eq!(b.runner.state().players[0].life, 20 + 4 * (2 + 3));
+}
+
+/// CR 405.3 + ruling: the copies of both spells go on the stack in any order,
+/// interleaved too, and the chosen order holds across each copy's retarget
+/// choice (CR 707.10c). "Double your life total" and "gains 2 life" don't
+/// commute, so the final life total shows the order.
+#[test]
+fn the_controller_interleaves_the_copies_across_retarget_choices() {
+    let mut b = board_with_sorcery(
+        10,
+        "Target player gains 2 life.",
+        "Double your life total.",
+        |_| {},
+    );
+    let picks = [Some(b.instant), Some(b.sorcery)];
+    cast_finale(&mut b, 10, picks);
+    cast_from_window(&mut b.runner, Some(b.instant));
+    let mut order_picks = vec![b.sorcery, b.instant, b.sorcery].into_iter();
+    let mut prompts = Vec::new();
+    for _ in 0..32 {
+        let action = match &b.runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P0)),
+            },
+            WaitingFor::CastOffer { .. } => {
+                cast_from_window(&mut b.runner, Some(b.sorcery));
+                continue;
+            }
+            WaitingFor::SpellCopyOrderChoice { choices, .. } => {
+                let pick = order_picks.next().expect("one pick per prompt");
+                assert!(choices.contains(&pick));
+                prompts.push("order");
+                GameAction::SelectCards { cards: vec![pick] }
+            }
+            WaitingFor::CopyRetarget { .. } => {
+                prompts.push("retarget");
+                GameAction::KeepAllCopyTargets
+            }
+            _ => break,
+        };
+        b.runner.act(action).expect("each choice must succeed");
+    }
+    assert_eq!(
+        prompts,
+        ["order", "order", "retarget", "order", "retarget"],
+        "the sorcery's copies have no targets; the last instant copy needs no order prompt"
+    );
+    assert_eq!(b.runner.state().stack.len(), 6);
+    b.runner.advance_until_stack_empty();
+
+    // Bottom to top: instant, sorcery, then the copies sorcery, instant,
+    // sorcery, instant. Top first: 20 +2 x2 +2 x2 x2 +2 = 186. The fixed
+    // grouping (instant, instant, sorcery, sorcery) would give 170.
+    assert_eq!(b.runner.state().players[0].life, 186);
 }

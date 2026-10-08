@@ -2470,12 +2470,36 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             iterated_counter_kinds,
             next_iteration,
             total_iterations,
+            copy_order_fixed,
         } = pending;
         let initial_waiting_for = state.waiting_for.clone();
         let initial_continuation_present = state.active_ability_continuation().is_some();
         let mut iteration = next_iteration;
         let mut paused = false;
         while iteration < total_iterations {
+            if open_spell_copy_order_choice(
+                state,
+                &ability,
+                &tracked_members,
+                iteration,
+                copy_order_fixed,
+            ) {
+                let boundary = state.resolution_stack.capture_child_boundary();
+                park_repeat_for_after_current_iteration(
+                    state,
+                    crate::types::game_state::PendingRepeatIteration {
+                        ability: ability.clone(),
+                        tracked_members: tracked_members.clone(),
+                        iterated_counter_kinds: iterated_counter_kinds.clone(),
+                        next_iteration: iteration,
+                        total_iterations,
+                        copy_order_fixed,
+                    },
+                    boundary,
+                );
+                paused = true;
+                break;
+            }
             let mut iter_ability;
             // CR 109.5 / CR 122.1 + CR 608.2c: clone when EITHER a tracked
             // member rebind (parent-target loop) OR a counter-kind rebind
@@ -2534,6 +2558,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: next,
                             total_iterations,
+                            copy_order_fixed,
                         },
                         stack_depth_before_iteration,
                     );
@@ -2549,6 +2574,64 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             break;
         }
     }
+}
+
+/// CR 405.3 + CR 707.10: before `iteration` of a batch copy loop runs, let the
+/// copies' controller pick which spell supplies the next copy, while two or
+/// more spells still have copies to make. Returns whether it asked.
+fn open_spell_copy_order_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    tracked_members: &[crate::types::identifiers::ObjectId],
+    iteration: usize,
+    copy_order_fixed: Option<usize>,
+) -> bool {
+    match copy_order_fixed {
+        Some(fixed) if iteration >= fixed => {}
+        _ => return false,
+    }
+    let mut choices: Vec<crate::types::identifiers::ObjectId> = Vec::new();
+    for &spell in tracked_members.get(iteration..).unwrap_or_default() {
+        if !choices.contains(&spell) {
+            choices.push(spell);
+        }
+    }
+    if choices.len() < 2 {
+        return false;
+    }
+    let mut bound = ability.clone();
+    rebind_member_driven_parent_target(&mut bound, choices[0]);
+    state.waiting_for = WaitingFor::SpellCopyOrderChoice {
+        player: copy_spell::resolve_copy_controller(state, &bound),
+        source_id: ability.source_id,
+        choices,
+    };
+    true
+}
+
+/// CR 405.3 + CR 707.10: the answer to `WaitingFor::SpellCopyOrderChoice` —
+/// move `spell`'s next copy to the front of the active batch loop's remaining
+/// copies and fix the order through it. Returns false when `spell` has no copy
+/// left to make there.
+pub(crate) fn order_next_spell_copy(
+    state: &mut GameState,
+    spell: crate::types::identifiers::ObjectId,
+) -> bool {
+    let Some(frame) = state.active_repeat_for_mut() else {
+        return false;
+    };
+    let next = frame.next_iteration;
+    let Some(position) = frame
+        .tracked_members
+        .get(next..)
+        .and_then(|rest| rest.iter().position(|member| *member == spell))
+        .map(|offset| next + offset)
+    else {
+        return false;
+    };
+    frame.tracked_members[next..=position].rotate_right(1);
+    frame.copy_order_fixed = Some(next + 1);
+    true
 }
 
 /// Park the remaining repeat-for iterations either as the active owner of a
@@ -4437,6 +4520,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::BeholdChoice { .. }
             // CR 608.2c: riders run after the choice.
             | WaitingFor::EmpowerJaceChoice { .. }
+            | WaitingFor::SpellCopyOrderChoice { .. }
     )
 }
 
@@ -11687,6 +11771,7 @@ fn drive_repeat_for_outermost(
                         iterated_counter_kinds: Vec::new(),
                         next_iteration,
                         total_iterations: base_iterations,
+                        copy_order_fixed: None,
                     },
                     stack_depth_before_iteration,
                 );
@@ -16605,7 +16690,36 @@ fn resolve_chain_body(
                     // through resolve_ability_chain so its individual bound
                     // target reaches the payment gate before the effect resolves.
                     || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
+            // CR 405.3 + CR 707.10: a batch of copies of several spells is
+            // ordered by its controller, one copy at a time.
+            let copy_order_fixed = per_member_copy_counts.then_some(0);
             while iteration < iterations {
+                if open_spell_copy_order_choice(
+                    state,
+                    effective,
+                    &iter_tracked_members,
+                    iteration,
+                    copy_order_fixed,
+                ) {
+                    let mut resume_ability = effective.clone();
+                    resume_ability.repeat_for = None;
+                    resume_ability.copy_count_status =
+                        crate::types::ability::CopyCountStatus::Finalized;
+                    let boundary = state.resolution_stack.capture_child_boundary();
+                    park_repeat_for_after_current_iteration(
+                        state,
+                        crate::types::game_state::PendingRepeatIteration {
+                            ability: Box::new(resume_ability),
+                            tracked_members: iter_tracked_members.clone(),
+                            iterated_counter_kinds: iterated_counter_kinds.clone(),
+                            next_iteration: iteration,
+                            total_iterations: iterations,
+                            copy_order_fixed,
+                        },
+                        boundary,
+                    );
+                    break;
+                }
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
                 // member-driven card has exactly ONE parent-ref object slot. Second
@@ -16779,6 +16893,7 @@ fn resolve_chain_body(
                                 iterated_counter_kinds: iterated_counter_kinds.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
+                                copy_order_fixed,
                             },
                             stack_depth_before_iteration,
                         );
@@ -33720,6 +33835,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
+            copy_order_fixed: None,
         });
 
         let mut events = Vec::new();

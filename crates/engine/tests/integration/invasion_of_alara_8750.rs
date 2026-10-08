@@ -757,7 +757,7 @@ fn collected_conjuring() -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, Obje
         "reach guard: the cast window, got {:?}",
         runner.state().waiting_for
     );
-    // CR 608.2n: the spell is still resolving while its window is open.
+    // CR 608.2g: the spell is still resolving while its window is open.
     assert_eq!(zone(&runner, spell), Zone::Stack);
     (runner, unreached, lands, sorcery, spell)
 }

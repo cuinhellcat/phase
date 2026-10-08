@@ -81135,6 +81135,7 @@ fn a_free_cast_slot_list_keeps_one_link_per_slot_under_one_window() {
         std::iter::successors(Some(&def), |link| link.sub_ability.as_deref())
             .take(2)
             .collect();
+    assert_eq!(slots.len(), 2, "one link per slot");
     for (slot, card_type) in slots.iter().zip([TypeFilter::Instant, TypeFilter::Sorcery]) {
         let Effect::CastFromZone {
             target,

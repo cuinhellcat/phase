@@ -1042,25 +1042,28 @@ fn finish_spell_stack_exit(
 /// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
 /// runs, as in `resolve_top`.
 pub(super) fn deliver_deferred_spell(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let Some(pending) = state.deferred_spell_delivery.take() else {
+    let Some(pending) = state.deferred_spell_delivery.clone() else {
         return;
     };
+    // Only the deferring spell's own carrier consumes the record; any other
+    // carrier leaves it in place.
     let Some((controller, casting_variant)) = state
         .resolving_stack_entry
         .as_ref()
         .filter(|entry| entry.id == pending.object_id)
-        .map(|entry| {
-            let casting_variant = match &entry.kind {
-                StackEntryKind::Spell {
-                    casting_variant, ..
-                } => *casting_variant,
-                _ => CastingVariant::Normal,
-            };
-            (entry.controller, casting_variant)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } => Some((entry.controller, *casting_variant)),
+            StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
         })
     else {
         return;
     };
+    state.deferred_spell_delivery = None;
     // As in `resolve_top`: the default move is skipped for a spell its own
     // instructions already moved, and a parked move returns before the
     // stack-exit bookkeeping.
