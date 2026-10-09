@@ -92,13 +92,15 @@ fn attack_and_resolve(b: &mut Board, attacker_controller: PlayerId) {
 
 /// `attacker_controller` attacks `defender` with `attacker`; play through
 /// combat to the postcombat main phase, answering trigger order with
-/// `order_triggers`.
+/// `order_triggers`. At each priority, `respond` may act instead of passing
+/// (it returns whether it did).
 fn attack_with(
     runner: &mut GameRunner,
     attacker: ObjectId,
     attacker_controller: PlayerId,
     defender: PlayerId,
     mut order_triggers: impl FnMut(&GameRunner) -> Vec<usize>,
+    mut respond: impl FnMut(&mut GameRunner) -> bool,
 ) {
     runner.state_mut().active_player = attacker_controller;
     runner.state_mut().priority_player = attacker_controller;
@@ -119,6 +121,9 @@ fn attack_with(
     for _ in 0..64 {
         if runner.state().phase == Phase::PostCombatMain && runner.state().stack.is_empty() {
             return;
+        }
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) && respond(runner) {
+            continue;
         }
         let action = match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => GameAction::PassPriority,
@@ -141,9 +146,14 @@ fn attack(
     attacker_controller: PlayerId,
     defender: PlayerId,
 ) {
-    attack_with(runner, attacker, attacker_controller, defender, |_| {
-        panic!("no trigger order expected")
-    });
+    attack_with(
+        runner,
+        attacker,
+        attacker_controller,
+        defender,
+        |_| panic!("no trigger order expected"),
+        |_| false,
+    );
 }
 
 fn grants(
@@ -298,20 +308,27 @@ fn a_stolen_creature_that_died_names_its_last_controller() {
     reindex_object_triggers(runner.state_mut(), curse);
     assert_eq!(runner.state().objects[&raider].controller, P2);
 
-    attack_with(&mut runner, raider, P2, P1, |runner| {
-        // Index 0 is placed first (bottom): the Curse resolves after the
-        // sacrifice.
-        let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
-            unreachable!()
-        };
-        let curse_at = triggers
-            .iter()
-            .position(|t| t.source_id == curse)
-            .expect("the Curse triggered");
-        let mut order: Vec<usize> = (0..triggers.len()).filter(|&i| i != curse_at).collect();
-        order.insert(0, curse_at);
-        order
-    });
+    attack_with(
+        &mut runner,
+        raider,
+        P2,
+        P1,
+        |runner| {
+            // Index 0 is placed first (bottom): the Curse resolves after the
+            // sacrifice.
+            let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+                unreachable!()
+            };
+            let curse_at = triggers
+                .iter()
+                .position(|t| t.source_id == curse)
+                .expect("the Curse triggered");
+            let mut order: Vec<usize> = (0..triggers.len()).filter(|&i| i != curse_at).collect();
+            order.insert(0, curse_at);
+            order
+        },
+        |_| false,
+    );
 
     assert_eq!(runner.state().objects[&raider].zone, Zone::Graveyard);
     assert_eq!(
@@ -328,4 +345,166 @@ fn a_stolen_creature_that_died_names_its_last_controller() {
             Some(ManaSpendPermission::AnyColor)
         )]
     );
+}
+
+/// Three players: P0's Curse on P1; P1's creature, stolen by P2's control Aura,
+/// attacks P1. Returns the runner, the creature, the Aura, P1's top card and a
+/// zero-cost instant in P2's hand with `response_text`.
+fn stolen_attacker_board(
+    response_text: &str,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let curse = {
+        let mut builder = scenario.add_creature(P0, "Curse of Hospitality", 0, 0);
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.from_oracle_text(CURSE);
+        builder.id()
+    };
+    let raider = scenario
+        .add_creature_from_oracle(P1, "Stolen Raider", 2, 2, "Haste")
+        .id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P2,
+            "Control Magic",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(P2, "Response", true, response_text)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let top_card = scenario.add_card_to_library_top(P1, "Hill Giant");
+    let mut runner = scenario.build();
+    attach_to_player(runner.state_mut(), curse, P1);
+    engine::game::effects::attach::attach_to(runner.state_mut(), control, raider);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), curse);
+    assert_eq!(runner.state().objects[&raider].controller, P2);
+    (runner, raider, control, top_card, response)
+}
+
+/// With the Curse's trigger on the stack, P2 casts `response` targeting
+/// `target`, once.
+fn respond_once(
+    response: ObjectId,
+    target: ObjectId,
+    curse_pending: impl Fn(&GameRunner) -> bool,
+) -> impl FnMut(&mut GameRunner) -> bool {
+    let mut done = false;
+    move |runner: &mut GameRunner| {
+        if done || !curse_pending(runner) {
+            return false;
+        }
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P2) {
+            return false;
+        }
+        done = true;
+        let card_id = runner.state().objects[&response].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: response,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("P2 casts the response");
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(target)),
+                })
+                .expect("target the creature");
+        }
+        true
+    }
+}
+
+fn curse_trigger_pending(curse_source: ObjectId) -> impl Fn(&GameRunner) -> bool {
+    move |runner: &GameRunner| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|e| e.source_id == curse_source)
+    }
+}
+
+/// CR 400.7 + CR 608.2h: blinked with the trigger pending, the creature returns
+/// under its owner as a NEW object; "that creature's controller" is still the
+/// controller of the object that dealt the damage — P2, not P1.
+#[test]
+fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
+    let (mut runner, raider, _control, top_card, response) = stolen_attacker_board(
+        "Exile target creature you control, then return it to the battlefield under its owner's control.",
+    );
+    let curse = curse_source(&runner);
+    attack_with(
+        &mut runner,
+        raider,
+        P2,
+        P1,
+        |_| panic!("no trigger order expected"),
+        respond_once(response, raider, curse_trigger_pending(curse)),
+    );
+    assert_eq!(runner.state().objects[&raider].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&raider].controller,
+        P1,
+        "the returned creature is a new object under its owner"
+    );
+    assert_eq!(runner.state().objects[&top_card].zone, Zone::Exile);
+    assert_eq!(
+        grants(&runner, top_card),
+        vec![(
+            P2,
+            Duration::UntilEndOfTurn,
+            Some(ManaSpendPermission::AnyColor)
+        )]
+    );
+}
+
+/// CR 608.2h: while the SAME object stays on the battlefield, its current
+/// controller answers. P2 destroys its own control Aura with the trigger
+/// pending; the creature, never having left, is controlled by P1 again.
+#[test]
+fn a_damage_dealer_that_stayed_names_its_current_controller() {
+    let (mut runner, raider, control, top_card, response) =
+        stolen_attacker_board("Destroy target enchantment.");
+    let curse = curse_source(&runner);
+    attack_with(
+        &mut runner,
+        raider,
+        P2,
+        P1,
+        |_| panic!("no trigger order expected"),
+        respond_once(response, control, curse_trigger_pending(curse)),
+    );
+    assert_eq!(runner.state().objects[&control].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&raider].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&raider].controller, P1);
+    assert_eq!(
+        grants(&runner, top_card),
+        vec![(
+            P1,
+            Duration::UntilEndOfTurn,
+            Some(ManaSpendPermission::AnyColor)
+        )]
+    );
+}
+
+fn curse_source(runner: &GameRunner) -> ObjectId {
+    runner
+        .state()
+        .objects
+        .values()
+        .find(|o| o.name == "Curse of Hospitality")
+        .map(|o| o.id)
+        .expect("the Curse")
 }

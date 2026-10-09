@@ -213,7 +213,9 @@ export class NativeEngineVersionMismatchError extends Error {
  * 121 — PermissionGrantee gains TriggeringSourceController (a cast grant bound to the
  *      controller of the object that caused the trigger, CR 603.2 + CR 109.4),
  *      serialized in the ability definitions of GameState. A v120 peer cannot
- *      deserialize the tag. Wire 103 moves with it; no lobby frame names it.
+ *      deserialize the tag. The same version adds the damage-source
+ *      incarnations on DamageDealt and CombatDamageDealtToPlayer events.
+ *      Wire 103 moves with it; no lobby frame names it.
  * 120 — CR 601.2a spell announcement: GameObject gains spell_announcement,
  *      GameState gains next_spell_announcement, and GameEvent BecomesTarget
  *      gains the targeter that announced the target. A v119 peer cannot

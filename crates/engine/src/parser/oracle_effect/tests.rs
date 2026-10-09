@@ -81234,11 +81234,17 @@ fn a_triggering_creatures_controller_play_grant_keeps_its_grantee_and_rider() {
 #[test]
 fn a_triggering_creatures_controller_play_grant_is_not_read_outside_a_trigger() {
     let def = parse_effect_chain(CURSE_OF_HOSPITALITY_GRANT, AbilityKind::Spell);
+    // The clause is reached and reported as the unbound-subject gap: the player
+    // subject has no slot here, so it is not lowered as the controller's grant.
     assert!(
-        play_grant(&def)
-            .is_none_or(|(_, grantee)| *grantee != PermissionGrantee::TriggeringSourceController),
+        std::iter::successors(Some(&def), |link| link.sub_ability.as_deref()).any(|link| matches!(
+            link.effect.as_ref(),
+            Effect::Unimplemented { name, description: Some(text) }
+                if name == "unbound_subject" && text.contains("that creature's controller may play that card")
+        )),
         "{def:?}"
     );
+    assert!(play_grant(&def).is_none(), "{def:?}");
 }
 
 /// The grantee form is read whole: a longer predicate after "that card" is not
@@ -81257,4 +81263,30 @@ fn a_triggering_creatures_controller_play_grant_is_read_whole() {
     assert!(!parses_triggering_creature_controller_grant(
         "that creature's controller may draw a card"
     ));
+    // A period ends the clause only at the end of the input.
+    assert!(!parses_triggering_creature_controller_grant(
+        "that creature's controller may play that card. draw a card"
+    ));
+}
+
+/// CR 609.4b: the mana-rider conjunct is cut off only when it runs to the end
+/// of its sentence.
+#[test]
+fn a_mana_rider_conjunct_must_end_its_sentence() {
+    let rider = "and they may spend mana as though it were mana of any color to cast that spell";
+    assert!(starts_mana_spend_rider_conjunct(rider));
+    // The comma path reads the rest of the paragraph: the rider ends at its
+    // sentence's period, and a later sentence may follow.
+    assert!(starts_mana_spend_rider_conjunct(&format!(
+        "{rider}. draw a card"
+    )));
+    assert!(!starts_mana_spend_rider_conjunct(&format!(
+        "{rider} and draw a card"
+    )));
+    // The comma-less split reads the same rider after the bare "and ".
+    let bare = "they may spend mana as though it were mana of any color to cast that spell";
+    assert!(super::sequence::starts_bare_and_clause(bare));
+    assert!(!super::sequence::starts_bare_and_clause(&format!(
+        "{bare}. draw a card"
+    )));
 }

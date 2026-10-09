@@ -107,9 +107,10 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *
  * Bumps to date:
  *  103 — game_setup and state_update carry GameState, whose cast grants can now
- *       name the TriggeringSourceController grantee. A v102 peer cannot
- *       deserialize the tag, so first contact rejects the skew. Bumped with
- *       full-game protocol 121.
+ *       name the TriggeringSourceController grantee (and whose damage events
+ *       carry the source incarnation). A v102 peer cannot deserialize the
+ *       tag, so first contact rejects the skew. Bumped with full-game
+ *       protocol 121.
  *  102 — GameState carries the CR 601.2a spell announcement and the
  *       BecomesTarget targeter. Bumped with full-game protocol 120. (101 is
  *       reserved for the Legends of Jidoor PR.)

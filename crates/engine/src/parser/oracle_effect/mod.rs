@@ -8649,6 +8649,17 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         }
     }
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
+    // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
+    // "that creature's controller may", "each opponent …") names who acts, and
+    // this clause has no slot to carry it — the chunk loop is where those
+    // scopes are applied. Lowering the body alone would make the ability's
+    // controller act instead, so fail closed (see `UNBOUND_SUBJECT_GAP`).
+    if peel_ctx.may_implicit_player_scope.is_some()
+        || peel_ctx.opponent_may_scope.is_some()
+        || peel_ctx.player_scope.is_some()
+    {
+        return parsed_clause(Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, text));
+    }
     // CR 601.2 + CR 608.2c: the shell peels with a context-free condition parse, so a
     // cast-time snapshot gate would be accepted here even inside a trigger, where the
     // snapshot is never stamped and the gate could never open. Fail closed rather
@@ -15618,7 +15629,8 @@ fn parses_triggering_creature_controller_grant(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("that creature's controller may "),
         alt((tag("play "), tag("cast "))),
         alt((tag("that card"), tag("it"))),
-        alt((eof, tag("."))),
+        opt(tag(".")),
+        eof,
     )
         .parse(lower.trim_end())
         .is_ok()

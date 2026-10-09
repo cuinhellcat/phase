@@ -27154,6 +27154,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         }];
 
         let snapshot = damaged_object_context_from_events(&state, &events)
@@ -27188,6 +27189,7 @@ mod tests {
                 amount: 1,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             },
             GameEvent::DamageDealt {
                 source_id: ObjectId(99),
@@ -27195,6 +27197,7 @@ mod tests {
                 amount: 1,
                 is_combat: false,
                 excess: 0,
+                source_incarnation: None,
             },
         ];
         assert!(damaged_object_context_from_events(&state, &events).is_none());
@@ -27211,6 +27214,7 @@ mod tests {
             amount: 3,
             is_combat: false,
             excess: 0,
+            source_incarnation: None,
         }];
         assert!(damaged_object_context_from_events(&state, &events).is_none());
     }

@@ -114,7 +114,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // (+48, v119, is reserved for the Legends of Jidoor PR.)
 // +49: the v120 CR 601.2a spell announcement (GameObject.spell_announcement,
 // GameState.next_spell_announcement) and the BecomesTarget targeter.
-// +50: v121 adds the `TriggeringSourceController` permission grantee.
+// +50: v121 adds the `TriggeringSourceController` permission grantee and the
+//      damage-source incarnations on damage events.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 50;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this

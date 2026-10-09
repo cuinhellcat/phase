@@ -3271,7 +3271,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // mana rider joined without a comma is the same conjunct the comma path cuts
     // (`starts_mana_spend_rider_conjunct`); split it off so the chunk loop folds
     // it onto the grant.
-    if (super::parse_mana_spend_rider, alt((eof, tag("."))))
+    if (super::parse_mana_spend_rider, opt(tag(".")), eof)
         .parse(s)
         .is_ok()
     {

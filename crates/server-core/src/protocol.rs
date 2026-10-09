@@ -3349,6 +3349,8 @@ mod tests {
     /// `PermissionGrantee` gains `TriggeringSourceController` (a cast grant bound to
     /// the triggering object's controller, CR 603.2 + CR 109.4); a v120 peer cannot
     /// deserialize the tag, so it must be refused before it receives v121 state.
+    /// v121 also adds the damage-source incarnations on `GameEvent::DamageDealt`
+    /// and `GameEvent::CombatDamageDealtToPlayer` (CR 400.7).
     /// The CR 601.2a spell announcement adds `GameObject::spell_announcement`,
     /// `GameState::next_spell_announcement` and `GameEvent::BecomesTarget.targeter`;
     /// a v119 peer cannot decode v120 state, so it must be refused before state

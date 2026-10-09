@@ -60,7 +60,7 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
-/// 121 — `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger — Curse of Hospitality), serialized in the ability definitions of `GameState`. A v120 peer cannot deserialize the tag. Full-game peers and P2P move in lockstep (wire 103); no lobby carrier names it.
+/// 121 — `PermissionGrantee` gains `TriggeringSourceController` (CR 603.2 + CR 109.4: a cast grant bound to the controller of the object that caused the trigger — Curse of Hospitality), serialized in the ability definitions of `GameState`. A v120 peer cannot deserialize the tag. The same version adds `GameEvent::DamageDealt.source_incarnation` and `GameEvent::CombatDamageDealtToPlayer.source_incarnations` (CR 400.7), carried in pending triggers. Full-game peers and P2P move in lockstep (wire 103); no lobby carrier names it.
 /// 120 — CR 601.2a spell announcement: `GameObject::spell_announcement`,
 ///      `GameState::next_spell_announcement` and the `targeter` on
 ///      `GameEvent::BecomesTarget`. A v119 peer cannot deserialize the new
