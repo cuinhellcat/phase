@@ -390,6 +390,7 @@ fn stolen_attacker_board(
 /// With the Curse's trigger on the stack, P2 casts `response` targeting
 /// `target`, once.
 fn respond_once(
+    responder: PlayerId,
     response: ObjectId,
     target: ObjectId,
     curse_pending: impl Fn(&GameRunner) -> bool,
@@ -399,7 +400,8 @@ fn respond_once(
         if done || !curse_pending(runner) {
             return false;
         }
-        if !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P2) {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == responder)
+        {
             return false;
         }
         done = true;
@@ -451,7 +453,7 @@ fn a_blinked_damage_dealer_names_the_controller_of_the_object_that_dealt_it() {
         P2,
         P1,
         |_| panic!("no trigger order expected"),
-        respond_once(response, raider, curse_trigger_pending(curse)),
+        respond_once(P2, response, raider, curse_trigger_pending(curse)),
     );
     assert_eq!(runner.state().objects[&raider].zone, Zone::Battlefield);
     assert_eq!(
@@ -484,7 +486,7 @@ fn a_damage_dealer_that_stayed_names_its_current_controller() {
         P2,
         P1,
         |_| panic!("no trigger order expected"),
-        respond_once(response, control, curse_trigger_pending(curse)),
+        respond_once(P2, response, control, curse_trigger_pending(curse)),
     );
     assert_eq!(runner.state().objects[&control].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&raider].zone, Zone::Battlefield);
@@ -507,4 +509,64 @@ fn curse_source(runner: &GameRunner) -> ObjectId {
         .find(|o| o.name == "Curse of Hospitality")
         .map(|o| o.id)
         .expect("the Curse")
+}
+
+/// CR 400.7 + CR 608.2h: Contested Game Ball shares the grantee's arm
+/// (`TargetFilter::TriggeringSourceController`), but reads the per-event combat
+/// `DamageDealt` rather than the aggregate. P1 attacks P0 with P0's creature,
+/// stolen by P1's control Aura, and blinks it with the trigger pending; it
+/// returns under P0 as a new object, and "the attacking player" is still P1.
+#[test]
+fn contested_game_ball_names_the_attacking_player_after_a_blink() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ball = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Contested Game Ball",
+            "Whenever you're dealt combat damage, the attacking player gains control of this artifact and untaps it.",
+        )
+        .id();
+    let raider = scenario
+        .add_creature_from_oracle(P0, "Stolen Raider", 2, 2, "Haste")
+        .id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Control Magic",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let blink = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Blink",
+            true,
+            "Exile target creature you control, then return it to the battlefield under its owner's control.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), control, raider);
+    evaluate_layers(runner.state_mut());
+    reindex_object_triggers(runner.state_mut(), ball);
+    assert_eq!(runner.state().objects[&raider].controller, P1);
+
+    let ball_pending =
+        move |runner: &GameRunner| runner.state().stack.iter().any(|e| e.source_id == ball);
+    attack_with(
+        &mut runner,
+        raider,
+        P1,
+        P0,
+        |_| panic!("no trigger order expected"),
+        respond_once(P1, blink, raider, ball_pending),
+    );
+    assert_eq!(
+        runner.state().objects[&raider].controller,
+        P0,
+        "the blinked creature returned under its owner"
+    );
+    assert_eq!(runner.state().objects[&ball].controller, P1);
 }
