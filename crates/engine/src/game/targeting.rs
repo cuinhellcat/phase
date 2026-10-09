@@ -1727,19 +1727,15 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         // `TriggeringSpellController`). Contested Game Ball's DamageReceived
         // trigger needs the controller of the creature that dealt combat
         // damage, not the damaged player.
+        //
+        // CR 608.2h: a source that has left the battlefield answers with its
+        // last known controller — its row's live `controller` was reset to the
+        // owner on exit, so the live-first read would name the owner.
         TargetFilter::TriggeringSourceController => {
             let event = event?;
             let source_obj_id = extract_source_from_event(event)?;
-            let controller = state
-                .objects
-                .get(&source_obj_id)
-                .map(|obj| obj.controller)
-                .or_else(|| {
-                    state
-                        .lki_cache
-                        .get(&source_obj_id)
-                        .map(|lki| lki.controller)
-                })?;
+            let controller =
+                crate::game::ability_utils::last_known_permanent_controller(state, source_obj_id)?;
             Some(TargetRef::Player(controller))
         }
         // CR 120.1 + CR 109.4 + CR 608.2c: "that creature's controller" on an

@@ -840,6 +840,11 @@ fn damage_recipient_filter_can_match_player(filter: &TargetFilter) -> bool {
         TargetFilter::And { filters } => {
             filters.iter().all(damage_recipient_filter_can_match_player)
         }
+        // CR 303.4m + CR 120.1: "to enchanted player" — a player recipient when
+        // the source is attached to a player; `player_matches_filter` then
+        // checks that the damaged player is that host. Not player-scope for the
+        // object arm: an Aura on a permanent names that object instead.
+        TargetFilter::AttachedTo => true,
         // A pure object `Typed` filter (type constraints, no player-compatible
         // controller-only scope) can never be a player; everything else the
         // parser emits for a player recipient is covered by the player-scope
