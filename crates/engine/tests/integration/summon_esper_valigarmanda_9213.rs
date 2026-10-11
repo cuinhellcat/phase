@@ -16,7 +16,6 @@
 //! counters come from the CR 714.3c turn-based action, and chapter I exiles the
 //! cards itself, so the exile link is the production one.
 
-use engine::ai_support::{candidate_actions, legal_actions};
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -578,7 +577,9 @@ fn sorted(mut cards: Vec<ObjectId>) -> Vec<ObjectId> {
 /// including an effect that allows a player to cast a spell without paying
 /// its mana cost, the alternative cost may be paid." Warped Space offers {0}
 /// rather than the mana cost of a spell cast from exile, so chapter II offers
-/// P1's Evermind and casts it for {0}. Its once-each-turn use is spent.
+/// P1's Evermind. CR 601.2h: "Unpayable costs can't be paid." The {0} is the
+/// only way to cast it, so it is applied without a choice and its
+/// once-each-turn use is spent.
 #[test]
 fn warped_space_casts_a_linked_card_with_no_mana_cost_for_zero() {
     let Board {
@@ -594,18 +595,12 @@ fn warped_space_casts_a_linked_card_with_no_mana_cost_for_zero() {
             cards: vec![evermind],
         })
         .expect("pick Evermind");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalCostChoice { .. }
-        ),
-        "Warped Space's {{0}} is offered, found {:?}",
+    assert_eq!(
+        runner.state().objects[&evermind].zone,
+        Zone::Stack,
+        "cast with no cost choice, found {:?}",
         runner.state().waiting_for
     );
-    runner
-        .act(GameAction::DecideOptionalCost { pay: true })
-        .expect("pay {0} rather than the mana cost");
-    assert_eq!(runner.state().objects[&evermind].zone, Zone::Stack);
     assert_eq!(
         runner.state().players[0].mana_pool.total(),
         pool_before,
@@ -616,58 +611,6 @@ fn warped_space_casts_a_linked_card_with_no_mana_cost_for_zero() {
         1,
         "Warped Space is used for this turn"
     );
-}
-
-/// CR 601.2h: "Unpayable costs can't be paid." Declining Warped Space means
-/// paying Evermind's mana cost, which it doesn't have, so the decline is
-/// refused and the choice stays open; accepting still casts it.
-#[test]
-fn declining_warped_space_for_a_card_with_no_mana_cost_is_refused() {
-    let Board {
-        mut runner,
-        sorcery: evermind,
-        ..
-    } = reach_chapter_two_evermind(WarpedSpace::Unspent);
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![evermind],
-        })
-        .expect("pick Evermind");
-    // The AI decision contract issues raw candidates for this prompt.
-    let candidates: Vec<GameAction> = candidate_actions(runner.state())
-        .into_iter()
-        .map(|candidate| candidate.action)
-        .collect();
-    assert!(candidates.contains(&GameAction::DecideOptionalCost { pay: true }));
-    assert!(
-        !candidates.contains(&GameAction::DecideOptionalCost { pay: false }),
-        "the decline is not a candidate"
-    );
-    let offered = legal_actions(runner.state());
-    assert!(offered.contains(&GameAction::DecideOptionalCost { pay: true }));
-    assert!(
-        !offered.contains(&GameAction::DecideOptionalCost { pay: false }),
-        "the decline is not a legal action"
-    );
-    assert!(
-        runner
-            .act(GameAction::DecideOptionalCost { pay: false })
-            .is_err(),
-        "paying the nonexistent mana cost is refused"
-    );
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalCostChoice { .. }
-        ),
-        "the choice stays open, found {:?}",
-        runner.state().waiting_for
-    );
-    assert_eq!(runner.state().objects[&evermind].zone, Zone::Exile);
-    runner
-        .act(GameAction::DecideOptionalCost { pay: true })
-        .expect("pay {0}");
-    assert_eq!(runner.state().objects[&evermind].zone, Zone::Stack);
 }
 
 /// Warped Space's once-each-turn use already spent this turn leaves no
@@ -696,47 +639,61 @@ fn a_spent_warped_space_does_not_offer_a_card_with_no_mana_cost() {
 }
 
 /// CR 601.2a: the caster becomes the spell's controller, so P1's card cast
-/// by P0 from exile gets P0's Warped Space. A payable printed cost gets the
-/// same choice: accepting pays {0}, not its {1}{W}.
+/// by P0 from exile gets P0's Warped Space. With a payable printed cost
+/// ({1}{W}) it is a choice: accepting pays {0} and spends Warped Space;
+/// declining pays {1}{W} with the chapter's {R}{R} and leaves it unused.
 #[test]
 fn warped_space_reaches_the_opponents_linked_card() {
-    let sorcery = OpponentCard {
-        name: "Linked Sorcery",
-        instant: false,
-        cost: white_cost(),
-        text: GAIN_THREE,
-    };
-    let Board {
-        mut runner,
-        sorcery,
-        ..
-    } = reach_chapter_two_on(VALIGARMANDA, GAIN_ONE, sorcery, WarpedSpace::Unspent);
-    assert_eq!(runner.state().objects[&sorcery].owner, P1);
-    let pool_before = runner.state().players[0].mana_pool.total();
-    runner
-        .act(GameAction::SelectCards {
-            cards: vec![sorcery],
-        })
-        .expect("pick the linked sorcery");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalCostChoice { .. }
-        ),
-        "Warped Space's {{0}} is offered, found {:?}",
-        runner.state().waiting_for
-    );
-    runner
-        .act(GameAction::DecideOptionalCost { pay: true })
-        .expect("pay {0}");
-    assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
-    assert_eq!(runner.state().players[0].mana_pool.total(), pool_before);
+    for pay_zero in [true, false] {
+        let sorcery = OpponentCard {
+            name: "Linked Sorcery",
+            instant: false,
+            cost: white_cost(),
+            text: GAIN_THREE,
+        };
+        let Board {
+            mut runner,
+            sorcery,
+            ..
+        } = reach_chapter_two_on(VALIGARMANDA, GAIN_ONE, sorcery, WarpedSpace::Unspent);
+        assert_eq!(runner.state().objects[&sorcery].owner, P1);
+        let pool_before = runner.state().players[0].mana_pool.total();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![sorcery],
+            })
+            .expect("pick the linked sorcery");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "Warped Space's {{0}} is offered, found {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: pay_zero })
+            .expect("decide the alternative");
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pay {1}{W}");
+        }
+        assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
+        let (mana_left, slots_used) = if pay_zero { (pool_before, 1) } else { (0, 0) };
+        assert_eq!(runner.state().players[0].mana_pool.total(), mana_left);
+        assert_eq!(
+            runner.state().alt_cost_grant_permissions_used.len(),
+            slots_used
+        );
+    }
 }
 
 /// CR 118.6a + CR 601.2b: an additional cost decided before targets (Anhelo,
 /// the Painter's granted casualty) does not skip Warped Space's {0} for a
-/// targeted linked card with no mana cost: after casualty and targets the
-/// choice is offered, and accepting casts it for {0}.
+/// targeted linked card with no mana cost: after casualty and targets it is
+/// cast for {0}, spending Warped Space.
 #[test]
 fn warped_space_follows_a_casualty_decision_for_a_card_with_no_mana_cost() {
     let draw_three = OpponentCard {
@@ -783,26 +740,11 @@ fn warped_space_follows_a_casualty_decision_for_a_card_with_no_mana_cost() {
             targets: vec![TargetRef::Player(P0)],
         })
         .expect("target P0");
-    assert!(
-        matches!(
-            &runner.state().waiting_for,
-            WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(..),
-                ..
-            }
-        ),
-        "Warped Space's {{0}} is offered, found {:?}",
+    assert_eq!(
+        runner.state().objects[&sorcery].zone,
+        Zone::Stack,
+        "cast for {{0}}, found {:?}",
         runner.state().waiting_for
     );
-    assert!(
-        runner
-            .act(GameAction::DecideOptionalCost { pay: false })
-            .is_err(),
-        "paying the nonexistent mana cost is refused"
-    );
-    runner
-        .act(GameAction::DecideOptionalCost { pay: true })
-        .expect("pay {0}");
-    assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
     assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
 }

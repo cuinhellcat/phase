@@ -9767,9 +9767,9 @@ fn prepare_spell_cast_announced(
         next_spell_without_paying_applies(state, player, object_id, casting_variant);
     // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
     // printed mana cost is refused, unless a payable alternative cost will be
-    // offered for it. The same alternative election as
-    // `check_additional_cost_or_pay` (a `Normal` cast asks for it); declining
-    // it is refused there, in `handle_decide_additional_cost`.
+    // applied for it. `check_additional_cost_or_pay` (a `Normal` cast) and the
+    // skipped-election branch of `finish_pending_cast_cost_or_pay` apply it
+    // without a choice.
     if cast_pays_nonexistent_printed_cost(
         state,
         player,

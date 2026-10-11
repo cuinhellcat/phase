@@ -575,36 +575,40 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     }
 }
 
-/// CR 118.6 + CR 601.2h: whether declining this choice pays a mana cost the
-/// card doesn't have. Declining a spell's alternative cost pays its printed
-/// cost; for a card with no mana cost under a normal-cost grant that cost is
-/// unpayable, so the alternative is the only way to cast it. The decision
-/// refuses the decline and the legal actions don't offer it.
-pub(crate) fn declining_pays_nonexistent_printed_cost(
-    state: &GameState,
+/// CR 118.6a + CR 601.2b + CR 601.2h: apply a spell's alternative cost
+/// without asking, because the printed cost it would replace doesn't exist.
+/// Records it as an accepted alternative would be (its once-per-turn grant is
+/// spent at finalize).
+fn apply_only_payable_alternative_cost(
+    state: &mut GameState,
     player: PlayerId,
-    pending: &PendingCast,
-    cost: &AdditionalCost,
-) -> bool {
-    let AdditionalCost::Choice(_, fallback) = cost else {
-        return false;
-    };
-    let Some(obj) = state.objects.get(&pending.object_id) else {
-        return false;
-    };
-    let is_spell_alternative_choice = !obj
-        .additional_cost
-        .as_ref()
-        .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
-        && matches!(fallback, AbilityCost::Mana { .. });
-    is_spell_alternative_choice
-        && super::casting::cast_pays_nonexistent_printed_cost(
+    mut pending: PendingCast,
+    alt_cost: PayableSpellAlternativeCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.ability.context.alternative_mana_cost_paid = true;
+    pending.ability.context.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+    match alt_cost.cost {
+        AbilityCost::Mana { cost: alt_mana } => {
+            pending.base_cost = Some(alt_mana);
+            pending.cost = super::casting::recompute_pending_mana_total(
+                state,
+                player,
+                &pending,
+                pending.ability.chosen_x,
+            );
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+        cost => pay_additional_cost_with_source(
             state,
             player,
-            obj,
-            pending.casting_permission_index,
-            pending.casting_variant,
-        )
+            cost,
+            SpellCostSource::Other,
+            pending,
+            events,
+        ),
+    }
 }
 
 pub(crate) fn handle_decide_additional_cost(
@@ -615,11 +619,6 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if !pay && declining_pays_nonexistent_printed_cost(state, player, &pending, additional_cost) {
-        return Err(EngineError::ActionNotAllowed(
-            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
-        ));
-    }
     if pending
         .additional_cost_queue
         .first()
@@ -7340,7 +7339,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         // CR 118.6a + CR 601.2b: skipping the re-detection must not skip the
         // alternative cost of a card with no mana cost (an additional cost
         // decided before targets, as a granted casualty): its printed cost
-        // can't be paid, so the alternative is offered here, as below.
+        // can't be paid, so the alternative is applied here, as below.
         if !pending.ability.context.alternative_mana_cost_paid
             && state.objects.get(&pending.object_id).is_some_and(|obj| {
                 super::casting::cast_pays_nonexistent_printed_cost(
@@ -7352,24 +7351,18 @@ pub(super) fn finish_pending_cast_cost_or_pay(
                 )
             })
         {
-            let alt_cost = (pending.casting_variant == CastingVariant::Normal)
+            let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
                 .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
                 .flatten()
-                .ok_or_else(|| {
-                    EngineError::ActionNotAllowed(
-                        "A card with no mana cost can't be cast by paying its mana cost"
-                            .to_string(),
-                    )
-                })?;
-            pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
-            let printed = pending.cost.clone();
-            return Ok(make_optional_cost_choice(
-                state,
-                player,
-                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: printed }),
-                0,
-                pending,
-            ));
+            else {
+                // Admission saw a payable alternative; one that stopped being
+                // payable since (a sacrificed permanent) cancels the cast.
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(
+                    "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+                ));
+            };
+            return apply_only_payable_alternative_cost(state, player, pending, alt_cost, events);
         }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -8205,6 +8198,22 @@ fn check_additional_cost_or_pay_with_kept_cost(
                         );
                     }
                 }
+            }
+            // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
+            // cost the alternative is the only way to cast the card, so there
+            // is nothing to choose.
+            if state.objects.get(&object_id).is_some_and(|obj| {
+                super::casting::cast_pays_nonexistent_printed_cost(
+                    state,
+                    player,
+                    obj,
+                    casting_permission_index,
+                    casting_variant,
+                )
+            }) {
+                return apply_only_payable_alternative_cost(
+                    state, player, pending, alt_cost, events,
+                );
             }
             return Ok(make_optional_cost_choice(
                 state,

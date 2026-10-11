@@ -2201,32 +2201,18 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        WaitingFor::OptionalCostChoice {
-            player,
-            cost,
-            pending_cast,
-            ..
-        } => {
-            let mut actions = vec![candidate(
+        WaitingFor::OptionalCostChoice { player, .. } => vec![
+            candidate(
                 GameAction::DecideOptionalCost { pay: true },
                 TacticalClass::Selection,
                 Some(*player),
-            )];
-            // CR 601.2h: declining can't pay a nonexistent printed cost.
-            if !crate::game::casting_costs::declining_pays_nonexistent_printed_cost(
-                state,
-                *player,
-                pending_cast,
-                cost,
-            ) {
-                actions.push(candidate(
-                    GameAction::DecideOptionalCost { pay: false },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ));
-            }
-            actions
-        }
+            ),
+            candidate(
+                GameAction::DecideOptionalCost { pay: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
