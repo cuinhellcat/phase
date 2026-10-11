@@ -119,7 +119,9 @@ fn count_scoped_ability(
         let from_context = super::resolve_player_for_context_ref(state, ability, filter);
         let mut scoped = ability.clone();
         scoped.project_target_occurrences(&retain_only_player_at(ability, None));
-        scoped.push_target(TargetRef::Player(from_context));
+        if let Some(player) = from_context {
+            scoped.push_target(TargetRef::Player(player));
+        }
         return scoped;
     }
     // Case 3, else case 4.
@@ -153,9 +155,7 @@ fn mana_effect_recipient(
     // ParentTargetController, chosen player) resolve via the context, not
     // `ability.targets`.
     if filter.is_context_ref() {
-        return Some(super::resolve_player_for_context_ref(
-            state, ability, filter,
-        ));
+        return super::resolve_player_for_context_ref(state, ability, filter);
     }
     // CR 115.1 + CR 106.4: "target player adds …" (Jetfire, Ingenious
     // Scientist) — the targeted player was chosen at announcement and lives in
@@ -1051,8 +1051,7 @@ pub(crate) fn exiled_color_options(
 /// `state.objects.get(&link.exiled_id)`, so every yielded id provably HAS a live entry and no
 /// consumer needs an `else` arm that can never be taken.
 ///
-/// The single link authority for both [`exiled_color_options`] and the resource loop firewall's
-/// `exiled_colors_provably_exclude_class` arm, so the firewall cannot drift from the resolver.
+/// The single link authority for [`exiled_color_options`].
 ///
 /// ORDER IS PART OF THE CONTRACT: link order, not a set, because [`exiled_color_options`] returns
 /// its options in it. The guards are that function's `#[cfg(test)]` assertions
@@ -1741,7 +1740,7 @@ mod tests {
 
         assert_eq!(state.players[1].mana_pool.total(), 2);
         assert!(
-            state.players[1].mana_pool.mana.iter().all(|unit| {
+            state.players[1].mana_pool.units().all(|unit| {
                 unit.restrictions
                     .contains(&ManaRestriction::OnlyForTypeSpellsOrAbilities {
                         spell_type: "Artifact".to_string(),
@@ -2058,7 +2057,7 @@ mod tests {
         )
         .unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.source_id, ObjectId(100));
     }
 
@@ -2649,7 +2648,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.restrictions.len(), 1);
         assert_eq!(
             unit.restrictions[0],
@@ -2696,7 +2695,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(unit.restrictions.len(), 1);
         assert_eq!(
             unit.restrictions[0],
@@ -2728,7 +2727,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // No source object → restriction can't resolve → mana is unrestricted
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert!(unit.restrictions.is_empty());
     }
 
@@ -2760,7 +2759,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let unit = &state.players[0].mana_pool.mana[0];
+        let unit = &state.players[0].mana_pool.unit_at(0).unwrap();
         assert_eq!(
             unit.grants,
             vec![ManaSpellGrant::CantBeCountered {

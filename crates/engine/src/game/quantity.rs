@@ -5874,9 +5874,7 @@ fn resolve_ref(
                 // of the two shapes it takes at quantity-resolution time:
                 //   - a resolving instant/sorcery is still on the Stack (its
                 //     effect, e.g. Thunder Salvo, runs before the spell leaves —
-                //     CR 608.2n) and carries NO `cast_from_zone` (that provenance
-                //     is stamped only onto placeholder permanent-spell objects at
-                //     cast and permanents at resolution);
+                //     CR 608.2n) and carries its cast `cast_from_zone`;
                 //   - an ETB replacement evaluates against the placeholder
                 //     permanent-spell object, which DOES carry `cast_from_zone`.
                 // A reanimated / put-onto-battlefield permanent is neither on the
@@ -6497,6 +6495,13 @@ fn resolve_ref(
                                 })
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        Some(ControllerRef::DeclaredPlayer { group }) => ability
+                            .and_then(|a| {
+                                crate::game::targeting::resolve_live_declared_player(
+                                    state, a, *group,
+                                )
+                            })
+                            .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::ParentTargetController) => ability
                             .and_then(|a| {
                                 crate::game::ability_utils::parent_target_controller(a, state)
@@ -6585,6 +6590,11 @@ fn damage_source_controller_matches(
                     TargetRef::Player(player) => Some(*player),
                     TargetRef::Object(_) => None,
                 })
+            })
+            .is_some_and(|player| actual == player),
+        ControllerRef::DeclaredPlayer { group } => ability
+            .and_then(|ability| {
+                crate::game::targeting::resolve_live_declared_player(state, ability, *group)
             })
             .is_some_and(|player| actual == player),
         ControllerRef::ParentTargetController => ability
@@ -7168,13 +7178,6 @@ fn object_for_scope<'a>(
 }
 
 /// Resolve an [`ObjectScope`] to a concrete object id under `ctx`.
-///
-/// `pub(crate)` for ONE reason: the resource loop firewall's
-/// `counters_on_source_provably_excludes_class` arm must ask THE SAME scope
-/// authority the `QuantityRef::CountersOn` resolver asks, rather than
-/// re-implementing "`ObjectScope::Source` means the ability's own source". Do not
-/// read this widened visibility as an invitation to resolve quantities outside
-/// `game::quantity` — every other caller is in this module.
 pub(crate) fn object_id_for_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -9588,9 +9591,9 @@ pub(crate) fn resolve_player_count(
                                 )
                         }
                         // CR 508.6 + CR 102.2: opponent of the controller
-                        // attacking the enchanted/defending player this combat.
+                        // attacking the enchanted player (live combat membership).
                         // Delegates to the single-authority predicate in
-                        // `matches_player_scope` (the two copies must stay in sync).
+                        // `matches_player_scope`.
                         PlayerFilter::OpponentAttackingEnchantedPlayer => {
                             crate::game::effects::matches_player_scope(
                                 state, p.id, filter, controller, source_id,
@@ -22644,7 +22647,9 @@ mod tests {
         causes.insert(sacrificed, ThisWayCause::Sacrificed);
         causes.insert(milled, ThisWayCause::Milled);
         causes.insert(sacrificed_to_exile, ThisWayCause::Sacrificed);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let creature_filter = Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
         let count_for = |caused_by| {
@@ -22918,7 +22923,9 @@ mod tests {
         causes.insert(disc_creature_a, ThisWayCause::Discarded);
         causes.insert(disc_creature_b, ThisWayCause::Discarded);
         causes.insert(disc_instant, ThisWayCause::Discarded);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let count_for = |caused_by| {
             let expr = QuantityExpr::Ref {
@@ -22993,7 +23000,9 @@ mod tests {
         let mut causes = HashMap::new();
         causes.insert(cr_a, ThisWayCause::Discarded);
         causes.insert(cr_b, ThisWayCause::Discarded);
-        state.tracked_set_member_causes.insert(set_id, causes);
+        state
+            .tracked_set_member_causes
+            .insert(set_id, causes.into_iter().collect());
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::DistinctCardTypes {

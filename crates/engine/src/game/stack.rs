@@ -530,6 +530,18 @@ pub(crate) struct PoppedStackEntry {
     pub trigger_firing: Option<TriggerFiring>,
 }
 
+/// Empties the stack together with every per-entry table [`PoppedStackEntry`] carries, the bulk
+/// counterpart of [`remove_stack_entry_at_unobserved`]: a new per-entry table joins both.
+///
+/// It neither journals the removal (CR 733) nor records delayed-trigger outcomes, so it is only
+/// for throwaway comparison copies.
+pub(crate) fn clear_stack_with_entry_tables(state: &mut GameState) {
+    state.stack.clear();
+    state.stack_paid_facts.clear();
+    state.stack_trigger_event_batches.clear();
+    state.stack_trigger_firings.clear();
+}
+
 /// Takes the firing classification coupled to a stack entry.
 ///
 /// Current scheduler pushes always install a row for triggered entries. Older
@@ -1419,6 +1431,7 @@ pub(crate) fn bind_resolution_scope(
     entry: &StackEntry,
     trigger_event_batch: Option<Vec<GameEvent>>,
 ) -> bool {
+    let rederived: Option<Option<TriggerCondition>>;
     let triggered = match &entry.kind {
         StackEntryKind::TriggeredAbility {
             condition,
@@ -1426,19 +1439,28 @@ pub(crate) fn bind_resolution_scope(
             subject_match_count,
             die_result,
             ..
-        } => Some(TriggeredResolutionScope {
-            condition: condition.as_ref(),
-            controller: entry.controller,
-            trigger_source: entry
-                .ability()
-                .and_then(|ability| ability.trigger_source.as_ref()),
-            trigger_definition: entry
-                .ability()
-                .and_then(|ability| ability.trigger_definition_ref.as_ref()),
-            trigger_event: trigger_event.as_ref(),
-            subject_match_count: *subject_match_count,
-            die_result: *die_result,
-        }),
+        } => {
+            // CR 603.4 + CR 608.2b: a stored recheck of a payload carrying declared players is
+            // derived again now, so a carried player who has since left names no one.
+            rederived = condition
+                .as_ref()
+                .and(entry.ability())
+                .filter(|ability| !ability.context.outer_declared_players.is_empty())
+                .map(|ability| super::triggers::delayed_intervening_if(state, ability));
+            Some(TriggeredResolutionScope {
+                condition: rederived.as_ref().unwrap_or(condition).as_ref(),
+                controller: entry.controller,
+                trigger_source: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_source.as_ref()),
+                trigger_definition: entry
+                    .ability()
+                    .and_then(|ability| ability.trigger_definition_ref.as_ref()),
+                trigger_event: trigger_event.as_ref(),
+                subject_match_count: *subject_match_count,
+                die_result: *die_result,
+            })
+        }
         _ => None,
     };
     bind_triggered_resolution_scope(state, triggered, trigger_event_batch)
@@ -4277,6 +4299,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -4525,6 +4548,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -4753,6 +4777,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: _,
         target_incarnations: _, // CR 400.7 referent pins; batch candidacy is shape-only
         target_pins: _,         // CR 400.7 selected-target pins; batch candidacy is shape-only
@@ -5090,6 +5115,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: a_force_block_attacker,
         target_incarnations: a_target_incarnations,
         controller: a_controller,
@@ -5175,6 +5201,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        delayed_origin: _,
         force_block_attacker: b_force_block_attacker,
         target_incarnations: b_target_incarnations,
         controller: b_controller,
