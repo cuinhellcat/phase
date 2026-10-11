@@ -776,7 +776,10 @@ pub(crate) fn resolve_random_in_chain(
         for player in per_player_iteration_population(state, ability, scope) {
             let pool = spec.pool(state, ability, player);
             let clamped = count.min(pool.len());
-            picked.extend(pool.choose_multiple(&mut state.rng, clamped).copied());
+            picked.extend(
+                pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
+                    .copied(),
+            );
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
