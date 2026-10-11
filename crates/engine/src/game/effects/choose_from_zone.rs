@@ -75,6 +75,16 @@ pub fn resolve(
     // CR 102.3: `Each(OtherPlayers)` is the same iteration with the controller
     // excluded ("for each OTHER player" — Kaya, Spirits' Justice).
     if let ZoneOwner::Each(scope) = zone_owner {
+        // CR 608.2c: each pick rebinds the chain's tracked set, so a `Tracked`
+        // pool read per player would read the previous player's picks. No
+        // producer emits this; refuse it rather than offer the wrong cards.
+        // (The random pick reads every pool before it publishes.)
+        if candidate_source == ZoneChoiceCandidateSource::Tracked {
+            return Err(EffectError::MissingParam(
+                "ChooseFromZone Each with a Tracked pool is not modelled for chosen picks"
+                    .to_string(),
+            ));
+        }
         let players = per_player_iteration_population(state, ability, scope);
         // No pick has accumulated yet — the first one must start a fresh set.
         return advance_per_player_iteration(
@@ -3621,6 +3631,58 @@ mod tests {
                 batch.iter().map(|&id| TargetRef::Object(id)).collect(),
             );
             assert_eq!(picked, batch);
+        }
+    }
+
+    /// A chosen per-player pick with a `Tracked` pool is refused (each pick
+    /// rebinds the tracked set); the same pick from `Direct` opens a prompt.
+    #[test]
+    fn chosen_per_player_pick_refuses_a_tracked_pool() {
+        for (source, refused) in [
+            (
+                crate::types::ability::ZoneChoiceCandidateSource::Tracked,
+                true,
+            ),
+            (
+                crate::types::ability::ZoneChoiceCandidateSource::Direct,
+                false,
+            ),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let (named, _unrelated) = named_and_unrelated_graveyard_cards(&mut state);
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![named]);
+            state.next_tracked_set_id = 2;
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            let ability = ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::Each(PerPlayerScope::Opponents),
+                    filter: None,
+                    chooser: Chooser::Controller.into(),
+                    candidate_source: source,
+                    reciprocal_role: None,
+                    up_to: false,
+                    constraint: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            install_test_carrier(&mut state, ObjectId(100), PlayerId(0));
+            let mut events = Vec::new();
+            let result = resolve(&mut state, &ability, &mut events);
+            assert_eq!(result.is_err(), refused, "{source:?}: {result:?}");
+            if !refused {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ChooseFromZoneChoice { .. }
+                ));
+            }
         }
     }
 

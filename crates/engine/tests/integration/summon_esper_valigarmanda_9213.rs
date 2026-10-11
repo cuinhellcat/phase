@@ -16,10 +16,11 @@
 //! counters come from the CR 714.3c turn-based action, and chapter I exiles the
 //! cards itself, so the exile link is the production one.
 
+use engine::ai_support::{candidate_actions, legal_actions};
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::EffectKind;
+use engine::types::ability::{AdditionalCost, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -40,6 +41,11 @@ Flying, haste";
 /// Warped Space, the unlocked door's text (`client/public/card-data.json`).
 const WARPED_SPACE: &str = "Once each turn, you may pay {0} rather than pay the mana cost for a \
 spell you cast from exile.";
+
+/// Anhelo, the Painter, verbatim.
+const ANHELO: &str = "Deathtouch\nThe first instant or sorcery spell you cast each turn has \
+casualty 2. (As you cast that spell, you may sacrifice a creature with power 2 or greater. When \
+you do, copy the spell and you may choose new targets for the copy.)";
 
 /// Evermind, verbatim: an instant with no mana cost.
 const EVERMIND: &str = "(Nonexistent mana costs can't be paid.)\n\
@@ -177,7 +183,18 @@ fn reach_chapter_two_on(
     opponent_card: OpponentCard,
     warped_space: WarpedSpace,
 ) -> Board {
+    reach_chapter_two_on_with(saga_text, instant_text, opponent_card, warped_space, |_| {})
+}
+
+fn reach_chapter_two_on_with(
+    saga_text: &str,
+    instant_text: &str,
+    opponent_card: OpponentCard,
+    warped_space: WarpedSpace,
+    extra: impl FnOnce(&mut GameScenario),
+) -> Board {
     let mut scenario = GameScenario::new();
+    extra(&mut scenario);
     let host = (warped_space != WarpedSpace::Absent).then(|| {
         scenario
             .add_enchantment_from_oracle(P0, "Warped Space", WARPED_SPACE)
@@ -616,6 +633,22 @@ fn declining_warped_space_for_a_card_with_no_mana_cost_is_refused() {
             cards: vec![evermind],
         })
         .expect("pick Evermind");
+    // The AI decision contract issues raw candidates for this prompt.
+    let candidates: Vec<GameAction> = candidate_actions(runner.state())
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect();
+    assert!(candidates.contains(&GameAction::DecideOptionalCost { pay: true }));
+    assert!(
+        !candidates.contains(&GameAction::DecideOptionalCost { pay: false }),
+        "the decline is not a candidate"
+    );
+    let offered = legal_actions(runner.state());
+    assert!(offered.contains(&GameAction::DecideOptionalCost { pay: true }));
+    assert!(
+        !offered.contains(&GameAction::DecideOptionalCost { pay: false }),
+        "the decline is not a legal action"
+    );
     assert!(
         runner
             .act(GameAction::DecideOptionalCost { pay: false })
@@ -698,4 +731,78 @@ fn warped_space_reaches_the_opponents_linked_card() {
         .expect("pay {0}");
     assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
     assert_eq!(runner.state().players[0].mana_pool.total(), pool_before);
+}
+
+/// CR 118.6a + CR 601.2b: an additional cost decided before targets (Anhelo,
+/// the Painter's granted casualty) does not skip Warped Space's {0} for a
+/// targeted linked card with no mana cost: after casualty and targets the
+/// choice is offered, and accepting casts it for {0}.
+#[test]
+fn warped_space_follows_a_casualty_decision_for_a_card_with_no_mana_cost() {
+    let draw_three = OpponentCard {
+        name: "Linked Draw",
+        instant: false,
+        cost: ManaCost::NoCost,
+        text: "Target player draws three cards.",
+    };
+    let Board {
+        mut runner,
+        sorcery,
+        ..
+    } = reach_chapter_two_on_with(
+        VALIGARMANDA,
+        GAIN_ONE,
+        draw_three,
+        WarpedSpace::Unspent,
+        |scenario| {
+            scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+            scenario.add_creature(P0, "Fodder", 3, 3);
+        },
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![sorcery],
+        })
+        .expect("pick the linked card");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Optional { .. },
+                ..
+            }
+        ),
+        "reach guard: casualty is offered first, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("decline casualty");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P0)],
+        })
+        .expect("target P0");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(..),
+                ..
+            }
+        ),
+        "Warped Space's {{0}} is offered, found {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .is_err(),
+        "paying the nonexistent mana cost is refused"
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("pay {0}");
+    assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
+    assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
 }

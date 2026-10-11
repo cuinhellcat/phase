@@ -575,6 +575,38 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     }
 }
 
+/// CR 118.6 + CR 601.2h: whether declining this choice pays a mana cost the
+/// card doesn't have. Declining a spell's alternative cost pays its printed
+/// cost; for a card with no mana cost under a normal-cost grant that cost is
+/// unpayable, so the alternative is the only way to cast it. The decision
+/// refuses the decline and the legal actions don't offer it.
+pub(crate) fn declining_pays_nonexistent_printed_cost(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: &AdditionalCost,
+) -> bool {
+    let AdditionalCost::Choice(_, fallback) = cost else {
+        return false;
+    };
+    let Some(obj) = state.objects.get(&pending.object_id) else {
+        return false;
+    };
+    let is_spell_alternative_choice = !obj
+        .additional_cost
+        .as_ref()
+        .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
+        && matches!(fallback, AbilityCost::Mana { .. });
+    is_spell_alternative_choice
+        && super::casting::cast_pays_nonexistent_printed_cost(
+            state,
+            player,
+            obj,
+            pending.casting_permission_index,
+            pending.casting_variant,
+        )
+}
+
 pub(crate) fn handle_decide_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -583,6 +615,11 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if !pay && declining_pays_nonexistent_printed_cost(state, player, &pending, additional_cost) {
+        return Err(EngineError::ActionNotAllowed(
+            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+        ));
+    }
     if pending
         .additional_cost_queue
         .first()
@@ -742,25 +779,6 @@ pub(crate) fn handle_decide_additional_cost(
                     .and_then(|obj| obj.additional_cost.as_ref())
                     .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
                     && matches!(fallback, AbilityCost::Mana { .. });
-                // CR 118.6 + CR 601.2h: declining the alternative pays the
-                // printed cost. For a card with no mana cost that cost is
-                // unpayable, so the alternative is the only way to cast it.
-                if is_spell_alternative_choice
-                    && state.objects.get(&pending.object_id).is_some_and(|obj| {
-                        super::casting::cast_pays_nonexistent_printed_cost(
-                            state,
-                            player,
-                            obj,
-                            pending.casting_permission_index,
-                            pending.casting_variant,
-                        )
-                    })
-                {
-                    return Err(EngineError::ActionNotAllowed(
-                        "A card with no mana cost can't be cast by paying its mana cost"
-                            .to_string(),
-                    ));
-                }
                 if is_spell_alternative_choice {
                     recompute_choice_cost = true;
                     None
@@ -966,10 +984,11 @@ pub(crate) fn payable_spell_alternative_cost_details(
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
-    // CR 601.2a + CR 108.4a: the caster becomes the spell's controller. Until
-    // then a card outside the hand is controlled by its owner, so another
-    // player's card cast from exile or a graveyard under a permission granted
-    // to `player` still gets `player`'s alternative costs (Warped Space).
+    // CR 601.2a: the caster becomes the spell's controller. A card is not
+    // controlled before then (CR 108.4a reads its owner), so another player's
+    // card cast from exile or a graveyard under a permission granted to
+    // `player` still gets `player`'s alternative costs (Warped Space). Casting
+    // from another player's hand is outside this offer's scope.
     if obj.controller != player && origin_zone == Zone::Hand {
         return None;
     }
@@ -7318,6 +7337,40 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         || !pending.additional_cost_queue.is_empty()
         || pending.additional_cost_decided
     {
+        // CR 118.6a + CR 601.2b: skipping the re-detection must not skip the
+        // alternative cost of a card with no mana cost (an additional cost
+        // decided before targets, as a granted casualty): its printed cost
+        // can't be paid, so the alternative is offered here, as below.
+        if !pending.ability.context.alternative_mana_cost_paid
+            && state.objects.get(&pending.object_id).is_some_and(|obj| {
+                super::casting::cast_pays_nonexistent_printed_cost(
+                    state,
+                    player,
+                    obj,
+                    pending.casting_permission_index,
+                    pending.casting_variant,
+                )
+            })
+        {
+            let alt_cost = (pending.casting_variant == CastingVariant::Normal)
+                .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
+                .flatten()
+                .ok_or_else(|| {
+                    EngineError::ActionNotAllowed(
+                        "A card with no mana cost can't be cast by paying its mana cost"
+                            .to_string(),
+                    )
+                })?;
+            pending.alt_cost_grant_source = alt_cost.once_per_turn_source;
+            let printed = pending.cost.clone();
+            return Ok(make_optional_cost_choice(
+                state,
+                player,
+                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: printed }),
+                0,
+                pending,
+            ));
+        }
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     // CR 601.2b + CR 601.2f: an Emerge or Offering sacrifice chosen before the
