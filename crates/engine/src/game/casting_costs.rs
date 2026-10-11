@@ -742,6 +742,25 @@ pub(crate) fn handle_decide_additional_cost(
                     .and_then(|obj| obj.additional_cost.as_ref())
                     .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
                     && matches!(fallback, AbilityCost::Mana { .. });
+                // CR 118.6 + CR 601.2h: declining the alternative pays the
+                // printed cost. For a card with no mana cost that cost is
+                // unpayable, so the alternative is the only way to cast it.
+                if is_spell_alternative_choice
+                    && state.objects.get(&pending.object_id).is_some_and(|obj| {
+                        super::casting::cast_pays_nonexistent_printed_cost(
+                            state,
+                            player,
+                            obj,
+                            pending.casting_permission_index,
+                            pending.casting_variant,
+                        )
+                    })
+                {
+                    return Err(EngineError::ActionNotAllowed(
+                        "A card with no mana cost can't be cast by paying its mana cost"
+                            .to_string(),
+                    ));
+                }
                 if is_spell_alternative_choice {
                     recompute_choice_cost = true;
                     None
@@ -944,12 +963,16 @@ pub(crate) fn payable_spell_alternative_cost_details(
     object_id: ObjectId,
 ) -> Option<PayableSpellAlternativeCost> {
     let obj = state.objects.get(&object_id)?;
-    if obj.controller != player {
-        return None;
-    }
     // CR 601.2a: the offer is scoped by the cast's ORIGIN zone (the object may
     // already sit on the stack when a pending cast re-asks).
     let origin_zone = super::casting::spell_cast_origin_zone(state, obj);
+    // CR 601.2a + CR 108.4a: the caster becomes the spell's controller. Until
+    // then a card outside the hand is controlled by its owner, so another
+    // player's card cast from exile or a graveyard under a permission granted
+    // to `player` still gets `player`'s alternative costs (Warped Space).
+    if obj.controller != player && origin_zone == Zone::Hand {
+        return None;
+    }
     // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
     // alternative/free-cast cards until the pending-cast flow can compose
     // alternative and additional costs in one CR 601.2f total-cost pass.

@@ -4022,6 +4022,58 @@ fn exile_alt_cost_permission_uses_casting_cards_mana_cost(
     }
 }
 
+/// CR 601.2f + CR 118.9a: whether a pending "the next spell … without paying
+/// its mana cost" applies to this cast.
+fn next_spell_without_paying_applies(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> bool {
+    !casting_variant.uses_alternative_cost()
+        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
+        })
+        .is_some()
+}
+
+/// CR 118.6 + CR 601.2h: whether this cast would pay a mana cost the card
+/// doesn't have. A normal-cost grant (`NormalCost` provenance, or a stored
+/// `SelfManaCost`) restates the card's printed cost, which for a card with no
+/// mana cost is an unpayable cost. A printed {0} is payable. A free
+/// alternative cost may be paid instead (CR 118.6a): a "without paying its
+/// mana cost" grant never has this provenance, and a pending next-spell one is
+/// excluded here. Methods with their own alternative cost never elect this
+/// slot (`selected_object_cast_permission_index`).
+pub(super) fn cast_pays_nonexistent_printed_cost(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    casting_variant: CastingVariant,
+) -> bool {
+    casting_permission_index
+        .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
+        .is_some_and(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost,
+                cost_provenance,
+                ..
+            } => {
+                (matches!(
+                    cost_provenance,
+                    crate::types::ability::ExileGrantCostProvenance::NormalCost
+                ) || matches!(cost, ManaCost::SelfManaCost))
+                    && matches!(
+                        resolve_exile_with_alt_cost_permission_mana_cost(cost, obj),
+                        ManaCost::NoCost
+                    )
+            }
+            _ => false,
+        })
+        && !next_spell_without_paying_applies(state, player, obj.id, casting_variant)
+}
+
 /// CR 709.3 + CR 712.11b + CR 601.2a: `CastFromZone` and similar grants stamp
 /// `ExileWithAltCost { cost: obj.mana_cost }` when the card is permitted to be
 /// cast for its normal mana cost. Split cards and spell//spell MDFCs choose a
@@ -9229,36 +9281,6 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
-    // CR 118.6 + CR 601.2h: a normal-cost grant restates the card's printed
-    // cost, so for a card with no mana cost it is an unpayable cost, which
-    // can't be paid. Refuse it rather than reading the resolved `NoCost` as a
-    // free cast. A printed {0} is payable; a "without paying its mana cost"
-    // grant is an alternative cost and may be paid instead (CR 118.6a).
-    // Methods with their own alternative cost (face-down and other riders)
-    // never elect this slot (`selected_object_cast_permission_index`).
-    if matches!(
-        alt_cost_from_exile,
-        Some(crate::types::mana::ManaCost::NoCost)
-    ) && casting_permission_index
-        .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
-        .is_some_and(|permission| {
-            matches!(
-                permission,
-                crate::types::ability::CastingPermission::ExileWithAltCost {
-                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
-                    ..
-                } | crate::types::ability::CastingPermission::ExileWithAltCost {
-                    cost: crate::types::mana::ManaCost::SelfManaCost,
-                    ..
-                }
-            )
-        })
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
-        ));
-    }
-
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
     //
     // CR 118.9a: this scan reads every attached permission, not the elected
@@ -9741,11 +9763,27 @@ fn prepare_spell_cast_announced(
         .then(|| crate::types::mana::ManaCost::generic(3));
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
-    let next_spell_without_paying = !casting_variant.uses_alternative_cost()
-        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
-            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
-        })
-        .is_some();
+    let next_spell_without_paying =
+        next_spell_without_paying_applies(state, player, object_id, casting_variant);
+    // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
+    // printed mana cost is refused, unless a payable alternative cost will be
+    // offered for it. The same alternative election as
+    // `check_additional_cost_or_pay` (a `Normal` cast asks for it); declining
+    // it is refused there, in `handle_decide_additional_cost`.
+    if cast_pays_nonexistent_printed_cost(
+        state,
+        player,
+        obj,
+        casting_permission_index,
+        casting_variant,
+    ) && !(casting_variant == CastingVariant::Normal
+        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
+            .is_some())
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+        ));
+    }
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from the origin scope carried by the static. Auto-application is

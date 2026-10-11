@@ -37,6 +37,16 @@ II, III, IV — Add {R} for each lore counter on this Saga. You may cast an inst
 card exiled with this Saga, and mana of any type can be spent to cast that spell.\n\
 Flying, haste";
 
+/// Warped Space, the unlocked door's text (`client/public/card-data.json`).
+const WARPED_SPACE: &str = "Once each turn, you may pay {0} rather than pay the mana cost for a \
+spell you cast from exile.";
+
+/// Evermind, verbatim: an instant with no mana cost.
+const EVERMIND: &str = "(Nonexistent mana costs can't be paid.)\n\
+Draw a card.\n\
+Splice onto Arcane {1}{U} (As you cast an Arcane spell, you may reveal this card from your hand \
+and pay its splice cost. If you do, add this card's effects to that spell.)";
+
 /// Park the game at the end of P0's turn, so the next two `advance_to_phase`
 /// calls reach P1's, then P0's, precombat main (CR 714.3c).
 fn park_for_next_p0_precombat_main(runner: &mut GameRunner) {
@@ -90,20 +100,6 @@ fn white_cost() -> ManaCost {
     }
 }
 
-/// A sorcery with the given printed cost.
-fn sorcery_card(
-    scenario: &mut GameScenario,
-    owner: engine::types::player::PlayerId,
-    cost: ManaCost,
-    text: &str,
-) -> ObjectId {
-    scenario
-        .add_spell_to_graveyard(owner, "Linked Sorcery", false)
-        .with_mana_cost(cost)
-        .from_oracle_text(text)
-        .id()
-}
-
 /// A `{U}` instant.
 fn blue_instant(
     scenario: &mut GameScenario,
@@ -148,7 +144,46 @@ fn reach_chapter_two_with(
     sorcery_cost: ManaCost,
     sorcery_text: &str,
 ) -> Board {
+    let sorcery = OpponentCard {
+        name: "Linked Sorcery",
+        instant: false,
+        cost: sorcery_cost,
+        text: sorcery_text,
+    };
+    reach_chapter_two_on(saga_text, instant_text, sorcery, WarpedSpace::Absent)
+}
+
+/// The card chapter I exiles from P1's graveyard.
+struct OpponentCard<'a> {
+    name: &'a str,
+    instant: bool,
+    cost: ManaCost,
+    text: &'a str,
+}
+
+/// Whether P0 controls Warped Space at chapter II, and whether its "Once each
+/// turn" is already spent that turn.
+#[derive(Clone, Copy, PartialEq)]
+enum WarpedSpace {
+    Absent,
+    Unspent,
+    Spent,
+}
+
+/// [`reach_chapter_two_with`] with a given P1 card and Warped Space.
+fn reach_chapter_two_on(
+    saga_text: &str,
+    instant_text: &str,
+    opponent_card: OpponentCard,
+    warped_space: WarpedSpace,
+) -> Board {
     let mut scenario = GameScenario::new();
+    let host = (warped_space != WarpedSpace::Absent).then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Warped Space", WARPED_SPACE)
+            .id()
+    });
+
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
     scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
@@ -159,7 +194,11 @@ fn reach_chapter_two_with(
         .from_oracle_text(saga_text)
         .id();
     let instant = blue_instant(&mut scenario, P0, instant_text);
-    let sorcery = sorcery_card(&mut scenario, P1, sorcery_cost, sorcery_text);
+    let sorcery = scenario
+        .add_spell_to_graveyard(P1, opponent_card.name, opponent_card.instant)
+        .with_mana_cost(opponent_card.cost)
+        .from_oracle_text(opponent_card.text)
+        .id();
     let unlinked = scenario
         .add_spell_to_exile(P0, "Unlinked Instant", true)
         .from_oracle_text("You gain 5 life.")
@@ -184,6 +223,13 @@ fn reach_chapter_two_with(
     // Chapter II.
     to_next_p0_precombat_main(&mut runner);
     assert_eq!(lore(&runner, saga), 2);
+    if warped_space == WarpedSpace::Spent {
+        let host = host.expect("Warped Space is on the battlefield");
+        runner
+            .state_mut()
+            .alt_cost_grant_permissions_used
+            .insert(host);
+    }
     let chapter_two_events = settle(&mut runner);
     Board {
         runner,
@@ -486,4 +532,170 @@ fn a_linked_card_costing_zero_is_offered_and_cast() {
         pool_before,
         "{{0}} spends no mana"
     );
+}
+
+/// Chapter II with Evermind (no mana cost) exiled from P1's graveyard and
+/// Warped Space as given.
+fn reach_chapter_two_evermind(warped_space: WarpedSpace) -> Board {
+    let evermind = OpponentCard {
+        name: "Evermind",
+        instant: true,
+        cost: ManaCost::NoCost,
+        text: EVERMIND,
+    };
+    let board = reach_chapter_two_on(VALIGARMANDA, GAIN_ONE, evermind, warped_space);
+    assert_eq!(
+        board.runner.state().objects[&board.sorcery].mana_cost,
+        ManaCost::NoCost,
+        "reach guard: Evermind has no mana cost"
+    );
+    board
+}
+
+fn sorted(mut cards: Vec<ObjectId>) -> Vec<ObjectId> {
+    cards.sort();
+    cards
+}
+
+/// CR 118.6a: "If an alternative cost is applied to an unpayable cost,
+/// including an effect that allows a player to cast a spell without paying
+/// its mana cost, the alternative cost may be paid." Warped Space offers {0}
+/// rather than the mana cost of a spell cast from exile, so chapter II offers
+/// P1's Evermind and casts it for {0}. Its once-each-turn use is spent.
+#[test]
+fn warped_space_casts_a_linked_card_with_no_mana_cost_for_zero() {
+    let Board {
+        mut runner,
+        sorcery: evermind,
+        instant,
+        ..
+    } = reach_chapter_two_evermind(WarpedSpace::Unspent);
+    assert_eq!(pool_of(&runner), sorted(vec![evermind, instant]));
+    let pool_before = runner.state().players[0].mana_pool.total();
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![evermind],
+        })
+        .expect("pick Evermind");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "Warped Space's {{0}} is offered, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("pay {0} rather than the mana cost");
+    assert_eq!(runner.state().objects[&evermind].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        pool_before,
+        "{{0}} spends no mana"
+    );
+    assert_eq!(
+        runner.state().alt_cost_grant_permissions_used.len(),
+        1,
+        "Warped Space is used for this turn"
+    );
+}
+
+/// CR 601.2h: "Unpayable costs can't be paid." Declining Warped Space means
+/// paying Evermind's mana cost, which it doesn't have, so the decline is
+/// refused and the choice stays open; accepting still casts it.
+#[test]
+fn declining_warped_space_for_a_card_with_no_mana_cost_is_refused() {
+    let Board {
+        mut runner,
+        sorcery: evermind,
+        ..
+    } = reach_chapter_two_evermind(WarpedSpace::Unspent);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![evermind],
+        })
+        .expect("pick Evermind");
+    assert!(
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .is_err(),
+        "paying the nonexistent mana cost is refused"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "the choice stays open, found {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&evermind].zone, Zone::Exile);
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("pay {0}");
+    assert_eq!(runner.state().objects[&evermind].zone, Zone::Stack);
+}
+
+/// Warped Space's once-each-turn use already spent this turn leaves no
+/// alternative cost, so Evermind is not offered and a direct pick is refused,
+/// as without Warped Space.
+#[test]
+fn a_spent_warped_space_does_not_offer_a_card_with_no_mana_cost() {
+    for warped_space in [WarpedSpace::Spent, WarpedSpace::Absent] {
+        let Board {
+            mut runner,
+            sorcery: evermind,
+            instant,
+            ..
+        } = reach_chapter_two_evermind(warped_space);
+        assert_eq!(pool_of(&runner), vec![instant]);
+        assert!(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![evermind],
+                })
+                .is_err(),
+            "picking Evermind directly is refused"
+        );
+        assert_eq!(runner.state().objects[&evermind].zone, Zone::Exile);
+    }
+}
+
+/// CR 601.2a: the caster becomes the spell's controller, so P1's card cast
+/// by P0 from exile gets P0's Warped Space. A payable printed cost gets the
+/// same choice: accepting pays {0}, not its {1}{W}.
+#[test]
+fn warped_space_reaches_the_opponents_linked_card() {
+    let sorcery = OpponentCard {
+        name: "Linked Sorcery",
+        instant: false,
+        cost: white_cost(),
+        text: GAIN_THREE,
+    };
+    let Board {
+        mut runner,
+        sorcery,
+        ..
+    } = reach_chapter_two_on(VALIGARMANDA, GAIN_ONE, sorcery, WarpedSpace::Unspent);
+    assert_eq!(runner.state().objects[&sorcery].owner, P1);
+    let pool_before = runner.state().players[0].mana_pool.total();
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![sorcery],
+        })
+        .expect("pick the linked sorcery");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "Warped Space's {{0}} is offered, found {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("pay {0}");
+    assert_eq!(runner.state().objects[&sorcery].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].mana_pool.total(), pool_before);
 }

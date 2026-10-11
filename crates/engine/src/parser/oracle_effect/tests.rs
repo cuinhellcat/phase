@@ -82051,6 +82051,13 @@ fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
     assert_eq!(filter, None, "any card");
     assert!(exile_those(&exile), "{exile:?}");
 
+    let (owner, selection, filter, exile) =
+        per_graveyard("Exile a card from each of your opponents' graveyards.").unwrap();
+    assert_eq!(owner, ZoneOwner::Each(PerPlayerScope::Opponents));
+    assert_eq!(selection, CardSelectionMode::Chosen);
+    assert_eq!(filter, None, "any card");
+    assert!(exile_those(&exile), "{exile:?}");
+
     let graveyard_card = |target: &TargetFilter| {
         matches!(
             target,
@@ -82092,6 +82099,7 @@ fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
         "Exile a card from each graveyard face down.",
         "Exile a creature card with mana value 3 or less from each graveyard.",
         "Exile a 2/2 card from each graveyard.",
+        "Exile a creature card with mana value 3 or less from each of your opponents' graveyards.",
     ] {
         let chain = parse_effect_chain(text, AbilityKind::Spell);
         assert!(

@@ -5912,7 +5912,8 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
     )
         .parse(lower)
         .ok()?;
-    // "<type phrase> card[ at random] from each [opponent's] graveyard"
+    // "<type phrase> card[ at random] from each [opponent's] graveyard", or
+    // "from each of your opponents' graveyards"
     let tail_parser = |i| {
         (
             tag::<_, _, E>("card"),
@@ -5921,6 +5922,10 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
                 tag(" from each "),
                 alt((
                     value(PerPlayerScope::Opponents, tag("opponent's graveyard")),
+                    value(
+                        PerPlayerScope::Opponents,
+                        tag("of your opponents' graveyards"),
+                    ),
                     value(PerPlayerScope::AllPlayers, tag("graveyard")),
                 )),
             ),
@@ -5940,7 +5945,11 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         let names_each_graveyard = nom_primitives::scan_split_at_phrase(after_article, |i| {
             (
                 tag::<_, _, E>("from each "),
-                alt((tag::<_, _, E>("opponent's graveyard"), tag("graveyard"))),
+                alt((
+                    tag::<_, _, E>("opponent's graveyard"),
+                    tag("of your opponents' graveyards"),
+                    tag("graveyard"),
+                )),
             )
                 .parse(i)
         })

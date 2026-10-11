@@ -10,6 +10,7 @@ use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{CastingPermission, ExileGrantCostProvenance};
 use engine::types::actions::GameAction;
+use engine::types::game_state::{NextSpellModifier, PendingNextSpellModifier};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -79,6 +80,12 @@ fn a_normal_cost_grant_casts_a_card_costing_zero() {
 /// An exiled card with a stored `SelfManaCost` grant whose provenance is the
 /// serde default (`Alternative`), as in a game saved before provenance existed.
 fn exiled_with_self_mana_cost_grant(cost: ManaCost) -> (GameRunner, ObjectId) {
+    exiled_with_grant(cost, ManaCost::SelfManaCost)
+}
+
+/// An exiled card with an `ExileWithAltCost` grant of `grant_cost` and the
+/// serde-default provenance (`Alternative`).
+fn exiled_with_grant(cost: ManaCost, grant_cost: ManaCost) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let card = scenario
@@ -94,7 +101,7 @@ fn exiled_with_self_mana_cost_grant(cost: ManaCost) -> (GameRunner, ObjectId) {
         .unwrap()
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
-            cost: ManaCost::SelfManaCost,
+            cost: grant_cost,
             cost_provenance: ExileGrantCostProvenance::Alternative,
             cast_transformed: false,
             constraint: None,
@@ -128,4 +135,35 @@ fn a_stored_self_mana_cost_grant_casts_a_card_costing_zero() {
     assert!(offers_cast(&runner, card), "the cast is offered");
     let outcome = runner.cast(card).resolve();
     assert_eq!(outcome.zone_of(card), Zone::Battlefield);
+}
+
+/// CR 118.6a: a "without paying its mana cost" grant is an alternative cost,
+/// so it casts a card with no mana cost.
+#[test]
+fn a_free_grant_casts_a_card_with_no_mana_cost() {
+    let (mut runner, card) = exiled_with_grant(ManaCost::NoCost, ManaCost::zero());
+    assert!(offers_cast(&runner, card), "the free cast is offered");
+    let outcome = runner.cast(card).resolve();
+    assert_eq!(outcome.zone_of(card), Zone::Battlefield);
+}
+
+/// CR 118.6a + CR 601.2f: "the next spell you cast this turn … without paying
+/// its mana cost" is an alternative cost too, so with one pending the Emry
+/// grant casts the card with no mana cost. Without it, see
+/// `a_normal_cost_grant_cannot_cast_a_card_with_no_mana_cost`.
+#[test]
+fn a_next_spell_free_cast_casts_a_granted_card_with_no_mana_cost() {
+    let (mut runner, artifact) = granted(ManaCost::NoCost);
+    runner
+        .state_mut()
+        .pending_next_spell_modifiers
+        .push(PendingNextSpellModifier {
+            player: P0,
+            modifier: NextSpellModifier::WithoutPayingManaCost,
+            spell_filter: None,
+            source_id: None,
+        });
+    assert!(offers_cast(&runner, artifact), "the free cast is offered");
+    let outcome = runner.cast(artifact).resolve();
+    assert_eq!(outcome.zone_of(artifact), Zone::Battlefield);
 }
