@@ -4069,7 +4069,16 @@ pub(super) fn cast_pays_nonexistent_printed_cost(
                         ManaCost::NoCost
                     )
             }
-            _ => false,
+            // A face-based cast, an impulse permission, a non-mana alternative
+            // cost, or an exile mechanic with its own cost: none stores the
+            // normal-cost grant this predicate reads.
+            crate::types::ability::CastingPermission::AdventureCreature
+            | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            | crate::types::ability::CastingPermission::ExileWithEnergyCost
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+            | crate::types::ability::CastingPermission::WarpExile { .. }
+            | crate::types::ability::CastingPermission::Plotted { .. }
+            | crate::types::ability::CastingPermission::Foretold { .. } => false,
         })
         && !next_spell_without_paying_applies(state, player, obj.id, casting_variant)
 }
