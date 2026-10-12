@@ -7,6 +7,8 @@
 //! casualty instance "triggers based on the payments made for it".
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::AdditionalCostOrigin;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -69,6 +71,7 @@ fn cast_first_instant(sacrifice: bool) -> (GameRunner, ObjectId) {
 fn resolve_and_count_draws(runner: &mut GameRunner) -> usize {
     let hand_before = runner.state().players[0].hand.len();
     for _ in 0..20 {
+        drain_order_triggers_with_identity(runner.state_mut());
         if runner.state().stack.is_empty() {
             break;
         }
@@ -94,4 +97,91 @@ fn declining_granted_casualty_makes_no_copy() {
     let (mut runner, fodder) = cast_first_instant(false);
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
     assert_eq!(resolve_and_count_draws(&mut runner), 1);
+}
+
+/// Silverquill, the Disputant's casualty line, verbatim.
+const SILVERQUILL: &str = "Flying, vigilance\nEach instant and sorcery spell you cast has \
+casualty 1. (As you cast that spell, you may sacrifice a creature with power 1 or greater. When \
+you do, copy the spell and you may choose new targets for the copy.)";
+
+/// Djinn Illuminatus's replicate line, verbatim.
+const DJINN_ILLUMINATUS: &str = "Flying\nEach instant and sorcery spell you cast has replicate. \
+The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid \
+its replicate cost. You may choose new targets for the copies.)";
+
+/// Cast a `{0}` "Draw a card." instant from hand with Silverquill's casualty 1
+/// and Djinn Illuminatus's replicate, paying replicate once and answering
+/// casualty with `sacrifice`; returns the cards drawn.
+fn cast_replicated_instant_with_silverquill(sacrifice: bool) -> usize {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    scenario.add_creature_from_oracle(P0, "Silverquill, the Disputant", 4, 4, SILVERQUILL);
+    scenario.add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN_ILLUMINATUS);
+    let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
+    let mut instant = scenario.add_spell_to_hand_from_oracle(P0, "Zero Draw", true, "Draw a card.");
+    instant.with_mana_cost(ManaCost::zero());
+    let instant = instant.id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&instant].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: instant,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the instant");
+    let mut replicated = false;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                origin,
+                times_kicked,
+                ..
+            } => {
+                let pay = if origin == AdditionalCostOrigin::Replicate {
+                    replicated |= times_kicked == 0;
+                    times_kicked == 0
+                } else {
+                    sacrifice
+                };
+                runner
+                    .act(GameAction::DecideOptionalCost { pay })
+                    .expect("decide a cost");
+            }
+            WaitingFor::PayCost { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![fodder],
+                    })
+                    .expect("sacrifice Fodder");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay {0}");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        replicated,
+        "reach guard: replicate was offered and paid once"
+    );
+    assert_eq!(runner.state().objects[&instant].zone, Zone::Stack);
+    let fodder_zone = if sacrifice {
+        Zone::Graveyard
+    } else {
+        Zone::Battlefield
+    };
+    assert_eq!(runner.state().objects[&fodder].zone, fodder_zone);
+    resolve_and_count_draws(&mut runner)
+}
+
+/// CR 702.153b: a paid replicate is not a casualty payment. With casualty
+/// declined only replicate's copy is made; with it paid casualty's copy
+/// draws a third card.
+#[test]
+fn a_paid_replicate_makes_no_granted_casualty_copy() {
+    assert_eq!(cast_replicated_instant_with_silverquill(false), 2);
+    assert_eq!(cast_replicated_instant_with_silverquill(true), 3);
 }

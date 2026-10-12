@@ -620,18 +620,23 @@ pub(crate) fn handle_decide_additional_cost(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if pending
-        .additional_cost_queue
-        .first()
-        .is_some_and(|instance| {
-            matches!(
-                instance.cost,
-                AdditionalCost::Optional {
-                    repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
-                    ..
-                }
-            )
-        })
+    // CR 118.9d: an alternative-cost choice made with additional costs still
+    // queued or in flow is answered here, not by their handlers.
+    let answers_alternative_cost = matches!(additional_cost, AdditionalCost::Choice(_, _));
+    if !answers_alternative_cost
+        && pending
+            .additional_cost_queue
+            .first()
+            .is_some_and(|instance| {
+                matches!(
+                    instance.cost,
+                    AdditionalCost::Optional {
+                        repeatability:
+                            crate::types::ability::AdditionalCostRepeatability::Repeatable,
+                        ..
+                    }
+                )
+            })
     {
         return handle_decide_repeatable_additional_cost(
             state,
@@ -644,6 +649,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     match (pending.additional_cost_flow.as_ref(), additional_cost) {
+        (_, AdditionalCost::Choice(_, _)) => {}
         (Some(AdditionalCost::Kicker { .. }), _) => {
             return handle_decide_kicker_cost(state, player, pending, pay, events);
         }
@@ -8212,23 +8218,13 @@ fn check_additional_cost_or_pay_with_kept_cost(
             pending.alt_cost_grant_source = alt_cost_grant_source;
             // CR 118.9d: additional costs that affect the spell apply to
             // the alternative cost. Hand the additional-cost authority the
-            // same queue and flow the no-alternative path below would.
+            // queued keyword costs and the required cost.
             pending.additional_cost_queue = additional_cost_queue;
-            pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
-            if additional.is_some() {
-                pending.deferred_required_additional_cost =
-                    required_cost_from_additional(deferred_required);
-            }
-            pending.additional_cost_source = additional_cost_source;
-            if matches!(additional, Some(AdditionalCost::Kicker { .. })) {
-                pending.declared_kickers_to_pay = pending
-                    .ability
-                    .context
-                    .kickers_paid
-                    .iter()
-                    .rev()
-                    .copied()
-                    .collect();
+            if let Some(AdditionalCost::Required(_)) = additional {
+                pending.additional_cost_flow = additional.clone();
+                pending.additional_cost_source = additional_cost_source;
+            } else {
+                pending.additional_cost_flow = deferred_required.clone();
             }
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;

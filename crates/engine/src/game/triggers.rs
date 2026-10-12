@@ -5955,73 +5955,25 @@ fn collect_pending_triggers_with_collection(
             // only fires on SpellCast, which is only emitted for an actual
             // cast — so the cast-ness is already implied by the trigger event
             // itself and a redundant WasCast condition would add nothing.
+            // CR 702.153b: each instance "triggers based on the payments made
+            // for it". Keyword instances list printed ones first, so a recorded
+            // casualty payment past them was made for a granted one at cast.
+            // The payment is read rather than the grant re-evaluated now: "the
+            // first instant or sorcery spell you cast each turn" (Anhelo, the
+            // Painter) no longer counts zero spells once this one is cast. Only
+            // casualty payments count; another paid additional cost (kicker,
+            // replicate) is not one.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
                 .and_then(|obj| {
-                    let paid_ordinals: Vec<u32> = state
-                        .stack
-                        .iter()
-                        .find(|entry| entry.id == *cast_obj_id)
-                        .and_then(|entry| {
-                            entry.ability().map(|ability| {
-                                let ordinals: Vec<_> = ability
-                                    .context
-                                    .additional_cost_payments
-                                    .iter()
-                                    .filter(|payment| {
-                                        payment.origin == AdditionalCostOrigin::Casualty
-                                            && payment.count > 0
-                                    })
-                                    .map(|payment| payment.origin_ordinal)
-                                    .collect();
-                                if ordinals.is_empty() && ability.context.additional_cost_paid {
-                                    vec![0]
-                                } else {
-                                    ordinals
-                                }
-                            })
-                        })
-                        .unwrap_or_else(|| {
-                            let ordinals: Vec<_> = obj
-                                .additional_cost_payments
-                                .iter()
-                                .filter(|payment| {
-                                    payment.origin == AdditionalCostOrigin::Casualty
-                                        && payment.count > 0
-                                })
-                                .map(|payment| payment.origin_ordinal)
-                                .collect();
-                            if ordinals.is_empty() && obj.additional_cost_payment_count > 0 {
-                                vec![0]
-                            } else {
-                                ordinals
-                            }
-                        });
-                    if paid_ordinals.is_empty() {
-                        return None;
-                    }
                     let printed_count = obj
                         .keywords
                         .iter()
                         .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
                         .count();
-                    let effective_count = super::casting::effective_spell_keyword_instances(
-                        state,
-                        obj.controller,
-                        *cast_obj_id,
-                    )
-                    .iter()
-                    .filter(|keyword| matches!(keyword, Keyword::Casualty(_)))
-                    .count();
                     let granted_start = u32::try_from(printed_count).unwrap_or(u32::MAX);
-                    // CR 702.153b: each instance "triggers based on the payments
-                    // made for it". A recorded casualty payment past the printed
-                    // instances was made for a granted one at cast, so it is
-                    // read rather than the grant re-evaluated now: "the first
-                    // instant or sorcery spell you cast each turn" (Anhelo, the
-                    // Painter) no longer counts zero spells once this one is cast.
-                    let recorded_granted_count = state
+                    let n = state
                         .stack
                         .iter()
                         .find(|entry| entry.id == *cast_obj_id)
@@ -6036,17 +5988,6 @@ fn collect_pending_triggers_with_collection(
                                 && payment.origin_ordinal >= granted_start
                         })
                         .count();
-                    let n = if recorded_granted_count > 0 {
-                        recorded_granted_count
-                    } else {
-                        let granted_count = effective_count.saturating_sub(printed_count);
-                        let granted_end = u32::try_from(effective_count).unwrap_or(u32::MAX);
-                        let paid_granted_count = paid_ordinals
-                            .into_iter()
-                            .filter(|ordinal| *ordinal >= granted_start && *ordinal < granted_end)
-                            .count();
-                        granted_count.min(paid_granted_count)
-                    };
                     (n > 0).then_some((n, obj.controller))
                 })
                 .unwrap_or((0, PlayerId(0)));

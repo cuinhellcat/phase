@@ -203,6 +203,14 @@ fn answer_narfi_chapter_one(
     choices
 }
 
+/// The exile zone, sorted: only the chosen cards, never a milled one (CR
+/// 608.2c: the mill's cards are not "exiled this way").
+fn exiled(runner: &GameRunner) -> Vec<ObjectId> {
+    let mut exile: Vec<ObjectId> = runner.state().exile.iter().copied().collect();
+    exile.sort();
+    exile
+}
+
 /// Chapter II's castable cards: the ones linked to the Saga.
 fn narfi_chapter_two_castable(runner: &mut GameRunner) -> Vec<ObjectId> {
     park_for_next_p0_precombat_main(runner);
@@ -233,6 +241,9 @@ fn king_narfis_betrayal_exiles_one_creature_card_from_each_graveyard() {
     assert_eq!(zone_of(&runner, p0_creatures[0]), Zone::Exile);
     assert_eq!(zone_of(&runner, p0_creatures[1]), Zone::Graveyard);
     assert_eq!(zone_of(&runner, p1_creature), Zone::Exile);
+    let mut expected = vec![p0_creatures[0], p1_creature];
+    expected.sort();
+    assert_eq!(exiled(&runner), expected);
 
     // Chapter II: the linked cards are castable until end of turn.
     let castable = narfi_chapter_two_castable(&mut runner);
@@ -261,6 +272,12 @@ fn king_narfis_betrayal_exiles_from_one_graveyard_and_skips_another() {
     assert_eq!(zone_of(&runner, p0_creatures[0]), Zone::Exile);
     assert_eq!(zone_of(&runner, p0_creatures[1]), Zone::Graveyard);
     assert_eq!(zone_of(&runner, p1_creature), Zone::Graveyard);
+    assert_eq!(exiled(&runner), vec![p0_creatures[0]]);
+    assert_eq!(
+        runner.state().players[1].graveyard.len(),
+        5,
+        "P1's card and its four milled"
+    );
 
     let castable = narfi_chapter_two_castable(&mut runner);
     assert!(castable.contains(&p0_creatures[0]), "{castable:?}");
@@ -276,6 +293,17 @@ fn king_narfis_betrayal_can_exile_nothing() {
     for card in [p0_creatures[0], p0_creatures[1], p1_creature] {
         assert_eq!(zone_of(&runner, card), Zone::Graveyard);
     }
+    assert_eq!(exiled(&runner), Vec::<ObjectId>::new());
+    assert_eq!(
+        runner.state().players[0].graveyard.len(),
+        6,
+        "two cards and four milled"
+    );
+    assert_eq!(
+        runner.state().players[1].graveyard.len(),
+        5,
+        "one card and four milled"
+    );
     let castable = narfi_chapter_two_castable(&mut runner);
     for card in [p0_creatures[0], p0_creatures[1], p1_creature] {
         assert!(!castable.contains(&card), "{castable:?}");

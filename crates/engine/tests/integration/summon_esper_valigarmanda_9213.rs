@@ -46,6 +46,11 @@ const ANHELO: &str = "Deathtouch\nThe first instant or sorcery spell you cast ea
 casualty 2. (As you cast that spell, you may sacrifice a creature with power 2 or greater. When \
 you do, copy the spell and you may choose new targets for the copy.)";
 
+/// Djinn Illuminatus's replicate line, verbatim.
+const DJINN_ILLUMINATUS: &str = "Flying\nEach instant and sorcery spell you cast has replicate. \
+The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid \
+its replicate cost. You may choose new targets for the copies.)";
+
 /// Evermind, verbatim: an instant with no mana cost.
 const EVERMIND: &str = "(Nonexistent mana costs can't be paid.)\n\
 Draw a card.\n\
@@ -928,5 +933,77 @@ fn warped_space_keeps_casualty_for_a_card_with_a_printed_cost() {
             hand_before + 2,
             "the card and casualty's copy each draw a card"
         );
+    }
+}
+
+/// CR 118.9d with a repeatable additional cost: P1's `{R}` instant gets
+/// Warped Space's {0} choice and Djinn Illuminatus's replicate. The {0}
+/// answer stays an alternative-cost answer: accepting pays {0} and spends
+/// Warped Space, declining pays `{R}` and leaves it unused. Replicate is
+/// offered after either answer.
+#[test]
+fn warped_space_keeps_replicate_for_a_card_with_a_printed_cost() {
+    for pay_zero in [true, false] {
+        let card = OpponentCard {
+            name: "Linked Draw",
+            instant: true,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            },
+            text: "Draw a card.",
+        };
+        let Board {
+            mut runner,
+            sorcery: linked,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            card,
+            WarpedSpace::Unspent,
+            |scenario| {
+                scenario.add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN_ILLUMINATUS);
+            },
+        );
+        let pool_before = runner.state().players[0].mana_pool.total();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![linked],
+            })
+            .expect("pick the linked card");
+        let mut prompts = Vec::new();
+        for _ in 0..12 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalCostChoice { cost, origin, .. } => {
+                    let alternative = matches!(cost, AdditionalCost::Choice(..));
+                    prompts.push((alternative, origin));
+                    runner
+                        .act(GameAction::DecideOptionalCost {
+                            pay: alternative && pay_zero,
+                        })
+                        .expect("decide a cost");
+                }
+                WaitingFor::ManaPayment { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pay {R}");
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            prompts,
+            vec![
+                (true, AdditionalCostOrigin::Other),
+                (false, AdditionalCostOrigin::Replicate)
+            ]
+        );
+        assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+        let (mana_left, uses) = if pay_zero {
+            (pool_before, 1)
+        } else {
+            (pool_before - 1, 0)
+        };
+        assert_eq!(runner.state().players[0].mana_pool.total(), mana_left);
+        assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), uses);
     }
 }
