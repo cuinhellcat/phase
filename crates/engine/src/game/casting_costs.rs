@@ -1335,6 +1335,9 @@ fn handle_decide_repeatable_additional_cost(
     let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
+            // CR 601.2b: as for a once-only instance, an emptied queue is
+            // decided, so the post-target re-detection does not re-offer it.
+            pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
         }
@@ -1344,6 +1347,9 @@ fn handle_decide_repeatable_additional_cost(
     if !pay {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
+            // CR 601.2b: as for a once-only instance, an emptied queue is
+            // decided, so the post-target re-detection does not re-offer it.
+            pending.additional_cost_decided |= pending.additional_cost_queue.is_empty();
         } else {
             pending.additional_cost_flow = None;
         }
@@ -7615,6 +7621,8 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
 /// CR 601.2b + CR 702.153b: casualty is declared before targets, one queued
 /// instance at a time, so each answer is recorded against its own instance
 /// (printed instances first, then granted ones) for the copy trigger to read.
+/// The rest of the effective queue (replicate, offspring, …) follows it, as
+/// the post-target re-detection is skipped once the queue is decided.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn begin_casualty_before_targets(
     state: &mut GameState,
@@ -7641,8 +7649,7 @@ pub(super) fn begin_casualty_before_targets(
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
-    pending.additional_cost_queue =
-        effective_casualty_additional_cost_instances(state, player, object_id);
+    pending.additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 

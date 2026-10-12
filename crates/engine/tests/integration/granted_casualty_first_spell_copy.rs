@@ -204,6 +204,8 @@ fn cast_targeted_instant_with_silverquill(sacrifice: bool) -> usize {
 enum Casualty {
     Granted,
     Printed,
+    /// Silverquill's casualty plus Djinn Illuminatus's replicate.
+    GrantedWithReplicate,
 }
 
 fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
@@ -216,6 +218,11 @@ fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
             "Target player draws a card."
         }
         Casualty::Printed => "Casualty 1\nTarget player draws a card.",
+        Casualty::GrantedWithReplicate => {
+            scenario.add_creature_from_oracle(P0, "Silverquill, the Disputant", 4, 4, SILVERQUILL);
+            scenario.add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN_ILLUMINATUS);
+            "Target player draws a card."
+        }
     };
     let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
     let mut instant = scenario.add_spell_to_hand_from_oracle(P0, "Targeted Draw", true, text);
@@ -231,15 +238,15 @@ fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast the instant");
-    let mut casualty_offered = false;
+    let mut prompts = Vec::new();
     for _ in 0..12 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { origin, .. } => {
-                assert_eq!(origin, AdditionalCostOrigin::Casualty);
-                casualty_offered = true;
+                prompts.push(origin);
+                let pay = origin == AdditionalCostOrigin::Casualty && sacrifice;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: sacrifice })
-                    .expect("decide casualty");
+                    .act(GameAction::DecideOptionalCost { pay })
+                    .expect("decide a cost");
             }
             WaitingFor::PayCost { .. } => {
                 runner
@@ -261,9 +268,13 @@ fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
             _ => break,
         }
     }
-    assert!(
-        casualty_offered,
-        "reach guard: casualty is offered before targets"
+    let mut expected = vec![AdditionalCostOrigin::Casualty];
+    if matches!(casualty, Casualty::GrantedWithReplicate) {
+        expected.push(AdditionalCostOrigin::Replicate);
+    }
+    assert_eq!(
+        prompts, expected,
+        "casualty, then the rest of the queue, before targets"
     );
     assert_eq!(runner.state().objects[&instant].zone, Zone::Stack);
     let fodder_zone = if sacrifice {
@@ -290,4 +301,14 @@ fn granted_casualty_copies_a_targeted_spell() {
 fn printed_casualty_copies_a_targeted_spell() {
     assert_eq!(cast_targeted_instant(Casualty::Printed, true), 2);
     assert_eq!(cast_targeted_instant(Casualty::Printed, false), 1);
+}
+
+/// CR 601.2b: casualty before targets does not drop the other queued
+/// additional costs: Djinn Illuminatus's replicate is offered after it.
+#[test]
+fn granted_casualty_before_targets_keeps_replicate() {
+    assert_eq!(
+        cast_targeted_instant(Casualty::GrantedWithReplicate, true),
+        2
+    );
 }
