@@ -19,7 +19,7 @@
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{AdditionalCost, EffectKind, TargetRef};
+use engine::types::ability::{AdditionalCost, AdditionalCostOrigin, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -837,4 +837,96 @@ fn warped_space_follows_a_casualty_decision_for_a_card_with_no_mana_cost() {
         runner.state().waiting_for
     );
     assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+}
+
+/// CR 118.9d with a printed cost: P1's `{1}{W}` "Draw a card." instant gets
+/// Warped Space's {0} choice and Anhelo, the Painter's casualty 2. Whichever
+/// cost P0 picks, casualty follows: the 3/3 is sacrificed and the copy draws
+/// a second card. Accepting pays {0} and spends Warped Space; declining pays
+/// `{1}{W}` with the chapter's mana and leaves it unused.
+#[test]
+fn warped_space_keeps_casualty_for_a_card_with_a_printed_cost() {
+    for pay_zero in [true, false] {
+        let card = OpponentCard {
+            name: "Linked Draw",
+            instant: true,
+            cost: white_cost(),
+            text: "Draw a card.",
+        };
+        let mut fodder = None;
+        let Board {
+            mut runner,
+            sorcery: linked,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            card,
+            WarpedSpace::Unspent,
+            |scenario| {
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                fodder = Some(scenario.add_creature(P0, "Fodder", 3, 3).id());
+            },
+        );
+        let fodder = fodder.expect("Fodder is on the battlefield");
+        let pool_before = runner.state().players[0].mana_pool.total();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![linked],
+            })
+            .expect("pick the linked card");
+        let mut prompts = Vec::new();
+        for _ in 0..12 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalCostChoice { cost, origin, .. } => {
+                    let alternative = matches!(cost, AdditionalCost::Choice(..));
+                    let expected_origin = if alternative {
+                        AdditionalCostOrigin::Other
+                    } else {
+                        AdditionalCostOrigin::Casualty
+                    };
+                    assert_eq!(origin, expected_origin, "the prompt names its cost");
+                    prompts.push(if alternative {
+                        "alternative"
+                    } else {
+                        "casualty"
+                    });
+                    runner
+                        .act(GameAction::DecideOptionalCost {
+                            pay: !alternative || pay_zero,
+                        })
+                        .expect("decide a cost");
+                }
+                WaitingFor::PayCost { .. } => {
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![fodder],
+                        })
+                        .expect("sacrifice Fodder");
+                }
+                WaitingFor::ManaPayment { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pay {1}{W}");
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(prompts, vec!["alternative", "casualty"]);
+        assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+        assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+        let (mana_left, uses) = if pay_zero { (pool_before, 1) } else { (0, 0) };
+        assert_eq!(runner.state().players[0].mana_pool.total(), mana_left);
+        assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), uses);
+        let hand_before = runner.state().players[0].hand.len();
+        for _ in 0..20 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("resolve");
+        }
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before + 2,
+            "the card and casualty's copy each draw a card"
+        );
+    }
 }

@@ -530,6 +530,7 @@ fn make_optional_cost_choice(
     let origin = pending
         .additional_cost_queue
         .first()
+        .filter(|instance| instance.cost == cost)
         .map(|instance| instance.origin)
         .unwrap_or(AdditionalCostOrigin::Other);
     let gift_kind = if origin == AdditionalCostOrigin::Gift {
@@ -690,7 +691,14 @@ pub(crate) fn handle_decide_additional_cost(
 
     let pending_before = pending.clone();
     let cost_source = pending.additional_cost_source;
-    let current_instance = pending.additional_cost_queue.first().cloned();
+    // CR 601.2b: only the queue's own prompt answers its first instance. An
+    // alternative-cost choice made with additional costs still queued
+    // (CR 118.9d) leaves them for the additional-cost authority.
+    let current_instance = pending
+        .additional_cost_queue
+        .first()
+        .filter(|instance| instance.cost == *additional_cost)
+        .cloned();
     let mut ability = pending.ability;
 
     // CR 702.166a: Track whether this decision paid an optional additional cost
@@ -8202,8 +8210,26 @@ fn check_additional_cost_or_pay_with_kept_cost(
             pending.origin_zone = origin_zone;
             pending.payment_mode = payment_mode;
             pending.alt_cost_grant_source = alt_cost_grant_source;
-            pending.additional_cost_flow =
-                imposed_required_cost.clone().map(AdditionalCost::Required);
+            // CR 118.9d: additional costs that affect the spell apply to
+            // the alternative cost. Hand the additional-cost authority the
+            // same queue and flow the no-alternative path below would.
+            pending.additional_cost_queue = additional_cost_queue;
+            pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
+            if additional.is_some() {
+                pending.deferred_required_additional_cost =
+                    required_cost_from_additional(deferred_required);
+            }
+            pending.additional_cost_source = additional_cost_source;
+            if matches!(additional, Some(AdditionalCost::Kicker { .. })) {
+                pending.declared_kickers_to_pay = pending
+                    .ability
+                    .context
+                    .kickers_paid
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect();
+            }
             let alt_cost_required_for_timing = cast_timing_permission.is_some()
                 && alt_cost.timing_permission == cast_timing_permission;
             if alt_cost_required_for_timing {
@@ -8247,26 +8273,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     casting_variant,
                 )
             }) {
-                // CR 118.9d: additional costs that affect the spell apply to
-                // the alternative cost. Hand the additional-cost authority the
-                // same queue and flow the no-alternative path below would.
-                pending.additional_cost_queue = additional_cost_queue;
-                pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
-                if additional.is_some() {
-                    pending.deferred_required_additional_cost =
-                        required_cost_from_additional(deferred_required);
-                }
-                pending.additional_cost_source = additional_cost_source;
-                if matches!(additional, Some(AdditionalCost::Kicker { .. })) {
-                    pending.declared_kickers_to_pay = pending
-                        .ability
-                        .context
-                        .kickers_paid
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect();
-                }
                 return apply_only_payable_alternative_cost(
                     state, player, pending, alt_cost, events,
                 );
