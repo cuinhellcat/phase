@@ -3369,6 +3369,7 @@ fn finish_mana_ability_cost_payment(
         pending.player,
         pending.source_id,
         activation_kind,
+        None,
         ability_def.activation_zone.unwrap_or(Zone::Battlefield),
         events,
     );
@@ -5856,6 +5857,7 @@ mod tests {
             lifelink_bonus: 0,
             may_cost_paid: false,
             may_cost_remaining: None,
+            delivery_boundary: None,
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),
@@ -11239,6 +11241,7 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: None,
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));
     }

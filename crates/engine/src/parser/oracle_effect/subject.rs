@@ -19,7 +19,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChosenSubtypeKind, ColorChangeMode, ContinuousModification,
     ControllerRef, CopyRecipient, Duration, EachDamageRecipient, Effect, EffectScope, FilterProp,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -115,7 +115,7 @@ pub(super) fn try_parse_subject_predicate_ast(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ClauseAst> {
-    if try_parse_targeted_controller_gain_life(text).is_some() {
+    if try_parse_targeted_controller_gain_life(text, ctx).is_some() {
         return None;
     }
 
@@ -7431,7 +7431,10 @@ fn try_parse_copula_goaded_clause(
 /// threaded into the emitted `GainLife.player`. CR 108.3 distinguishes owner
 /// from controller (CR 109.4); they differ when the spell controller doesn't own
 /// the targeted permanent.
-pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
+pub(super) fn try_parse_targeted_controller_gain_life(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let (after_prefix, _) = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(lower.as_str())
@@ -7464,45 +7467,17 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     ))
     .parse(after_prefix)
     .ok()?;
-    if !nom_primitives::scan_contains(&lower, "gain")
-        || !nom_primitives::scan_contains(&lower, "life")
-    {
-        return None;
-    }
-    let amount = if nom_primitives::scan_contains(&lower, "equal to its power")
-        || nom_primitives::scan_contains(&lower, "its power")
-    {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Target,
-            },
-        }
-    } else if nom_primitives::scan_contains(&lower, "equal to its toughness")
-        || nom_primitives::scan_contains(&lower, "its toughness")
-    {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Target,
-            },
-        }
-    } else if nom_primitives::scan_contains(&lower, "equal to its mana value")
-        || nom_primitives::scan_contains(&lower, "its mana value")
-    {
-        QuantityExpr::Ref {
-            qty: QuantityRef::ObjectManaValue {
-                scope: crate::types::ability::ObjectScope::Target,
-            },
-        }
-    } else {
-        // Try to parse a fixed amount: "its controller gains 3 life"
-        let after = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
-            .parse(after_subject)
-            .map(|(rest, _)| rest)
-            .unwrap_or(after_subject);
-        QuantityExpr::Fixed {
-            value: parse_number(after).map(|(n, _)| n as i32).unwrap_or(1),
-        }
-    };
+    let (count_text, _) = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
+        .parse(after_subject)
+        .ok()?;
+    // CR 119.3: the life amount is the shared count position ("4 life", "life
+    // equal to its power", "that much life").
+    let mut amount = super::parse_verb_count_slot(&text[text.len() - count_text.len()..], ctx)
+        .filter(|slot| super::imperative::is_life_noun(slot.noun))?
+        .count;
+    // CR 608.2b: "its" is the parent target; reading it from the target keeps
+    // the illegal-target information rule on the count.
+    super::rebind_anaphoric_object_scope(&mut amount, ObjectScope::Target);
     Some(parsed_clause(Effect::GainLife {
         amount,
         player: player_filter,
@@ -8294,7 +8269,7 @@ mod tests {
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
         AbilityKind, BasicLandType, ChoiceType, ContinuousModification, ControllerRef, Effect,
-        TypeFilter,
+        QuantityRef, TypeFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::statics::BlockExceptionKind;
@@ -10257,6 +10232,7 @@ mod tests {
     fn targeted_controller_gains_life_equal_to_target_toughness() {
         let clause = try_parse_targeted_controller_gain_life(
             "Its controller gains life equal to its toughness.",
+            &mut ParseContext::default(),
         )
         .expect("targeted controller gain life clause");
 
@@ -10277,6 +10253,7 @@ mod tests {
     fn targeted_controller_gains_life_equal_to_target_mana_value() {
         let clause = try_parse_targeted_controller_gain_life(
             "Its controller gains life equal to its mana value.",
+            &mut ParseContext::default(),
         )
         .expect("targeted controller mana value gain life clause");
 
@@ -10297,6 +10274,7 @@ mod tests {
     fn targeted_controller_gain_life_accepts_then_prefix() {
         let clause = try_parse_targeted_controller_gain_life(
             "Then its controller gains life equal to its mana value.",
+            &mut ParseContext::default(),
         )
         .expect("chained targeted controller mana value gain life clause");
 
@@ -10315,8 +10293,11 @@ mod tests {
 
     #[test]
     fn targeted_controller_gains_fixed_life_still_parses() {
-        let clause = try_parse_targeted_controller_gain_life("Its controller gains 3 life.")
-            .expect("targeted controller fixed gain life clause");
+        let clause = try_parse_targeted_controller_gain_life(
+            "Its controller gains 3 life.",
+            &mut ParseContext::default(),
+        )
+        .expect("targeted controller fixed gain life clause");
 
         assert!(matches!(
             clause.effect,
@@ -10387,8 +10368,11 @@ mod tests {
         // Misfortune's Gain / Path of Peace: "Its owner gains 4 life." The
         // GainLife player slot must be ParentTargetOwner, not the default
         // Controller. Reverting the fix makes this ParentTargetController.
-        let clause = try_parse_targeted_controller_gain_life("Its owner gains 4 life.")
-            .expect("targeted owner fixed gain life clause");
+        let clause = try_parse_targeted_controller_gain_life(
+            "Its owner gains 4 life.",
+            &mut ParseContext::default(),
+        )
+        .expect("targeted owner fixed gain life clause");
 
         assert!(matches!(
             clause.effect,
@@ -10405,6 +10389,7 @@ mod tests {
         // combinator (parse_det_noun_owner) yields ParentTargetOwner.
         let clause = try_parse_targeted_controller_gain_life(
             "That creature's owner gains life equal to its power.",
+            &mut ParseContext::default(),
         )
         .expect("'that noun's owner' phrasing should route to ParentTargetOwner");
 
@@ -10424,8 +10409,11 @@ mod tests {
     #[test]
     fn targeted_controller_gains_fixed_life_still_routes_to_controller_after_owner_split() {
         // No-regression: the controller arm of the same alt is unaffected.
-        let clause = try_parse_targeted_controller_gain_life("Its controller gains 4 life.")
-            .expect("controller gain life still parses");
+        let clause = try_parse_targeted_controller_gain_life(
+            "Its controller gains 4 life.",
+            &mut ParseContext::default(),
+        )
+        .expect("controller gain life still parses");
         assert!(matches!(
             clause.effect,
             Effect::GainLife {
@@ -10440,6 +10428,7 @@ mod tests {
         // Solitude: "That creature's controller gains life equal to its power."
         let clause = try_parse_targeted_controller_gain_life(
             "That creature's controller gains life equal to its power.",
+            &mut ParseContext::default(),
         )
         .expect("'that noun's controller' phrasing should route to ParentTargetController");
 
@@ -10461,6 +10450,7 @@ mod tests {
         // "The permanent's controller gains life equal to its toughness."
         let clause = try_parse_targeted_controller_gain_life(
             "The permanent's controller gains life equal to its toughness.",
+            &mut ParseContext::default(),
         )
         .expect("'the noun's controller' phrasing should route to ParentTargetController");
 
