@@ -196,17 +196,29 @@ fn a_paid_replicate_makes_no_granted_casualty_copy() {
 /// Silverquill's casualty 1, answering casualty with `sacrifice`; returns the
 /// cards P0 drew.
 fn cast_targeted_instant_with_silverquill(sacrifice: bool) -> usize {
+    cast_targeted_instant(Casualty::Granted, sacrifice)
+}
+
+/// Where the targeted instant's casualty 1 comes from.
+#[derive(Clone, Copy)]
+enum Casualty {
+    Granted,
+    Printed,
+}
+
+fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
-    scenario.add_creature_from_oracle(P0, "Silverquill, the Disputant", 4, 4, SILVERQUILL);
+    let text = match casualty {
+        Casualty::Granted => {
+            scenario.add_creature_from_oracle(P0, "Silverquill, the Disputant", 4, 4, SILVERQUILL);
+            "Target player draws a card."
+        }
+        Casualty::Printed => "Casualty 1\nTarget player draws a card.",
+    };
     let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
-    let mut instant = scenario.add_spell_to_hand_from_oracle(
-        P0,
-        "Targeted Draw",
-        true,
-        "Target player draws a card.",
-    );
+    let mut instant = scenario.add_spell_to_hand_from_oracle(P0, "Targeted Draw", true, text);
     instant.with_mana_cost(ManaCost::zero());
     let instant = instant.id();
     let mut runner = scenario.build();
@@ -269,4 +281,13 @@ fn cast_targeted_instant_with_silverquill(sacrifice: bool) -> usize {
 fn granted_casualty_copies_a_targeted_spell() {
     assert_eq!(cast_targeted_instant_with_silverquill(true), 2);
     assert_eq!(cast_targeted_instant_with_silverquill(false), 1);
+}
+
+/// CR 702.153a: printed casualty on a targeted spell, declared before its
+/// targets, copies it when paid ("When you cast this spell, if a casualty
+/// cost was paid for it, copy it").
+#[test]
+fn printed_casualty_copies_a_targeted_spell() {
+    assert_eq!(cast_targeted_instant(Casualty::Printed, true), 2);
+    assert_eq!(cast_targeted_instant(Casualty::Printed, false), 1);
 }
