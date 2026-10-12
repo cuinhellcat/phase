@@ -8,7 +8,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::AdditionalCostOrigin;
+use engine::types::ability::{AdditionalCostOrigin, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -72,6 +72,12 @@ fn resolve_and_count_draws(runner: &mut GameRunner) -> usize {
     let hand_before = runner.state().players[0].hand.len();
     for _ in 0..20 {
         drain_order_triggers_with_identity(runner.state_mut());
+        if matches!(runner.state().waiting_for, WaitingFor::CopyRetarget { .. }) {
+            runner
+                .act(GameAction::KeepAllCopyTargets)
+                .expect("keep the copy's targets");
+            continue;
+        }
         if runner.state().stack.is_empty() {
             break;
         }
@@ -184,4 +190,83 @@ fn cast_replicated_instant_with_silverquill(sacrifice: bool) -> usize {
 fn a_paid_replicate_makes_no_granted_casualty_copy() {
     assert_eq!(cast_replicated_instant_with_silverquill(false), 2);
     assert_eq!(cast_replicated_instant_with_silverquill(true), 3);
+}
+
+/// Cast a `{0}` "Target player draws a card." instant targeting P0 with
+/// Silverquill's casualty 1, answering casualty with `sacrifice`; returns the
+/// cards P0 drew.
+fn cast_targeted_instant_with_silverquill(sacrifice: bool) -> usize {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    scenario.add_creature_from_oracle(P0, "Silverquill, the Disputant", 4, 4, SILVERQUILL);
+    let fodder = scenario.add_creature(P0, "Fodder", 1, 1).id();
+    let mut instant = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Targeted Draw",
+        true,
+        "Target player draws a card.",
+    );
+    instant.with_mana_cost(ManaCost::zero());
+    let instant = instant.id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&instant].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: instant,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the instant");
+    let mut casualty_offered = false;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { origin, .. } => {
+                assert_eq!(origin, AdditionalCostOrigin::Casualty);
+                casualty_offered = true;
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: sacrifice })
+                    .expect("decide casualty");
+            }
+            WaitingFor::PayCost { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![fodder],
+                    })
+                    .expect("sacrifice Fodder");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P0)],
+                    })
+                    .expect("target P0");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay {0}");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        casualty_offered,
+        "reach guard: casualty is offered before targets"
+    );
+    assert_eq!(runner.state().objects[&instant].zone, Zone::Stack);
+    let fodder_zone = if sacrifice {
+        Zone::Graveyard
+    } else {
+        Zone::Battlefield
+    };
+    assert_eq!(runner.state().objects[&fodder].zone, fodder_zone);
+    resolve_and_count_draws(&mut runner)
+}
+
+/// CR 601.2b + CR 702.153b: a targeted spell declares casualty before its
+/// targets; the paid casualty still copies it, a declined one does not.
+#[test]
+fn granted_casualty_copies_a_targeted_spell() {
+    assert_eq!(cast_targeted_instant_with_silverquill(true), 2);
+    assert_eq!(cast_targeted_instant_with_silverquill(false), 1);
 }

@@ -19158,10 +19158,10 @@ fn continue_with_prepared(
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
         // selection path so the sacrifice prompt appears first.
-        if let Some(casualty_cost) =
-            casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+        if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+            .is_some()
         {
-            return casting_costs::begin_optional_cost_before_targets(
+            return casting_costs::begin_casualty_before_targets(
                 state,
                 player,
                 prepared.object_id,
@@ -19169,8 +19169,6 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
-                casualty_cost,
-                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.casting_permission_index,
                 prepared.cast_timing_permission,

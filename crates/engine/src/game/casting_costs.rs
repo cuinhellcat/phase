@@ -7612,6 +7612,40 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     }
 }
 
+/// CR 601.2b + CR 702.153b: casualty is declared before targets, one queued
+/// instance at a time, so each answer is recorded against its own instance
+/// (printed instances first, then granted ones) for the copy trigger to read.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_casualty_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    base_cost: Option<ManaCost>,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.base_cost = base_cost;
+    pending.casting_variant = casting_variant;
+    pending.casting_permission_index = casting_permission_index;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    pending.deferred_target_selection = true;
+    pending.additional_cost_queue =
+        effective_casualty_additional_cost_instances(state, player, object_id);
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 601.2b: Present an optional additional cost (e.g. Casualty) to the player
 /// BEFORE target selection. Creates a PendingCast with deferred_target_selection = true
 /// so targets are chosen after the cost decision and any required sacrifice.
