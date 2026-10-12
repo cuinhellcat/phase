@@ -8247,6 +8247,26 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     casting_variant,
                 )
             }) {
+                // CR 118.9d: additional costs that affect the spell apply to
+                // the alternative cost. Hand the additional-cost authority the
+                // same queue and flow the no-alternative path below would.
+                pending.additional_cost_queue = additional_cost_queue;
+                pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
+                if additional.is_some() {
+                    pending.deferred_required_additional_cost =
+                        required_cost_from_additional(deferred_required);
+                }
+                pending.additional_cost_source = additional_cost_source;
+                if matches!(additional, Some(AdditionalCost::Kicker { .. })) {
+                    pending.declared_kickers_to_pay = pending
+                        .ability
+                        .context
+                        .kickers_paid
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect();
+                }
                 return apply_only_payable_alternative_cost(
                     state, player, pending, alt_cost, events,
                 );

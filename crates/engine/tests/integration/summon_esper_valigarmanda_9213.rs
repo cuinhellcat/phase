@@ -690,6 +690,96 @@ fn warped_space_reaches_the_opponents_linked_card() {
     }
 }
 
+/// CR 118.9d: "If an alternative cost is being paid to cast a spell, any
+/// additional costs, cost increases, and cost reductions that affect that
+/// spell are applied to that alternative cost." Untargeted Evermind with
+/// Anhelo, the Painter's casualty 2 and Warped Space: casualty is offered
+/// after the {0} is applied. Accepting sacrifices the 3/3 and copies the
+/// spell (CR 702.153a); declining keeps it. Both cast for {0} and spend
+/// Warped Space once.
+#[test]
+fn warped_space_keeps_casualty_for_a_card_with_no_mana_cost() {
+    for sacrifice in [true, false] {
+        let evermind = OpponentCard {
+            name: "Evermind",
+            instant: true,
+            cost: ManaCost::NoCost,
+            text: EVERMIND,
+        };
+        let mut fodder = None;
+        let Board {
+            mut runner,
+            sorcery: evermind,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            evermind,
+            WarpedSpace::Unspent,
+            |scenario| {
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                fodder = Some(scenario.add_creature(P0, "Fodder", 3, 3).id());
+            },
+        );
+        let fodder = fodder.expect("Fodder is on the battlefield");
+        let pool_before = runner.state().players[0].mana_pool.total();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![evermind],
+            })
+            .expect("pick Evermind");
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Optional { .. },
+                    ..
+                }
+            ),
+            "casualty is offered, found {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: sacrifice })
+            .expect("decide casualty");
+        if sacrifice && runner.state().objects[&fodder].zone == Zone::Battlefield {
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![fodder],
+                })
+                .expect("sacrifice Fodder");
+        }
+        assert_eq!(
+            runner.state().objects[&evermind].zone,
+            Zone::Stack,
+            "cast for {{0}}, found {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), pool_before);
+        assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+        let fodder_zone = if sacrifice {
+            Zone::Graveyard
+        } else {
+            Zone::Battlefield
+        };
+        assert_eq!(runner.state().objects[&fodder].zone, fodder_zone);
+        let hand_before = runner.state().players[0].hand.len();
+        for _ in 0..20 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("resolve");
+        }
+        assert!(runner.state().stack.is_empty());
+        let draws = if sacrifice { 2 } else { 1 };
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before + draws,
+            "Evermind and casualty's copy each draw a card"
+        );
+    }
+}
+
 /// CR 118.6a + CR 601.2b: an additional cost decided before targets (Anhelo,
 /// the Painter's granted casualty) does not skip Warped Space's {0} for a
 /// targeted linked card with no mana cost: after casualty and targets it is
