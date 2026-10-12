@@ -44425,6 +44425,23 @@ fn parse_effect_chain_ir_body(
         } else {
             is_optional
         };
+        // CR 608.2c + CR 608.2d: "you may exile a creature or planeswalker card
+        // from each graveyard" (King Narfi's Betrayal; ruling: "For each
+        // graveyard, you may exile a creature or planeswalker card") is one
+        // choice per graveyard, so the "may" becomes each pick's `up_to`. A
+        // random pick has no per-graveyard decision and keeps the gate.
+        let is_optional = match &mut clause.effect {
+            Effect::ChooseFromZone {
+                zone_owner: crate::types::ability::ZoneOwner::Each(_),
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                up_to,
+                ..
+            } if is_optional => {
+                *up_to = true;
+                false
+            }
+            _ => is_optional,
+        };
 
         // CR 608.2c: "Instead" overrides — marker for lowering to attach as
         // sub_ability on the previous def.

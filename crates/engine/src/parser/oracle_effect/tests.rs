@@ -82715,6 +82715,37 @@ fn exile_a_card_from_each_graveyard_chooses_one_per_graveyard() {
     }
 }
 
+/// CR 608.2c + CR 608.2d: "you may exile a creature or planeswalker card from
+/// each graveyard" (King Narfi's Betrayal; ruling: "For each graveyard, you
+/// may exile a creature or planeswalker card") decides per graveyard: the
+/// "may" is each pick's `up_to`, with no upfront gate. A mandatory pick stays
+/// exact, and a random pick keeps the one upfront "may".
+#[test]
+fn you_may_exile_a_card_from_each_graveyard_decides_per_graveyard() {
+    let shape = |text: &str| {
+        let chain = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::ChooseFromZone {
+            up_to, selection, ..
+        } = &*chain.effect
+        else {
+            panic!("{text}: {:?}", chain.effect);
+        };
+        (*up_to, chain.optional, *selection)
+    };
+    assert_eq!(
+        shape("You may exile a creature or planeswalker card from each graveyard."),
+        (true, false, CardSelectionMode::Chosen)
+    );
+    assert_eq!(
+        shape("Exile an instant or sorcery card from each graveyard."),
+        (false, false, CardSelectionMode::Chosen)
+    );
+    assert_eq!(
+        shape("You may exile a card at random from each opponent's graveyard."),
+        (false, true, CardSelectionMode::Random)
+    );
+}
+
 /// CR 608.2c: "each player who <unmodelled clause> …" (Kefka, Dancing Mad:
 /// "each player who owns a spell you cast this way loses life equal to its
 /// mana value") is an `unbound_subject` gap, never "each player". The
