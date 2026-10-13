@@ -2749,26 +2749,8 @@ fn granted_spell_keyword_instances_for(
     let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
-    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
-        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
-            continue;
-        };
-
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
-        if matches {
-            merge_spell_keyword(&mut keywords, keyword.clone(), true);
-        }
+    for (_, keyword) in static_spell_keyword_grants(state, caster, spell_obj, origin_zone, fused) {
+        merge_spell_keyword(&mut keywords, keyword.clone(), true);
     }
 
     transient_granted_spell_keywords_for(
@@ -2794,6 +2776,94 @@ fn granted_spell_keyword_instances_for(
     }
 
     keywords
+}
+
+/// CR 611.3b: each functioning `CastWithKeyword` static that grants its keyword
+/// to this spell, with the permanent generating it, in scan order.
+fn static_spell_keyword_grants<'a>(
+    state: &'a GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    fused: bool,
+) -> Vec<(ObjectId, &'a Keyword)> {
+    super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(source_obj, def)| {
+            let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+                return None;
+            };
+            def.affected
+                .as_ref()
+                .is_none_or(|filter| {
+                    super::filter::spell_object_matches_filter_from_state_for(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        filter,
+                        source_obj.id,
+                        &state.all_creature_types,
+                        fused,
+                    )
+                })
+                .then_some((source_obj.id, keyword))
+        })
+        .collect()
+}
+
+/// CR 611.2f + CR 611.3b: stamp the cast-time snapshot read by the SpellCast
+/// trigger seams: the spell's effective keyword instances, and which
+/// permanents' casualty grants still apply. Taken before the spell is recorded
+/// in the turn's history, so "first spell each turn" grants still attach.
+pub(crate) fn snapshot_cast_spell_keywords(
+    state: &mut GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) {
+    let cast_spell_keywords = effective_spell_keyword_instances(state, caster, object_id);
+    let cast_casualty_grant_sources = effective_casualty_grant_sources(state, caster, object_id)
+        .into_iter()
+        .flatten()
+        .collect();
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_spell_keywords = cast_spell_keywords;
+        obj.cast_casualty_grant_sources = cast_casualty_grant_sources;
+    }
+}
+
+/// CR 611.3b + CR 702.153b: the permanent whose static grants each casualty
+/// instance of this spell, aligned with the casualty ordinals of
+/// [`effective_spell_keyword_instances`]. A printed instance, and a grant no
+/// permanent generates (a resolved effect, a next-spell modifier), is `None`.
+pub(crate) fn effective_casualty_grant_sources(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Vec<Option<ObjectId>> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    let is_casualty = |keyword: &Keyword| matches!(keyword, Keyword::Casualty(_));
+    let mut sources = vec![None; obj.keywords.iter().filter(|k| is_casualty(k)).count()];
+    sources.extend(
+        static_spell_keyword_grants(
+            state,
+            caster,
+            obj,
+            spell_cast_origin_zone(state, obj),
+            false,
+        )
+        .into_iter()
+        .filter(|(_, keyword)| is_casualty(keyword))
+        .map(|(source, _)| Some(source)),
+    );
+    // Player-scoped and next-spell grants follow the statics.
+    let total = effective_spell_keyword_instances(state, caster, object_id)
+        .iter()
+        .filter(|k| is_casualty(k))
+        .count();
+    sources.resize(total, None);
+    sources
 }
 
 /// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,

@@ -1930,11 +1930,7 @@ fn cast_stack_spell_copy_during_resolution(
     // mirrors `casting_costs::finalize_cast_with_phyrexian_choices_inner` and
     // preserves the selected static-grant instances/provenance for cast-trigger
     // synthesis (notably multiple Ripple grants) after the event is recorded.
-    let cast_spell_keywords =
-        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
-    if let Some(copy) = state.objects.get_mut(&copy_id) {
-        copy.cast_spell_keywords = cast_spell_keywords;
-    }
+    crate::game::casting::snapshot_cast_spell_keywords(state, ability.controller, copy_id);
 
     if crate::game::effects::prepare::open_copy_target_selection(
         state,

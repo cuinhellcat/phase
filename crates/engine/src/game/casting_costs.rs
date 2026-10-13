@@ -723,11 +723,7 @@ pub(crate) fn handle_decide_additional_cost(
         } => {
             if pay {
                 if let Some(instance) = current_instance.as_ref() {
-                    ability.context.record_additional_cost_instance_payment(
-                        instance.origin,
-                        instance.origin_ordinal,
-                        1,
-                    );
+                    ability.context.record_payment_for_instance(instance, 1);
                 } else {
                     ability
                         .context
@@ -804,11 +800,7 @@ pub(crate) fn handle_decide_additional_cost(
             // Required costs are always paid — the choice prompt should not be reached,
             // but handle defensively by always paying.
             if let Some(instance) = current_instance.as_ref() {
-                ability.context.record_additional_cost_instance_payment(
-                    instance.origin,
-                    instance.origin_ordinal,
-                    1,
-                );
+                ability.context.record_payment_for_instance(instance, 1);
             } else {
                 ability
                     .context
@@ -10880,6 +10872,7 @@ pub(super) fn effective_casualty_additional_cost_instances(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Vec<AdditionalCostInstance> {
+    let grant_sources = super::casting::effective_casualty_grant_sources(state, player, object_id);
     super::casting::effective_spell_keyword_instances(state, player, object_id)
         .into_iter()
         .filter_map(|keyword| match keyword {
@@ -10908,6 +10901,7 @@ pub(super) fn effective_casualty_additional_cost_instances(
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 },
             )
+            .with_grant_source(grant_sources.get(ordinal).copied().flatten())
         })
         .collect()
 }
@@ -12908,11 +12902,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // read this snapshot instead of re-querying the now-incremented grant. Uses
     // `effective_spell_keyword_instances` so multi-instance keywords (Cascade x2,
     // Ripple) are preserved, matching what the seams' instance counting expects.
-    let cast_spell_keywords =
-        super::casting::effective_spell_keyword_instances(state, player, object_id);
-    if let Some(obj_mut) = state.objects.get_mut(&object_id) {
-        obj_mut.cast_spell_keywords = cast_spell_keywords;
-    }
+    // CR 611.3b: a casualty grant whose permanent left while costs were paid
+    // (Silverquill sacrificed for its own casualty) is not in the snapshot.
+    super::casting::snapshot_cast_spell_keywords(state, player, object_id);
 
     let obj = state
         .objects

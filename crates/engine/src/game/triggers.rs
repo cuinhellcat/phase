@@ -5958,11 +5958,14 @@ fn collect_pending_triggers_with_collection(
             // CR 702.153b: each instance "triggers based on the payments made
             // for it". Keyword instances list printed ones first, so a recorded
             // casualty payment past them was made for a granted one at cast.
-            // The payment is read rather than the grant re-evaluated now: "the
-            // first instant or sorcery spell you cast each turn" (Anhelo, the
-            // Painter) no longer counts zero spells once this one is cast. Only
-            // casualty payments count; another paid additional cost (kicker,
-            // replicate) is not one.
+            // The grant is read from the cast-time snapshot, not re-evaluated
+            // now: "the first instant or sorcery spell you cast each turn"
+            // (Anhelo, the Painter) no longer counts zero spells once this one
+            // is cast. CR 611.3b: a grant whose permanent left before the spell
+            // became cast (Silverquill, the Disputant sacrificed for its own
+            // casualty) is not in the snapshot, so its payment makes no copy.
+            // Only casualty payments count; another paid additional cost
+            // (kicker, replicate) is not one.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
@@ -5986,6 +5989,9 @@ fn collect_pending_triggers_with_collection(
                             payment.origin == AdditionalCostOrigin::Casualty
                                 && payment.count > 0
                                 && payment.origin_ordinal >= granted_start
+                                && payment.grant_source.is_none_or(|source| {
+                                    obj.cast_casualty_grant_sources.contains(&source)
+                                })
                         })
                         .count();
                     (n > 0).then_some((n, obj.controller))
@@ -39070,6 +39076,7 @@ pub mod tests {
                     origin: AdditionalCostOrigin::Replicate,
                     origin_ordinal: 0,
                     count: 1,
+                    grant_source: None,
                 },
             );
         }
