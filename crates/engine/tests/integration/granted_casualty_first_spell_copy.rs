@@ -12,7 +12,10 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{AdditionalCostOrigin, TargetRef};
+use engine::types::ability::{
+    AbilityCost, AdditionalCost, AdditionalCostOrigin, FilterProp, QuantityExpr, SacrificeCost,
+    TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -317,6 +320,45 @@ fn granted_casualty_before_targets_keeps_replicate() {
     );
 }
 
+/// Which card a casualty instance comes from, read from its sacrifice
+/// threshold: Silverquill grants casualty 1, Anhelo casualty 2, and the
+/// printed instance of [`cast_with_casualty_sources`] is casualty 3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Instance {
+    Silverquill,
+    Anhelo,
+    Printed,
+}
+
+impl Instance {
+    fn of(cost: &AdditionalCost) -> Self {
+        let AdditionalCost::Optional {
+            cost:
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::Typed(filter),
+                    ..
+                }),
+            ..
+        } = cost
+        else {
+            panic!("casualty is an optional sacrifice, found {cost:?}");
+        };
+        let power = filter.properties.iter().find_map(|prop| match prop {
+            FilterProp::PtComparison {
+                value: QuantityExpr::Fixed { value },
+                ..
+            } => Some(*value),
+            _ => None,
+        });
+        match power {
+            Some(1) => Instance::Silverquill,
+            Some(2) => Instance::Anhelo,
+            Some(3) => Instance::Printed,
+            other => panic!("unexpected casualty threshold {other:?}"),
+        }
+    }
+}
+
 /// The creatures of [`cast_with_casualty_sources`].
 struct Board {
     silverquill: ObjectId,
@@ -324,15 +366,14 @@ struct Board {
 }
 
 /// Cast a `{0}` "Draw a card." instant with Silverquill's casualty 1, Anhelo's
-/// casualty 2 when `anhelo`, and a printed casualty 1 when `printed`. Each
-/// casualty prompt is answered by `sacrifice` from the offered instance's
-/// grant source (`None` for the printed one): the creature to sacrifice, or
-/// `None` to decline. Returns the board and the cards drawn.
+/// casualty 2 when `anhelo`, and a printed casualty 3 when `printed`. Each
+/// casualty prompt is answered by `sacrifice`: the creature to sacrifice for
+/// that instance, or `None` to decline. Returns the cards drawn.
 fn cast_with_casualty_sources(
     printed: bool,
     anhelo: bool,
-    sacrifice: impl Fn(&Board, Option<ObjectId>) -> Option<ObjectId>,
-) -> (Board, usize) {
+    sacrifice: impl Fn(&Board, Instance) -> Option<ObjectId>,
+) -> usize {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
@@ -345,11 +386,11 @@ fn cast_with_casualty_sources(
             .id()
     });
     let fodder = [
-        scenario.add_creature(P0, "Fodder A", 2, 2).id(),
-        scenario.add_creature(P0, "Fodder B", 2, 2).id(),
+        scenario.add_creature(P0, "Fodder A", 3, 3).id(),
+        scenario.add_creature(P0, "Fodder B", 3, 3).id(),
     ];
     let text = if printed {
-        "Casualty 1\nDraw a card."
+        "Casualty 3\nDraw a card."
     } else {
         "Draw a card."
     };
@@ -376,13 +417,24 @@ fn cast_with_casualty_sources(
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice {
                 origin,
+                cost,
                 pending_cast,
                 ..
             } => {
                 assert_eq!(origin, AdditionalCostOrigin::Casualty);
-                let source = pending_cast.additional_cost_queue[0].grant_source;
-                offered.push(source);
-                chosen = sacrifice(&board, source);
+                let instance = Instance::of(&cost);
+                // The instance names the permanent that grants it.
+                let grant_source = match instance {
+                    Instance::Silverquill => Some(silverquill),
+                    Instance::Anhelo => anhelo,
+                    Instance::Printed => None,
+                };
+                assert_eq!(
+                    pending_cast.additional_cost_queue[0].grant_source, grant_source,
+                    "{instance:?} names its granting permanent"
+                );
+                offered.push(instance);
+                chosen = sacrifice(&board, instance);
                 runner
                     .act(GameAction::DecideOptionalCost {
                         pay: chosen.is_some(),
@@ -403,23 +455,20 @@ fn cast_with_casualty_sources(
             _ => break,
         }
     }
-    let mut expected = Vec::new();
-    if printed {
-        expected.push(None);
+    let mut expected = vec![Instance::Silverquill];
+    if anhelo.is_some() {
+        expected.push(Instance::Anhelo);
     }
-    expected.push(Some(silverquill));
-    if let Some(anhelo) = anhelo {
-        expected.push(Some(anhelo));
+    if printed {
+        expected.push(Instance::Printed);
     }
     offered.sort();
-    expected.sort();
     assert_eq!(
         offered, expected,
         "reach guard: each casualty instance is offered"
     );
     assert_eq!(runner.state().objects[&instant].zone, Zone::Stack);
-    let draws = resolve_and_count_draws(&mut runner);
-    (board, draws)
+    resolve_and_count_draws(&mut runner)
 }
 
 /// CR 611.3b + CR 601.2i: Silverquill sacrificed for its own casualty has left
@@ -427,9 +476,9 @@ fn cast_with_casualty_sources(
 /// no copy is made. Sacrificing another creature for it copies the spell.
 #[test]
 fn silverquill_sacrificed_for_its_own_casualty_makes_no_copy() {
-    let (_, draws) = cast_with_casualty_sources(false, false, |b, _| Some(b.silverquill));
+    let draws = cast_with_casualty_sources(false, false, |b, _| Some(b.silverquill));
     assert_eq!(draws, 1, "no casualty copy");
-    let (_, draws) = cast_with_casualty_sources(false, false, |b, _| Some(b.fodder[0]));
+    let draws = cast_with_casualty_sources(false, false, |b, _| Some(b.fodder[0]));
     assert_eq!(draws, 2, "another creature paid it: the copy draws too");
 }
 
@@ -438,37 +487,29 @@ fn silverquill_sacrificed_for_its_own_casualty_makes_no_copy() {
 /// permanent is still there when the spell becomes cast.
 #[test]
 fn each_granted_casualty_copies_only_while_its_source_remains() {
-    let only = |paid: fn(&Board) -> Option<ObjectId>, own: bool| {
-        move |b: &Board, source: Option<ObjectId>| {
-            let is_silverquill = source == Some(b.silverquill);
-            if is_silverquill == own {
-                paid(b)
-            } else {
-                None
-            }
-        }
-    };
     // Silverquill pays its own instance; Anhelo's is declined.
-    let (_, draws) = cast_with_casualty_sources(false, true, only(|b| Some(b.silverquill), true));
+    let draws = cast_with_casualty_sources(false, true, |b, instance| {
+        (instance == Instance::Silverquill).then_some(b.silverquill)
+    });
     assert_eq!(draws, 1, "Silverquill's grant left with it");
     // Silverquill pays Anhelo's instance; Silverquill's is declined.
-    let (_, draws) = cast_with_casualty_sources(false, true, only(|b| Some(b.silverquill), false));
+    let draws = cast_with_casualty_sources(false, true, |b, instance| {
+        (instance == Instance::Anhelo).then_some(b.silverquill)
+    });
     assert_eq!(draws, 2, "Anhelo's grant remains, so its payment copies");
     // Fodder pays Silverquill's instance, Silverquill pays Anhelo's.
-    let (_, draws) = cast_with_casualty_sources(false, true, |b, source| {
-        Some(if source == Some(b.silverquill) {
-            b.fodder[0]
-        } else {
-            b.silverquill
+    let draws = cast_with_casualty_sources(false, true, |b, instance| {
+        Some(match instance {
+            Instance::Silverquill => b.fodder[0],
+            _ => b.silverquill,
         })
     });
     assert_eq!(draws, 2, "only Anhelo's instance copies");
     // Separate fodder for both: both grants remain.
-    let (_, draws) = cast_with_casualty_sources(false, true, |b, source| {
-        Some(if source == Some(b.silverquill) {
-            b.fodder[0]
-        } else {
-            b.fodder[1]
+    let draws = cast_with_casualty_sources(false, true, |b, instance| {
+        Some(match instance {
+            Instance::Silverquill => b.fodder[0],
+            _ => b.fodder[1],
         })
     });
     assert_eq!(draws, 3, "both instances copy");
@@ -476,22 +517,20 @@ fn each_granted_casualty_copies_only_while_its_source_remains() {
 
 /// CR 702.153a: printed casualty is the spell's own and stays when Silverquill
 /// is sacrificed for it; Silverquill's queued instance, paid with another
-/// creature afterwards, no longer applies.
+/// creature, no longer applies.
 #[test]
 fn printed_casualty_copies_when_silverquill_is_sacrificed_for_it() {
-    let (_, draws) = cast_with_casualty_sources(true, false, |b, source| {
-        Some(if source.is_none() {
-            b.silverquill
-        } else {
-            b.fodder[0]
+    let draws = cast_with_casualty_sources(true, false, |b, instance| {
+        Some(match instance {
+            Instance::Printed => b.silverquill,
+            _ => b.fodder[0],
         })
     });
     assert_eq!(draws, 2, "only the printed instance copies");
-    let (_, draws) = cast_with_casualty_sources(true, false, |b, source| {
-        Some(if source.is_none() {
-            b.fodder[0]
-        } else {
-            b.fodder[1]
+    let draws = cast_with_casualty_sources(true, false, |b, instance| {
+        Some(match instance {
+            Instance::Printed => b.fodder[0],
+            _ => b.fodder[1],
         })
     });
     assert_eq!(draws, 3, "printed and granted instances each copy");
