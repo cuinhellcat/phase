@@ -2847,6 +2847,7 @@ pub(crate) fn effective_casualty_grant_sources(
         return Vec::new();
     };
     let is_casualty = |keyword: &Keyword| matches!(keyword, Keyword::Casualty(_));
+    // allow-raw-authority: counts the instances at the head of `effective_spell_keyword_instances` (its `obj.keywords` base); the helpers only answer has/has-not.
     let mut sources = vec![None; obj.keywords.iter().filter(|k| is_casualty(k)).count()];
     sources.extend(
         static_spell_keyword_grants(
