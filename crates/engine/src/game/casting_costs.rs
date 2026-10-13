@@ -1321,9 +1321,6 @@ fn handle_decide_repeatable_additional_cost(
     let pending_before = pending.clone();
     let queued_instance = pending.additional_cost_queue.first().cloned();
     let queued_origin = queued_instance.as_ref().map(|instance| instance.origin);
-    let queued_origin_ordinal = queued_instance
-        .as_ref()
-        .map(|instance| instance.origin_ordinal);
     let Some(cost) = next_repeatable_additional_cost(state, player, &pending) else {
         if queued_origin.is_some() {
             pending.additional_cost_queue.remove(0);
@@ -1348,11 +1345,11 @@ fn handle_decide_repeatable_additional_cost(
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    if let (Some(origin), Some(origin_ordinal)) = (queued_origin, queued_origin_ordinal) {
+    if let Some(instance) = queued_instance.as_ref() {
         pending
             .ability
             .context
-            .record_additional_cost_instance_payment(origin, origin_ordinal, 1);
+            .record_payment_for_instance(instance, 1);
     } else {
         pending
             .ability
@@ -10872,8 +10869,10 @@ pub(super) fn effective_casualty_additional_cost_instances(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Vec<AdditionalCostInstance> {
-    let grant_sources = super::casting::effective_casualty_grant_sources(state, player, object_id);
-    super::casting::effective_spell_keyword_instances(state, player, object_id)
+    let keywords = super::casting::effective_spell_keyword_instances(state, player, object_id);
+    let grant_sources =
+        super::casting::effective_casualty_grant_sources(state, player, object_id, &keywords);
+    keywords
         .into_iter()
         .filter_map(|keyword| match keyword {
             Keyword::Casualty(threshold) => Some(threshold),

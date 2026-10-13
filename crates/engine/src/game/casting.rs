@@ -2811,7 +2811,7 @@ fn static_spell_keyword_grants<'a>(
         .collect()
 }
 
-/// CR 611.2f + CR 611.3b: stamp the cast-time snapshot read by the SpellCast
+/// CR 601.2i + CR 611.3b: stamp the cast-time snapshot read by the SpellCast
 /// trigger seams: the spell's effective keyword instances, and which
 /// permanents' casualty grants still apply. Taken before the spell is recorded
 /// in the turn's history, so "first spell each turn" grants still attach.
@@ -2821,10 +2821,11 @@ pub(crate) fn snapshot_cast_spell_keywords(
     object_id: ObjectId,
 ) {
     let cast_spell_keywords = effective_spell_keyword_instances(state, caster, object_id);
-    let cast_casualty_grant_sources = effective_casualty_grant_sources(state, caster, object_id)
-        .into_iter()
-        .flatten()
-        .collect();
+    let cast_casualty_grant_sources =
+        effective_casualty_grant_sources(state, caster, object_id, &cast_spell_keywords)
+            .into_iter()
+            .flatten()
+            .collect();
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.cast_spell_keywords = cast_spell_keywords;
         obj.cast_casualty_grant_sources = cast_casualty_grant_sources;
@@ -2833,12 +2834,14 @@ pub(crate) fn snapshot_cast_spell_keywords(
 
 /// CR 611.3b + CR 702.153b: the permanent whose static grants each casualty
 /// instance of this spell, aligned with the casualty ordinals of
-/// [`effective_spell_keyword_instances`]. A printed instance, and a grant no
-/// permanent generates (a resolved effect, a next-spell modifier), is `None`.
+/// [`effective_spell_keyword_instances`], passed in as `keywords`. A printed
+/// instance, and a grant no permanent generates (a resolved effect, a
+/// next-spell modifier), is `None`.
 pub(crate) fn effective_casualty_grant_sources(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
+    keywords: &[Keyword],
 ) -> Vec<Option<ObjectId>> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -2858,10 +2861,11 @@ pub(crate) fn effective_casualty_grant_sources(
         .map(|(source, _)| Some(source)),
     );
     // Player-scoped and next-spell grants follow the statics.
-    let total = effective_spell_keyword_instances(state, caster, object_id)
-        .iter()
-        .filter(|k| is_casualty(k))
-        .count();
+    let total = keywords.iter().filter(|k| is_casualty(k)).count();
+    debug_assert!(
+        sources.len() <= total,
+        "a static casualty grant is a keyword instance"
+    );
     sources.resize(total, None);
     sources
 }

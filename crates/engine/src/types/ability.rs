@@ -29355,33 +29355,35 @@ impl SpellContext {
         origin_ordinal: u32,
         count: u32,
     ) {
-        if count == 0 {
-            return;
-        }
-        self.additional_cost_payments
-            .push(AdditionalCostInstancePayment::new_with_ordinal(
-                origin,
-                origin_ordinal,
-                count,
-            ));
-        self.additional_cost_paid = true;
-        self.additional_cost_payment_count =
-            self.additional_cost_payment_count.saturating_add(count);
+        self.record_instance_payment(AdditionalCostInstancePayment::new_with_ordinal(
+            origin,
+            origin_ordinal,
+            count,
+        ));
     }
 
     /// CR 702.153b: record a payment for one queued instance, keeping the
     /// instance's `grant_source` on the payment.
     pub fn record_payment_for_instance(&mut self, instance: &AdditionalCostInstance, count: u32) {
-        self.record_additional_cost_instance_payment(
-            instance.origin,
-            instance.origin_ordinal,
-            count,
-        );
-        if count > 0 {
-            if let Some(payment) = self.additional_cost_payments.last_mut() {
-                payment.grant_source = instance.grant_source;
-            }
+        self.record_instance_payment(AdditionalCostInstancePayment {
+            grant_source: instance.grant_source,
+            ..AdditionalCostInstancePayment::new_with_ordinal(
+                instance.origin,
+                instance.origin_ordinal,
+                count,
+            )
+        });
+    }
+
+    fn record_instance_payment(&mut self, payment: AdditionalCostInstancePayment) {
+        if payment.count == 0 {
+            return;
         }
+        self.additional_cost_payment_count = self
+            .additional_cost_payment_count
+            .saturating_add(payment.count);
+        self.additional_cost_payments.push(payment);
+        self.additional_cost_paid = true;
     }
 
     pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
