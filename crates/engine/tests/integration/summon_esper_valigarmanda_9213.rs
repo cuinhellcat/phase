@@ -1398,6 +1398,8 @@ fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodde
                 break;
             }
         }
+        // The casualty sacrifice was paid before targets; the cancel does not
+        // rewind it (the existing cancel path).
         assert_eq!(runner.state().objects[&paid_with].zone, Zone::Graveyard);
         assert_eq!(refused, sacrifice_grantor);
         let on_stack = runner.state().objects[&linked].zone == Zone::Stack;

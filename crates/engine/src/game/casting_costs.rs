@@ -9956,9 +9956,10 @@ fn pay_additional_cost_with_source(
                     pending.ability.context.granting_object,
                     target,
                 );
-                // CR 701.21a: a permanent already chosen for another sacrifice
-                // of this spell (a casualty whose sacrifice waits for mana
-                // payment) can't be sacrificed twice.
+                // CR 601.2h: each sacrifice of the total cost is a different
+                // permanent, so one already chosen for another cost of this
+                // spell (a casualty whose sacrifice waits for mana payment) is
+                // not offered again.
                 eligible.retain(|id| {
                     !pending
                         .deferred_sacrificed_permanents
