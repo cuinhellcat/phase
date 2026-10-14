@@ -7380,38 +7380,40 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     // CR 601.2f: a keyword queue decided before targets is not such a cost
     // alone: the authority below still collects the spell's other additional
     // costs, now that targets are known, without offering the queue again.
-    if pending.additional_cost_flow.is_some()
+    let skip_redetection = pending.additional_cost_flow.is_some()
         || !pending.additional_cost_queue.is_empty()
-        || (pending.additional_cost_decided && !pending.keyword_queue_before_targets)
+        || (pending.additional_cost_decided && !pending.keyword_queue_before_targets);
+    // CR 118.6a + CR 601.2b: a card with no mana cost is cast only through its
+    // alternative. One that stopped being payable since admission (its
+    // permanent sacrificed for a cost decided before targets) cancels the
+    // cast, whether or not the authority below runs.
+    if !pending.ability.context.alternative_mana_cost_paid
+        && state.objects.get(&pending.object_id).is_some_and(|obj| {
+            super::casting::cast_pays_nonexistent_printed_cost(
+                state,
+                player,
+                obj,
+                pending.casting_permission_index,
+                pending.casting_variant,
+            )
+        })
     {
-        // CR 118.6a + CR 601.2b: skipping the re-detection must not skip the
-        // alternative cost of a card with no mana cost (an additional cost
-        // decided before targets, as a granted casualty): its printed cost
-        // can't be paid, so the alternative is applied here, as below.
-        if !pending.ability.context.alternative_mana_cost_paid
-            && state.objects.get(&pending.object_id).is_some_and(|obj| {
-                super::casting::cast_pays_nonexistent_printed_cost(
-                    state,
-                    player,
-                    obj,
-                    pending.casting_permission_index,
-                    pending.casting_variant,
-                )
-            })
-        {
-            let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
-                .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
-                .flatten()
-            else {
-                // Admission saw a payable alternative; one that stopped being
-                // payable since (a sacrificed permanent) cancels the cast.
-                super::casting::handle_cancel_cast(state, &pending, events);
-                return Err(EngineError::ActionNotAllowed(
-                    "A card with no mana cost can't be cast by paying its mana cost".to_string(),
-                ));
-            };
+        let Some(alt_cost) = (pending.casting_variant == CastingVariant::Normal)
+            .then(|| payable_spell_alternative_cost_details(state, player, pending.object_id))
+            .flatten()
+        else {
+            super::casting::handle_cancel_cast(state, &pending, events);
+            return Err(EngineError::ActionNotAllowed(
+                "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+            ));
+        };
+        // Skipping the re-detection must not skip the alternative: it is
+        // applied here; otherwise the authority below applies it.
+        if skip_redetection {
             return apply_only_payable_alternative_cost(state, player, pending, alt_cost, events);
         }
+    }
+    if skip_redetection {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     // CR 601.2b + CR 601.2f: an Emerge or Offering sacrifice chosen before the
@@ -7589,9 +7591,8 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
         // carrying it as a flow would double-prompt for the same cost, and
         // `finish_pending_cost_or_cast` has no arm that drains a `Some(other)`
         // flow anyway (only Kicker and `Optional{Repeatable}` are handled) —
-        // it would be silently dropped. This is byte-identical to the prior
-        // behavior for every card with a non-empty effective queue (their
-        // `obj.additional_cost` already equals the queue instance).
+        // it would be silently dropped. Their `obj.additional_cost` equals the
+        // queue instance, so the post-target authority dedupes it too.
         _other => {
             // Sole caller (`casting.rs::continue_with_prepared`'s non-kicker
             // else-if) only reaches this arm when the effective queue is
@@ -9948,13 +9949,22 @@ fn pay_additional_cost_with_source(
                 }
             } else {
                 // CR 118.3: Non-self sacrifice needs interactive selection
-                let eligible = super::casting::find_eligible_sacrifice_targets(
+                let mut eligible = super::casting::find_eligible_sacrifice_targets(
                     state,
                     player,
                     pending.object_id,
                     pending.ability.context.granting_object,
                     target,
                 );
+                // CR 701.21a: a permanent already chosen for another sacrifice
+                // of this spell (a casualty whose sacrifice waits for mana
+                // payment) can't be sacrificed twice.
+                eligible.retain(|id| {
+                    !pending
+                        .deferred_sacrificed_permanents
+                        .iter()
+                        .any(|kept| kept.object_id == *id)
+                });
                 let (min_count, max_count) = super::casting::sacrifice_cost_bounds_with_chosen_x(
                     count,
                     eligible.len(),

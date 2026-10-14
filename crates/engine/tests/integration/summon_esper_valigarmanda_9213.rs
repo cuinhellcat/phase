@@ -1014,8 +1014,10 @@ Fling deals damage equal to the sacrificed creature's power to any target.";
 
 /// What a linked Fling cast at chapter II paid and did.
 struct FlingCast {
-    /// The cost prompts in order: "alternative", "casualty", "fling".
+    /// The cost prompts in order: "casualty", "fling".
     prompts: Vec<&'static str>,
+    /// The creatures each Fling sacrifice prompt offered.
+    fling_choices: Vec<Vec<ObjectId>>,
     /// The 3/3 casualty is paid with and the 2/2 Fling's cost is paid with.
     big: ObjectId,
     small: ObjectId,
@@ -1063,6 +1065,7 @@ fn cast_linked_fling(
         .act(GameAction::SelectCards { cards: vec![fling] })
         .expect("pick Fling");
     let mut prompts = Vec::new();
+    let mut fling_choices = Vec::new();
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { cost, .. } => {
@@ -1081,6 +1084,7 @@ fn cast_linked_fling(
                 let fling_cost = anhelo.is_none_or(|anhelo| choices.contains(&anhelo));
                 if fling_cost {
                     prompts.push("fling");
+                    fling_choices.push(choices.clone());
                 }
                 let pick = if fling_cost { small } else { big };
                 runner
@@ -1102,6 +1106,7 @@ fn cast_linked_fling(
     }
     FlingCast {
         prompts,
+        fling_choices,
         big,
         small,
         runner,
@@ -1139,12 +1144,18 @@ fn a_linked_fling_pays_its_sacrifice_beside_granted_casualty() {
     for casualty in [false, true] {
         let FlingCast {
             prompts,
+            fling_choices,
             big,
             small,
             mut runner,
             fling,
         } = cast_linked_fling(true, casualty, WarpedSpace::Absent, false);
         assert_eq!(prompts, vec!["casualty", "fling"]);
+        // The 3/3 chosen for casualty is not offered again for Fling's
+        // sacrifice, even while its sacrifice waits for mana payment.
+        let offered = &fling_choices[0];
+        assert!(offered.contains(&small), "{offered:?}");
+        assert_eq!(offered.contains(&big), !casualty, "{offered:?}");
         assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
         // CR 702.153b: only the casualty answer is a casualty payment;
         // Fling's sacrifice is not one.
@@ -1182,6 +1193,7 @@ fn a_linked_fling_pays_its_sacrifice_beside_granted_casualty() {
 fn a_linked_fling_without_casualty_pays_its_sacrifice_once() {
     let FlingCast {
         prompts,
+        fling_choices: _,
         big,
         small,
         mut runner,
@@ -1203,6 +1215,7 @@ fn a_linked_fling_beside_warped_space_pays_its_mana_and_sacrifice() {
     for casualty in [false, true] {
         let FlingCast {
             prompts,
+            fling_choices: _,
             big,
             small,
             runner,
@@ -1222,11 +1235,12 @@ fn a_linked_fling_beside_warped_space_pays_its_mana_and_sacrifice() {
     }
 }
 
-/// CR 118.9 + CR 601.2f: Anhelo's casualty is declared before targets, and
-/// the total cost is still determined after them. P1's targeted `{1}{W}`
-/// "Target player draws a card." gets Warped Space's {0} choice once targets
-/// are chosen. Accepting pays {0} and spends Warped Space; declining pays
-/// `{1}{W}` with the chapter's mana. Casualty copies either way.
+/// CR 118.9: Warped Space's {0} is offered to a targeted spell with Anhelo's
+/// casualty. The engine declares casualty before targets and the other costs,
+/// the alternative among them, after targets, as for any targeted spell.
+/// P1's `{1}{W}` "Target player draws a card.": accepting pays {0} and spends
+/// Warped Space; declining pays `{1}{W}` with the chapter's mana. Casualty
+/// copies either way.
 #[test]
 fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
     for pay_zero in [true, false] {
@@ -1320,5 +1334,73 @@ fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
             hand_before + 2,
             "the card and casualty's copy each draw a card"
         );
+    }
+}
+
+/// CR 118.6a + CR 601.2h: P1's targeted linked card has no mana cost, so
+/// only the {0} of a creature carrying Warped Space's text casts it. That
+/// creature sacrificed for Anhelo's casualty before targets takes the {0}
+/// with it, and the cast is refused once targets are chosen instead of
+/// resolving for free. With the 3/3 paying casualty the {0} still applies.
+#[test]
+fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodder() {
+    for sacrifice_grantor in [true, false] {
+        let card = OpponentCard {
+            name: "Linked Draw",
+            instant: false,
+            cost: ManaCost::NoCost,
+            text: "Target player draws three cards.",
+        };
+        let mut ids = None;
+        let Board {
+            mut runner,
+            sorcery: linked,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            card,
+            WarpedSpace::Absent,
+            |scenario| {
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                let grantor = scenario
+                    .add_creature_from_oracle(P0, "Warped Golem", 3, 3, WARPED_SPACE)
+                    .id();
+                let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
+                ids = Some((grantor, fodder));
+            },
+        );
+        let (grantor, fodder) = ids.expect("the creatures are on the battlefield");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![linked],
+            })
+            .expect("the {0} admits the linked card");
+        let paid_with = if sacrifice_grantor { grantor } else { fodder };
+        let mut refused = false;
+        for _ in 0..12 {
+            let result = match runner.state().waiting_for.clone() {
+                WaitingFor::OptionalCostChoice { origin, .. } => {
+                    assert_eq!(origin, AdditionalCostOrigin::Casualty);
+                    runner.act(GameAction::DecideOptionalCost { pay: true })
+                }
+                WaitingFor::PayCost { .. } => runner.act(GameAction::SelectCards {
+                    cards: vec![paid_with],
+                }),
+                WaitingFor::TargetSelection { .. } => runner.act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Player(P0)],
+                }),
+                WaitingFor::ManaPayment { .. } => runner.act(GameAction::PassPriority),
+                _ => break,
+            };
+            if result.is_err() {
+                refused = true;
+                break;
+            }
+        }
+        assert_eq!(runner.state().objects[&paid_with].zone, Zone::Graveyard);
+        assert_eq!(refused, sacrifice_grantor);
+        let on_stack = runner.state().objects[&linked].zone == Zone::Stack;
+        assert_eq!(on_stack, !sacrifice_grantor, "cast only through the {{0}}");
     }
 }
