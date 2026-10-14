@@ -2848,7 +2848,13 @@ pub(crate) fn effective_casualty_grant_sources(
     };
     let is_casualty = |keyword: &Keyword| matches!(keyword, Keyword::Casualty(_));
     // allow-raw-authority: counts the instances at the head of `effective_spell_keyword_instances` (its `obj.keywords` base); the helpers only answer has/has-not.
-    let mut sources = vec![None; obj.keywords.iter().filter(|k| is_casualty(k)).count()];
+    let printed = obj.keywords.iter().filter(|k| is_casualty(k)).count();
+    let total = keywords.iter().filter(|k| is_casualty(k)).count();
+    // No granted instance: skip the static traversal (the common spell).
+    if total <= printed {
+        return vec![None; total];
+    }
+    let mut sources = vec![None; printed];
     sources.extend(
         static_spell_keyword_grants(
             state,
@@ -2862,7 +2868,6 @@ pub(crate) fn effective_casualty_grant_sources(
         .map(|(source, _)| Some(source)),
     );
     // Player-scoped and next-spell grants follow the statics.
-    let total = keywords.iter().filter(|k| is_casualty(k)).count();
     debug_assert!(
         sources.len() <= total,
         "a static casualty grant is a keyword instance"
