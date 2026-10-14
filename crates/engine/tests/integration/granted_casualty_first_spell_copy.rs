@@ -10,7 +10,7 @@
 //! Silverquill, the Disputant sacrificed for the casualty it grants is gone
 //! before the spell becomes cast, so that instance makes no copy.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{
     AbilityCost, AdditionalCost, AdditionalCostOrigin, FilterProp, QuantityExpr, SacrificeCost,
@@ -534,4 +534,90 @@ fn printed_casualty_copies_when_silverquill_is_sacrificed_for_it() {
         })
     });
     assert_eq!(draws, 3, "printed and granted instances each copy");
+}
+
+/// Fling, verbatim.
+const FLING: &str = "As an additional cost to cast this spell, sacrifice a creature.\n\
+Fling deals damage equal to the sacrificed creature's power to any target.";
+
+/// CR 601.2f + CR 601.2h: cast a `{0}` Fling from hand at P1 with Anhelo, a
+/// 3/3 and a 2/2 out, answering casualty with `sacrifice`. A sacrifice prompt
+/// offering Anhelo (power 1) is Fling's and gets the 2/2; casualty's gets the
+/// 3/3. Returns how many prompts were Fling's, the creatures' zones (3/3,
+/// 2/2) and P1's life lost.
+fn cast_fling_from_hand(sacrifice: bool) -> (usize, Zone, Zone, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let anhelo = scenario
+        .add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO)
+        .id();
+    let big = scenario.add_creature(P0, "Big Fodder", 3, 3).id();
+    let small = scenario.add_creature(P0, "Small Fodder", 2, 2).id();
+    let mut fling = scenario.add_spell_to_hand_from_oracle(P0, "Fling", true, FLING);
+    fling.with_mana_cost(ManaCost::zero());
+    let fling = fling.id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&fling].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: fling,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Fling");
+    let mut fling_prompts = 0;
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: sacrifice })
+                    .expect("decide casualty");
+            }
+            WaitingFor::PayCost { choices, .. } => {
+                let fling_cost = choices.contains(&anhelo);
+                fling_prompts += usize::from(fling_cost);
+                let pick = if fling_cost { small } else { big };
+                runner
+                    .act(GameAction::SelectCards { cards: vec![pick] })
+                    .expect("sacrifice a creature");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("target P1");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay {0}");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
+    let zones = (
+        runner.state().objects[&big].zone,
+        runner.state().objects[&small].zone,
+    );
+    let life_before = runner.state().players[1].life;
+    resolve_and_count_draws(&mut runner);
+    let lost = life_before - runner.state().players[1].life;
+    (fling_prompts, zones.0, zones.1, lost)
+}
+
+/// CR 601.2f + CR 118.8: a casualty decision does not discharge Fling's
+/// "sacrifice a creature". Declining casualty, Fling still takes the 2/2 and
+/// deals 2; accepting, casualty takes the 3/3, Fling the 2/2, and Fling and
+/// its copy each deal 2.
+#[test]
+fn fling_from_hand_pays_its_sacrifice_beside_granted_casualty() {
+    assert_eq!(
+        cast_fling_from_hand(false),
+        (1, Zone::Battlefield, Zone::Graveyard, 2)
+    );
+    assert_eq!(
+        cast_fling_from_hand(true),
+        (1, Zone::Graveyard, Zone::Graveyard, 4)
+    );
 }
