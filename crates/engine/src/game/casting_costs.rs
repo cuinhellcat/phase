@@ -7580,8 +7580,9 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
         // "instead" additional cost (e.g. Teamwork) is queue-synthesized —
         // charged via the deferred queue drain (`OptionalCostChoice` ->
         // `record_additional_cost_instance_payment` sets `additional_cost_paid`
-        // and, once the queue empties, `additional_cost_decided`, which skips
-        // post-target re-detection at `finish_pending_cast_cost_or_pay`).
+        // and, once the queue empties, `additional_cost_decided`; after
+        // targets the authority collects the other costs without re-offering
+        // the queue, see `begin_keyword_queue_before_targets`).
         // `additional_cost_flow` is deliberately left `None` here (not
         // `Some(other)`): the synthesized keyword (e.g. `synthesize_teamwork`)
         // already stores the same instance in `obj.additional_cost`, so
@@ -7620,9 +7621,8 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
 /// each answer is recorded against its own instance (printed instances first,
 /// then granted ones) for the copy trigger to read. CR 601.2f: after targets,
 /// the additional-cost authority collects the spell's other costs
-/// (`keyword_queue_before_targets`).
-/// The rest of the effective queue (replicate, offspring, …) follows it, as
-/// the post-target re-detection is skipped once the queue is decided.
+/// (`keyword_queue_before_targets`) and does not offer the queue again. The
+/// rest of the effective queue (replicate, offspring, …) is declared here too.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn begin_keyword_queue_before_targets(
     state: &mut GameState,
