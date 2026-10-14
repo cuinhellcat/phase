@@ -19242,7 +19242,7 @@ fn continue_with_prepared(
         if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
             .is_some()
         {
-            return casting_costs::begin_casualty_before_targets(
+            return casting_costs::begin_keyword_queue_before_targets(
                 state,
                 player,
                 prepared.object_id,

@@ -621,3 +621,212 @@ fn fling_from_hand_pays_its_sacrifice_beside_granted_casualty() {
         (1, Zone::Graveyard, Zone::Graveyard, 4)
     );
 }
+
+/// A cost prompt the casts below answered, in order.
+#[derive(Debug, PartialEq)]
+enum Prompt {
+    Casualty,
+    Kicker,
+    /// A printed "A or B" additional cost.
+    Choice,
+    Sacrifice,
+    Targets,
+}
+
+/// Cast `spell` from hand with Anhelo out, declining casualty, answering a
+/// kicker or printed choice with `pay`, sacrificing `fodder` and targeting
+/// `target`. Returns the prompts in order.
+fn cast_beside_declined_casualty(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    fodder: ObjectId,
+    target: TargetRef,
+    pay: bool,
+) -> Vec<Prompt> {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the spell");
+    let mut prompts = Vec::new();
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { cost, origin, .. } => {
+                let (prompt, answer) = match (cost, origin) {
+                    (_, AdditionalCostOrigin::Casualty) => (Prompt::Casualty, false),
+                    (AdditionalCost::Kicker { .. }, _) => (Prompt::Kicker, pay),
+                    (AdditionalCost::Choice(..), _) => (Prompt::Choice, pay),
+                    (cost, origin) => panic!("unexpected prompt {cost:?} ({origin:?})"),
+                };
+                prompts.push(prompt);
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: answer })
+                    .expect("decide a cost");
+            }
+            WaitingFor::PayCost { .. } => {
+                prompts.push(Prompt::Sacrifice);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![fodder],
+                    })
+                    .expect("sacrifice");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                prompts.push(Prompt::Targets);
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![target.clone()],
+                    })
+                    .expect("choose the target");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay the mana");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    prompts
+}
+
+/// CR 601.2f: with no creature of power 2 or greater, Anhelo's casualty 2
+/// can't be offered, and Fling's "sacrifice a creature" is asked for once.
+#[test]
+fn fling_beside_unpayable_casualty_asks_for_its_sacrifice_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let anhelo = scenario
+        .add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO)
+        .id();
+    let weak = scenario.add_creature(P0, "Weak Fodder", 1, 1).id();
+    let mut fling = scenario.add_spell_to_hand_from_oracle(P0, "Fling", true, FLING);
+    fling.with_mana_cost(ManaCost::zero());
+    let fling = fling.id();
+    let mut runner = scenario.build();
+    let prompts =
+        cast_beside_declined_casualty(&mut runner, fling, weak, TargetRef::Player(P1), false);
+    assert_eq!(prompts, vec![Prompt::Targets, Prompt::Sacrifice]);
+    assert_eq!(runner.state().objects[&weak].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&anhelo].zone, Zone::Battlefield);
+}
+
+/// CR 601.2f + CR 118.8: Bitter Triumph's "discard a card or pay 3 life" is
+/// still part of the total cost after casualty is declined before targets.
+/// With a card in hand both branches are payable, so P0 chooses; the life
+/// branch costs 3 life and keeps the card; the target is destroyed.
+#[test]
+fn a_printed_choice_cost_follows_declined_casualty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+    let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
+    let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+    // A card to discard, so both branches are payable and P0 is asked.
+    let spare = scenario
+        .add_spell_to_hand_from_oracle(P0, "Spare", true, "Draw a card.")
+        .id();
+    let mut triumph = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Bitter Triumph",
+        true,
+        "As an additional cost to cast this spell, discard a card or pay 3 life.\n\
+         Destroy target creature or planeswalker.",
+    );
+    triumph.with_mana_cost(ManaCost::zero());
+    let triumph = triumph.id();
+    let mut runner = scenario.build();
+    let prompts = cast_beside_declined_casualty(
+        &mut runner,
+        triumph,
+        fodder,
+        TargetRef::Object(victim),
+        false,
+    );
+    assert_eq!(
+        prompts,
+        vec![Prompt::Casualty, Prompt::Targets, Prompt::Choice]
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        17,
+        "the life branch is paid"
+    );
+    assert_eq!(runner.state().objects[&spare].zone, Zone::Hand);
+    resolve_and_count_draws(&mut runner);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+}
+
+/// CR 601.2f + CR 118.8: a cost another effect imposes for the chosen target
+/// (Terror of the Peaks: "Spells your opponents cast that target this
+/// creature cost an additional 3 life to cast.") is collected once targets
+/// are known, after casualty was declined before them.
+#[test]
+fn a_target_imposed_cost_follows_declined_casualty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+    let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
+    let terror = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Terror of the Peaks",
+            5,
+            4,
+            "Flying\nSpells your opponents cast that target this creature cost an additional \
+             3 life to cast.\nWhenever another creature you control enters, this creature deals \
+             damage equal to that creature's power to any target.",
+        )
+        .id();
+    let mut fling = scenario.add_spell_to_hand_from_oracle(P0, "Fling", true, FLING);
+    fling.with_mana_cost(ManaCost::zero());
+    let fling = fling.id();
+    let mut runner = scenario.build();
+    let prompts =
+        cast_beside_declined_casualty(&mut runner, fling, fodder, TargetRef::Object(terror), false);
+    assert_eq!(
+        prompts,
+        vec![Prompt::Casualty, Prompt::Targets, Prompt::Sacrifice]
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        17,
+        "Terror's 3 life is paid"
+    );
+}
+
+/// CR 601.2b + CR 702.33a: Burst Lightning's printed kicker is still offered
+/// after casualty is declined before targets. Kicked, it deals 4.
+#[test]
+fn a_printed_kicker_follows_declined_casualty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+    let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+    }
+    let lightning = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Burst Lightning",
+            true,
+            "Kicker {4} (You may pay an additional {4} as you cast this spell.)\n\
+             Burst Lightning deals 2 damage to any target. If this spell was kicked, it deals \
+             4 damage instead.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let prompts =
+        cast_beside_declined_casualty(&mut runner, lightning, fodder, TargetRef::Player(P1), true);
+    assert_eq!(
+        prompts,
+        vec![Prompt::Casualty, Prompt::Targets, Prompt::Kicker]
+    );
+    let life_before = runner.state().players[1].life;
+    resolve_and_count_draws(&mut runner);
+    assert_eq!(life_before - runner.state().players[1].life, 4);
+}

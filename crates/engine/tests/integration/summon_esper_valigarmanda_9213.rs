@@ -1146,6 +1146,24 @@ fn a_linked_fling_pays_its_sacrifice_beside_granted_casualty() {
         } = cast_linked_fling(true, casualty, WarpedSpace::Absent, false);
         assert_eq!(prompts, vec!["casualty", "fling"]);
         assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
+        // CR 702.153b: only the casualty answer is a casualty payment;
+        // Fling's sacrifice is not one.
+        let payments = &runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == fling)
+            .and_then(|entry| entry.ability())
+            .expect("Fling is on the stack")
+            .context
+            .additional_cost_payments;
+        let casualty_payments: Vec<_> = payments
+            .iter()
+            .filter(|payment| payment.origin == AdditionalCostOrigin::Casualty)
+            .map(|payment| (payment.origin_ordinal, payment.count))
+            .collect();
+        let expected: Vec<(u32, u32)> = if casualty { vec![(0, 1)] } else { vec![] };
+        assert_eq!(casualty_payments, expected);
         assert_eq!(runner.state().objects[&small].zone, Zone::Graveyard);
         let big_zone = if casualty {
             Zone::Graveyard
@@ -1204,13 +1222,13 @@ fn a_linked_fling_beside_warped_space_pays_its_mana_and_sacrifice() {
     }
 }
 
-/// CR 118.9 + CR 601.2b: an alternative cost is announced with the additional
-/// costs. P1's targeted `{1}{W}` "Target player draws a card." gets Warped
-/// Space's {0} choice before Anhelo's casualty, which is declared before
-/// targets. Accepting pays {0} and spends Warped Space; declining pays
+/// CR 118.9 + CR 601.2f: Anhelo's casualty is declared before targets, and
+/// the total cost is still determined after them. P1's targeted `{1}{W}`
+/// "Target player draws a card." gets Warped Space's {0} choice once targets
+/// are chosen. Accepting pays {0} and spends Warped Space; declining pays
 /// `{1}{W}` with the chapter's mana. Casualty copies either way.
 #[test]
-fn warped_space_is_offered_before_casualty_for_a_targeted_card() {
+fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
     for pay_zero in [true, false] {
         let card = OpponentCard {
             name: "Linked Draw",
@@ -1277,7 +1295,7 @@ fn warped_space_is_offered_before_casualty_for_a_targeted_card() {
                 _ => break,
             }
         }
-        assert_eq!(prompts, vec!["alternative", "casualty", "targets"]);
+        assert_eq!(prompts, vec!["casualty", "targets", "alternative"]);
         assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
         assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
         let (mana_left, uses) = if pay_zero { (pool_before, 1) } else { (0, 0) };

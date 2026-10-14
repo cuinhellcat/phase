@@ -7377,9 +7377,12 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     // deferred-target-selection flow, skip re-detection — the player already made
     // their choice. Without this guard, check_additional_cost_or_pay_with_distribute
     // would re-find the cost on obj.additional_cost and prompt for a second sacrifice.
+    // CR 601.2f: a keyword queue decided before targets is not such a cost
+    // alone: the authority below still collects the spell's other additional
+    // costs, now that targets are known, without offering the queue again.
     if pending.additional_cost_flow.is_some()
         || !pending.additional_cost_queue.is_empty()
-        || pending.additional_cost_decided
+        || (pending.additional_cost_decided && !pending.keyword_queue_before_targets)
     {
         // CR 118.6a + CR 601.2b: skipping the re-detection must not skip the
         // alternative cost of a card with no mana cost (an additional cost
@@ -7427,6 +7430,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     let payment_mode = pending.payment_mode;
     let base_cost = pending.base_cost;
     let cost = pending.cost;
+    let keyword_queue_decided = pending.keyword_queue_before_targets;
     let ability = pending.ability;
     check_additional_cost_or_pay_with_kept_cost(
         state,
@@ -7444,6 +7448,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         payment_mode,
         lock,
         kept_sacrifices,
+        keyword_queue_decided,
         events,
     )
 }
@@ -7590,30 +7595,36 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
             // Sole caller (`casting.rs::continue_with_prepared`'s non-kicker
             // else-if) only reaches this arm when the effective queue is
             // already non-empty, so no empty-queue fallback is needed here.
-            let queue = build_effective_additional_cost_queue(state, player, object_id);
-            let mut pending = PendingCast::new(object_id, card_id, ability, cost);
-            pending.base_cost = base_cost;
-            pending.casting_variant = casting_variant;
-            pending.casting_permission_index = casting_permission_index;
-            pending.cast_timing_permission = cast_timing_permission;
-            pending.distribute = distribute;
-            pending.origin_zone = origin_zone;
-            pending.payment_mode = payment_mode;
-            pending.deferred_target_selection = true;
-            pending.additional_cost_queue = queue;
-            pending.additional_cost_flow = None;
-            finish_pending_cost_or_cast(state, player, pending, events)
+            begin_keyword_queue_before_targets(
+                state,
+                player,
+                object_id,
+                card_id,
+                ability,
+                cost,
+                base_cost,
+                casting_variant,
+                casting_permission_index,
+                cast_timing_permission,
+                distribute,
+                origin_zone,
+                payment_mode,
+                events,
+            )
         }
     }
 }
 
-/// CR 601.2b + CR 702.153b: casualty is declared before targets, one queued
-/// instance at a time, so each answer is recorded against its own instance
-/// (printed instances first, then granted ones) for the copy trigger to read.
+/// CR 601.2b + CR 702.153b: keyword additional costs (casualty, teamwork,
+/// gift, ...) are declared before targets, one queued instance at a time, so
+/// each answer is recorded against its own instance (printed instances first,
+/// then granted ones) for the copy trigger to read. CR 601.2f: after targets,
+/// the additional-cost authority collects the spell's other costs
+/// (`keyword_queue_before_targets`).
 /// The rest of the effective queue (replicate, offspring, …) follows it, as
 /// the post-target re-detection is skipped once the queue is decided.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn begin_casualty_before_targets(
+pub(super) fn begin_keyword_queue_before_targets(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -7629,7 +7640,6 @@ pub(super) fn begin_casualty_before_targets(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let printed_cost = cost.clone();
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
@@ -7639,180 +7649,9 @@ pub(super) fn begin_casualty_before_targets(
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
+    pending.keyword_queue_before_targets = true;
     pending.additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
-    // CR 601.2f + CR 118.8: deciding the keyword instances does not discharge
-    // the spell's required costs (Fling's sacrifice); they follow the queue,
-    // as in `check_additional_cost_or_pay_with_kept_cost`.
-    let (outside, imposed) = additional_costs_outside_queue(
-        state,
-        player,
-        object_id,
-        &pending.ability,
-        casting_variant,
-        casting_permission_index,
-        cast_timing_permission,
-        &pending.additional_cost_queue,
-    );
-    let required = outside.filter(|cost| matches!(cost, AdditionalCost::Required(_)));
-    pending.additional_cost_flow =
-        required_cost_after_queue(state, player, object_id, required, imposed)?;
-    // CR 118.9 + CR 601.2b: an alternative cost is announced with the
-    // additional costs, so it is offered here too, before casualty.
-    if let Some(alt_cost) = cast_alternative_cost(
-        state,
-        player,
-        object_id,
-        casting_variant,
-        cast_timing_permission,
-    ) {
-        pending.cost = ManaCost::NoCost;
-        return announce_alternative_cost(state, player, pending, alt_cost, &printed_cost, events);
-    }
     finish_pending_cost_or_cast(state, player, pending, events)
-}
-
-/// CR 118.9 + CR 601.2b: the alternative cost this cast may announce, read
-/// for its timing permission first.
-fn cast_alternative_cost(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    casting_variant: CastingVariant,
-    cast_timing_permission: Option<CastTimingPermission>,
-) -> Option<PayableSpellAlternativeCost> {
-    if casting_variant != CastingVariant::Normal {
-        return None;
-    }
-    cast_timing_permission
-        .and_then(|permission| {
-            payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
-        })
-        .or_else(|| payable_spell_alternative_cost_details(state, player, object_id))
-}
-
-/// CR 118.9 + CR 601.2b/f/h: announce `alt_cost` for `pending`, whose mana
-/// cost is `NoCost`. Reuses the `AdditionalCost::Choice` prompt shape:
-/// accepting pays the alternative cost, declining pays `cost`, the printed
-/// mana cost. A timing permission that requires the alternative, or a card
-/// with no mana cost, applies it without a choice.
-fn announce_alternative_cost(
-    state: &mut GameState,
-    player: PlayerId,
-    mut pending: PendingCast,
-    alt_cost: PayableSpellAlternativeCost,
-    cost: &ManaCost,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
-    // Foretold) across the choice round-trip so its per-turn slot is
-    // consumed at finalize. `None` for self-options / `Unlimited` grants.
-    let alt_cost_grant_source = alt_cost.once_per_turn_source;
-    pending.alt_cost_grant_source = alt_cost_grant_source;
-    let alt_cost_required_for_timing = pending.cast_timing_permission.is_some()
-        && alt_cost.timing_permission == pending.cast_timing_permission;
-    if alt_cost_required_for_timing {
-        match alt_cost.cost {
-            AbilityCost::Mana { cost: alt_mana } => {
-                pending.ability.context.alternative_mana_cost_paid = true;
-                // CR 118.9 + CR 601.2b: timing-immediate-pay branch skips
-                // the accept handler, so stamp the grant source directly on
-                // the ability context for finalize to consume.
-                pending.ability.context.alt_cost_grant_source = alt_cost_grant_source;
-                pending.base_cost = Some(alt_mana);
-                pending.cost = super::casting::recompute_pending_mana_total(
-                    state,
-                    player,
-                    &pending,
-                    pending.ability.chosen_x,
-                );
-                return finish_pending_cost_or_cast(state, player, pending, events);
-            }
-            cost => {
-                return pay_additional_cost_with_source(
-                    state,
-                    player,
-                    cost,
-                    SpellCostSource::Other,
-                    pending,
-                    events,
-                );
-            }
-        }
-    }
-    // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
-    // cost the alternative is the only way to cast the card, so there
-    // is nothing to choose.
-    if state.objects.get(&pending.object_id).is_some_and(|obj| {
-        super::casting::cast_pays_nonexistent_printed_cost(
-            state,
-            player,
-            obj,
-            pending.casting_permission_index,
-            pending.casting_variant,
-        )
-    }) {
-        return apply_only_payable_alternative_cost(state, player, pending, alt_cost, events);
-    }
-    Ok(make_optional_cost_choice(
-        state,
-        player,
-        AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }),
-        0,
-        pending,
-    ))
-}
-
-/// CR 118.8 + CR 601.2f: the spell's additional costs that the keyword queue
-/// does not carry: the printed (or flash-timing) cost unless it is one of the
-/// queued instances, and the required costs other effects impose.
-#[allow(clippy::too_many_arguments)]
-fn additional_costs_outside_queue(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    ability: &ResolvedAbility,
-    casting_variant: CastingVariant,
-    casting_permission_index: Option<CastingPermissionIndex>,
-    cast_timing_permission: Option<CastTimingPermission>,
-    queue: &[AdditionalCostInstance],
-) -> (Option<AdditionalCost>, Option<AbilityCost>) {
-    let flash_additional =
-        flash_timing_non_mana_additional_cost(state, player, object_id, cast_timing_permission);
-    let obj_additional = state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.additional_cost.clone())
-        .or(flash_additional)
-        .filter(|cost| !queue.iter().any(|instance| instance.cost == *cost));
-    let imposed = combined_imposed_additional_cast_cost(
-        state,
-        player,
-        object_id,
-        ability,
-        casting_variant,
-        casting_permission_index,
-    );
-    (obj_additional, imposed)
-}
-
-/// CR 601.2f + CR 601.2h: with keyword instances queued, the required cost
-/// (`required`, a printed `Required` or `None`) merged with the imposed ones
-/// is paid once the queue is decided. Refused up front when it can't be paid.
-fn required_cost_after_queue(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    required: Option<AdditionalCost>,
-    imposed: Option<AbilityCost>,
-) -> Result<Option<AdditionalCost>, EngineError> {
-    if let Some(AdditionalCost::Required(req)) = &required {
-        if !req.is_payable(state, player, object_id) {
-            return Err(EngineError::ActionNotAllowed(
-                "Cannot pay required additional cost".to_string(),
-            ));
-        }
-    }
-    Ok(merge_required_additional_cost(required, imposed))
 }
 
 /// CR 601.2b: Present an optional additional cost (e.g. Casualty) to the player
@@ -8187,6 +8026,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         payment_mode,
         lock,
         Vec::new(),
+        false,
         events,
     )
 }
@@ -8212,6 +8052,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     payment_mode: CastPaymentMode,
     lock: CostLockInput,
     kept_sacrifices: Vec<DeferredSacrificeSelection>,
+    keyword_queue_decided: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
@@ -8287,21 +8128,44 @@ fn check_additional_cost_or_pay_with_kept_cost(
         &mut ability,
     )?;
 
-    // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
-    // independently functioning instances are announced through a queue. This
-    // preserves one payment record per Casualty/Offspring/Squad/Replicate/
-    // Bargain/Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
-    let additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
-    let (legacy_obj_additional, imposed_required_cost) = additional_costs_outside_queue(
+    let flash_additional =
+        flash_timing_non_mana_additional_cost(state, player, object_id, cast_timing_permission);
+    let obj_additional = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone())
+        .or(flash_additional);
+    let imposed_required_cost = combined_imposed_additional_cast_cost(
         state,
         player,
         object_id,
         &ability,
         casting_variant,
         casting_permission_index,
-        cast_timing_permission,
-        &additional_cost_queue,
     );
+
+    // CR 601.2b/f + CR 113.2c: non-kicker keyword additional costs with
+    // independently functioning instances are announced through a queue. This
+    // preserves one payment record per Casualty/Offspring/Squad/Replicate/
+    // Bargain/Teamwork instance while leaving Kicker on its existing `kickers_paid` path.
+    let additional_cost_queue = build_effective_additional_cost_queue(state, player, object_id);
+    let obj_additional_matches_instance = obj_additional.as_ref().is_some_and(|cost| {
+        additional_cost_queue
+            .iter()
+            .any(|instance| instance.cost == *cost)
+    });
+    let legacy_obj_additional = if obj_additional_matches_instance {
+        None
+    } else {
+        obj_additional.clone()
+    };
+    // CR 601.2b: the queue was announced before targets; its instances still
+    // keep a printed instance out of the costs above, but are not offered again.
+    let additional_cost_queue = if keyword_queue_decided {
+        Vec::new()
+    } else {
+        additional_cost_queue
+    };
     // CR 702.48a: Offering is one optional additional cost; a kept Offering
     // reduction means the caster already chose to pay it before the deferred
     // target declaration, so it is not offered again.
@@ -8316,15 +8180,17 @@ fn check_additional_cost_or_pay_with_kept_cost(
     let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
-        if let Some(AdditionalCost::Required(_)) = legacy_obj_additional {
+        if let Some(AdditionalCost::Required(ref req)) = legacy_obj_additional {
             if !additional_cost_queue.is_empty() {
-                let deferred = required_cost_after_queue(
-                    state,
-                    player,
-                    object_id,
+                if !req.is_payable(state, player, object_id) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay required additional cost".to_string(),
+                    ));
+                }
+                let deferred = merge_required_additional_cost(
                     legacy_obj_additional,
                     imposed_required_cost.clone(),
-                )?;
+                );
                 (None, deferred, SpellCostSource::Other)
             } else {
                 let additional = merge_required_additional_cost(
@@ -8371,40 +8237,101 @@ fn check_additional_cost_or_pay_with_kept_cost(
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
-    // cost (see `announce_alternative_cost`).
-    if let Some(alt_cost) = cast_alternative_cost(
-        state,
-        player,
-        object_id,
-        casting_variant,
-        cast_timing_permission,
-    ) {
-        let mut pending = pending_cast_keeping(
-            object_id,
-            card_id,
-            ability,
-            ManaCost::NoCost,
-            &lock,
-            &kept_sacrifices,
-        );
-        pending.base_cost = base_cost.clone();
-        pending.casting_variant = casting_variant;
-        pending.casting_permission_index = casting_permission_index;
-        pending.cast_timing_permission = cast_timing_permission;
-        pending.distribute = distribute.clone();
-        pending.origin_zone = origin_zone;
-        pending.payment_mode = payment_mode;
-        // CR 118.9d: additional costs that affect the spell apply to
-        // the alternative cost. Hand the additional-cost authority the
-        // queued keyword costs and the required cost.
-        pending.additional_cost_queue = additional_cost_queue;
-        if let Some(AdditionalCost::Required(_)) = additional {
-            pending.additional_cost_flow = additional.clone();
-            pending.additional_cost_source = additional_cost_source;
-        } else {
-            pending.additional_cost_flow = deferred_required.clone();
+    // cost. Reuse the existing `AdditionalCost::Choice` prompt shape by making
+    // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
+    // declining pays the printed mana cost as the fallback branch.
+    if casting_variant == CastingVariant::Normal {
+        let alt_cost = cast_timing_permission
+            .and_then(|permission| {
+                payable_spell_alternative_cost_for_timing(state, player, object_id, permission)
+            })
+            .or_else(|| payable_spell_alternative_cost_details(state, player, object_id));
+        if let Some(alt_cost) = alt_cost {
+            // CR 118.9 + CR 601.2b: carry the once-per-turn grant source (As
+            // Foretold) across the choice round-trip so its per-turn slot is
+            // consumed at finalize. `None` for self-options / `Unlimited` grants.
+            let alt_cost_grant_source = alt_cost.once_per_turn_source;
+            let mut pending = pending_cast_keeping(
+                object_id,
+                card_id,
+                ability,
+                ManaCost::NoCost,
+                &lock,
+                &kept_sacrifices,
+            );
+            pending.base_cost = base_cost.clone();
+            pending.casting_variant = casting_variant;
+            pending.casting_permission_index = casting_permission_index;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute.clone();
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            pending.alt_cost_grant_source = alt_cost_grant_source;
+            // CR 118.9d: additional costs that affect the spell apply to
+            // the alternative cost. Hand the additional-cost authority the
+            // queued keyword costs and the required cost.
+            pending.additional_cost_queue = additional_cost_queue;
+            if let Some(AdditionalCost::Required(_)) = additional {
+                pending.additional_cost_flow = additional.clone();
+                pending.additional_cost_source = additional_cost_source;
+            } else {
+                pending.additional_cost_flow = deferred_required.clone();
+            }
+            let alt_cost_required_for_timing = cast_timing_permission.is_some()
+                && alt_cost.timing_permission == cast_timing_permission;
+            if alt_cost_required_for_timing {
+                match alt_cost.cost {
+                    AbilityCost::Mana { cost: alt_mana } => {
+                        pending.ability.context.alternative_mana_cost_paid = true;
+                        // CR 118.9 + CR 601.2b: timing-immediate-pay branch skips
+                        // the accept handler, so stamp the grant source directly on
+                        // the ability context for finalize to consume.
+                        pending.ability.context.alt_cost_grant_source = alt_cost_grant_source;
+                        pending.base_cost = Some(alt_mana);
+                        pending.cost = super::casting::recompute_pending_mana_total(
+                            state,
+                            player,
+                            &pending,
+                            pending.ability.chosen_x,
+                        );
+                        return finish_pending_cost_or_cast(state, player, pending, events);
+                    }
+                    cost => {
+                        return pay_additional_cost_with_source(
+                            state,
+                            player,
+                            cost,
+                            SpellCostSource::Other,
+                            pending,
+                            events,
+                        );
+                    }
+                }
+            }
+            // CR 601.2h: "Unpayable costs can't be paid." With no printed mana
+            // cost the alternative is the only way to cast the card, so there
+            // is nothing to choose.
+            if state.objects.get(&object_id).is_some_and(|obj| {
+                super::casting::cast_pays_nonexistent_printed_cost(
+                    state,
+                    player,
+                    obj,
+                    casting_permission_index,
+                    casting_variant,
+                )
+            }) {
+                return apply_only_payable_alternative_cost(
+                    state, player, pending, alt_cost, events,
+                );
+            }
+            return Ok(make_optional_cost_choice(
+                state,
+                player,
+                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }),
+                0,
+                pending,
+            ));
         }
-        return announce_alternative_cost(state, player, pending, alt_cost, cost, events);
     }
 
     if !additional_cost_queue.is_empty() {
@@ -11046,7 +10973,7 @@ pub(super) fn effective_replicate_additional_cost(
 /// teamwork" riders test the Teamwork payment specifically and lets Teamwork
 /// compose with another object additional cost. Mirrors
 /// `effective_squad_additional_cost_instances`; the produced cost matches the
-/// `synthesize_teamwork` form so the `additional_costs_outside_queue` dedup
+/// `synthesize_teamwork` form so the `obj_additional_matches_instance` dedup
 /// suppresses the legacy `face.additional_cost` copy.
 pub(super) fn effective_teamwork_additional_cost_instances(
     state: &GameState,
@@ -11083,7 +11010,7 @@ pub(super) fn effective_teamwork_additional_cost_instances(
 /// zero-cost promise. The dedicated queue record stamps `AdditionalCostOrigin::Gift`
 /// so Gift composes with Bargain/Teamwork and UI can present Gift-specific copy.
 /// The produced cost matches `synthesize_gift` / `gift_additional_cost` so
-/// `additional_costs_outside_queue` suppresses the legacy `face.additional_cost` copy.
+/// `obj_additional_matches_instance` suppresses the legacy `face.additional_cost` copy.
 pub(super) fn effective_gift_additional_cost_instances(
     state: &GameState,
     player: PlayerId,
@@ -18501,6 +18428,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -24912,6 +24840,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -25055,6 +24984,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -25167,6 +25097,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -25268,6 +25199,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -25402,6 +25334,7 @@ mod tests {
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
             additional_cost_decided: false,
+            keyword_queue_before_targets: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

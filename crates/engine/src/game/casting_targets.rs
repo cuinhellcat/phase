@@ -180,6 +180,7 @@ pub(crate) fn handle_select_modes(
         pending_x.deferred_target_selection = true;
         pending_x.chosen_modes = sorted_indices.clone();
         pending_x.additional_cost_decided = pending.additional_cost_decided;
+        pending_x.keyword_queue_before_targets = pending.keyword_queue_before_targets;
         pending_x.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_x.declined_kickers = pending.declined_kickers;
         state.pending_cast = Some(Box::new(pending_x));
@@ -271,6 +272,7 @@ pub(crate) fn handle_select_modes(
         pending_sel.deferred_target_selection = pending.deferred_target_selection;
         pending_sel.chosen_modes = sorted_indices.clone();
         pending_sel.additional_cost_decided = pending.additional_cost_decided;
+        pending_sel.keyword_queue_before_targets = pending.keyword_queue_before_targets;
         pending_sel.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_sel.declined_kickers = pending.declined_kickers;
         // CR 601.2c + CR 115.1: target declaration belongs to the controller by
