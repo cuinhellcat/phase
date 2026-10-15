@@ -1047,7 +1047,10 @@ pub struct TournamentRequestId(pub u64);
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 140;
+/// 141 — CR 601.2b + CR 733.1: durable spell alternative election and the
+/// private pre-announcement cost reversal boundary. Full-game wire 123;
+/// lobby and draft carriers are independent.
+pub const PROTOCOL_VERSION: u32 = 141;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake **from clients that predate [`LOBBY_PROTOCOL_VERSION`]** — the
@@ -2304,12 +2307,12 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_full_game_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 140);
+        assert_eq!(PROTOCOL_VERSION, 141);
         // Lobby keeps its one-version rollout window; full-game servers stay
         // current-only (`server_core::MIN_SUPPORTED_PROTOCOL == PROTOCOL_VERSION`),
         // which refuses an older full-game peer that cannot preserve the exact
         // Full-session identity across draft match attachment and follow-ups.
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 139);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 140);
     }
 
     #[test]

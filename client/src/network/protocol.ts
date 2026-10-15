@@ -668,7 +668,8 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 122 as const;
+// v123: durable unfinished-spell reversal and explicit alternative-cost election.
+export const WIRE_PROTOCOL_VERSION = 123 as const;
 
 export type P2PMessage = P2PAuthorityWire & (
   | {

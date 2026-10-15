@@ -4117,6 +4117,49 @@ fn next_spell_without_paying_applies(
         .is_some()
 }
 
+/// CR 118.9a + CR 601.2b: a named permission or a prepared next-spell
+/// free cast has already elected its alternative. Do not scan sibling grants
+/// or offer another alternative over that exact choice.
+pub(super) fn cast_has_elected_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    permission_index: Option<CastingPermissionIndex>,
+    variant: CastingVariant,
+) -> Result<bool, EngineError> {
+    if variant.uses_alternative_cost()
+        || next_spell_without_paying_applies(state, player, object_id, variant)
+    {
+        return Ok(true);
+    }
+    let Some(CastingPermissionIndex(index)) = permission_index else {
+        return Ok(false);
+    };
+    let permission = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.casting_permissions.get(index))
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Selected casting permission is missing".into())
+        })?;
+    Ok(match permission {
+        CastingPermission::ExileWithAltCost {
+            cost,
+            cost_provenance,
+            ..
+        } => {
+            *cost_provenance == crate::types::ability::ExileGrantCostProvenance::Alternative
+                && !matches!(cost, ManaCost::SelfManaCost)
+        }
+        CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => true,
+        CastingPermission::AdventureCreature | CastingPermission::PlayFromExile { .. } => false,
+    })
+}
+
 /// CR 118.6 + CR 601.2h: whether this cast would pay a mana cost the card
 /// doesn't have. A normal-cost grant (`NormalCost` provenance, or a stored
 /// `SelfManaCost`) restates the card's printed cost, which for a card with no
@@ -18652,7 +18695,43 @@ fn announce_spell_on_stack(
     player: PlayerId,
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EngineError> {
+    // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
+    // for this cast; the declaration retains only its identity and journal mark.
+    if state.spell_cast_reversal.is_none() {
+        // CR 608.2g + CR 733.1: only the elected resolution-owned permission
+        // can have consumed a parent choice inside this input. Other casts use
+        // the existing action boundary directly, without serializing a prefix.
+        let resolution_owned = prepared
+            .casting_permission_index
+            .and_then(|index| {
+                state.objects.get(&prepared.object_id).and_then(|object| {
+                    selected_exile_alt_cost_permission(state, object, player, Some(index))
+                })
+            })
+            .is_some_and(|permission| {
+                matches!(
+                    permission,
+                    CastingPermission::ExileWithAltCost {
+                        resolution_cleanup: Some(_),
+                        ..
+                    }
+                )
+            });
+        if resolution_owned {
+            super::engine_casting::remember_cast_start(state, prepared.object_id)?;
+        }
+        state.spell_cast_reversal = Some(std::sync::Arc::new(
+            crate::types::game_state::SpellCastReversal {
+                object_id: prepared.object_id,
+                player,
+                journal_start: state.resolved_rules_journal.entries().len(),
+                undo: Vec::new(),
+                cost_mutations: false,
+                library_undo_forbidden: false,
+            },
+        ));
+    }
     // CR 400.7: A new cast announcement is a new casting event — discard any
     // stale behold creature-type choice left on the spell object from a prior
     // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
@@ -18684,6 +18763,7 @@ fn announce_spell_on_stack(
         },
         events,
     );
+    Ok(())
 }
 
 /// Continue the casting pipeline from a PreparedSpellCast.
@@ -18719,7 +18799,7 @@ fn continue_with_prepared(
     // CR 601.2a: The spell goes on the stack at announcement, before any
     // mode/target/cost steps. All subsequent branches construct a `PendingCast`
     // that references an object already on the stack.
-    announce_spell_on_stack(state, player, &prepared, events);
+    announce_spell_on_stack(state, player, &prepared, events)?;
 
     // Build the resolved ability from the ability_def, or a placeholder for auras
     // with no spell-level ability (aura targeting is via the Enchant keyword).
@@ -19522,7 +19602,7 @@ fn continue_with_no_ability(
     // so this path is only for non-Aura permanents.
 
     // CR 601.2a: Announce the spell onto the stack before any cost payment.
-    announce_spell_on_stack(state, player, &prepared, events);
+    announce_spell_on_stack(state, player, &prepared, events)?;
 
     // Build a placeholder resolved ability for cost-payment plumbing.
     // The PendingCast infrastructure requires a ResolvedAbility; it carries no
@@ -28044,6 +28124,15 @@ pub fn handle_cancel_cast(
     pending: &PendingCast,
     _events: &mut Vec<GameEvent>,
 ) {
+    // The owning action restored paid resources before entering this cleanup.
+    // Direct declaration-denial callers also retire the matching receipt.
+    if state
+        .spell_cast_reversal
+        .as_ref()
+        .is_some_and(|root| root.object_id == pending.object_id)
+    {
+        state.spell_cast_reversal = None;
+    }
     state.cancelled_casts.push(pending.object_id);
 
     // CR 601.2 + CR 733.1: Backing out of a cast reverses every choice and

@@ -286,10 +286,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("rejects Full v139 before it can read the attack event's attacked players", async () => {
+  it("rejects Full v140 before it can read the cast declaration", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 139 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 140 }));
 
     await expect(promise).rejects.toMatchObject({
       kind: "protocol_mismatch",
@@ -297,10 +297,10 @@ describe("openPhaseSocket", () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
-  it("accepts the literal Full v140 event-attackers protocol", async () => {
+  it("accepts the literal Full v141 cast-declaration protocol", async () => {
     const promise = openPhaseSocket("ws://test");
     const ws = MockWebSocket.instances[0];
-    ws.deliverMessage(helloFrame({ protocol_version: 140 }));
+    ws.deliverMessage(helloFrame({ protocol_version: 141 }));
 
     await expect(promise).resolves.toBeDefined();
     expect(ws.close).not.toHaveBeenCalled();

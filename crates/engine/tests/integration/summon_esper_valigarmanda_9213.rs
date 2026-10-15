@@ -12,12 +12,14 @@
 //! and nothing was offered. Now the chapter offers ONE linked card, chosen as
 //! it resolves, at its printed cost, payable with the chapter's red mana.
 //!
-//! The Saga is built from its printed text (CI has no card database). Both lore
-//! counters come from the CR 714.3c turn-based action, and chapter I exiles the
-//! cards itself, so the exile link is the production one.
+//! The Saga uses its printed text; the Room uses the small raw-MTGJSON fixture,
+//! so no installed card database is required. Both lore counters come from the
+//! CR 714.3c turn-based action, and chapter I exiles the cards itself, so the
+//! exile link is the production one.
 
 use engine::game::casting::spell_objects_available_to_cast;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{AdditionalCost, AdditionalCostOrigin, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
@@ -37,9 +39,64 @@ II, III, IV — Add {R} for each lore counter on this Saga. You may cast an inst
 card exiled with this Saga, and mana of any type can be spent to cast that spell.\n\
 Flying, haste";
 
-/// Warped Space, the unlocked door's text (`client/public/card-data.json`).
-const WARPED_SPACE: &str = "Once each turn, you may pay {0} rather than pay the mana cost for a \
-spell you cast from exile.";
+/// Both printed Room faces, reparsed from a small MTGJSON fixture in CI too.
+fn warped_space_db() -> &'static engine::database::card_db::CardDatabase {
+    static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/charred_foyer_warped_space_9751_atomic.json");
+        engine::database::card_db::CardDatabase::from_mtgjson(&path)
+            .expect("parse both printed Room doors")
+    })
+}
+
+fn add_warped_space(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_real_card(P0, "Charred Foyer", Zone::Hand, warped_space_db())
+}
+
+// Build the pre-existing host by actually casting its right door. This keeps
+// its live face, mana cost and unlocked designation on the production path.
+fn seed_unlocked_warped_space(runner: &mut GameRunner) {
+    let hosts: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.base_name == "Charred Foyer" && object.zone == Zone::Hand)
+        .map(|object| object.id)
+        .collect();
+    for host in hosts {
+        let before = runner.state().players[0].mana_pool.clone();
+        for color in [
+            engine::types::mana::ManaType::Red,
+            engine::types::mana::ManaType::Red,
+            engine::types::mana::ManaType::Colorless,
+            engine::types::mana::ManaType::Colorless,
+            engine::types::mana::ManaType::Colorless,
+            engine::types::mana::ManaType::Colorless,
+        ] {
+            runner.state_mut().players[0]
+                .mana_pool
+                .add(engine::types::mana::ManaUnit::new(
+                    color,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+        }
+        runner.cast(host).modal_back_face(true).resolve();
+        assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&host].name, "Warped Space");
+        assert_eq!(
+            runner.state().objects[&host].room_unlocks,
+            Some(engine::game::game_object::RoomUnlockState {
+                left_unlocked: false,
+                right_unlocked: true
+            })
+        );
+        assert_eq!(runner.state().players[0].mana_pool, before);
+    }
+}
 
 /// Anhelo, the Painter, verbatim.
 const ANHELO: &str = "Deathtouch\nThe first instant or sorcery spell you cast each turn has \
@@ -72,8 +129,19 @@ fn to_next_p0_precombat_main(runner: &mut GameRunner) {
     park_for_next_p0_precombat_main(runner);
     runner.advance_to_phase(Phase::PreCombatMain);
     runner.pass_both_players();
-    runner.advance_to_phase(Phase::PreCombatMain);
-    assert_eq!(runner.state().active_player, P0);
+    for _ in 0..4 {
+        runner.advance_to_phase(Phase::PreCombatMain);
+        if runner.state().active_player == P0 && runner.state().phase == Phase::PreCombatMain {
+            return;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => {
+                runner.declare_attackers(&[]).expect("P1 does not attack");
+            }
+            _ => panic!("next P0 main stopped at {:?}", runner.state().waiting_for),
+        }
+    }
+    panic!("next P0 main was not reached");
 }
 
 /// Pass priority until the stack is empty or a non-priority prompt opens,
@@ -199,17 +267,17 @@ fn reach_chapter_two_on_with(
 ) -> Board {
     let mut scenario = GameScenario::new();
     extra(&mut scenario);
-    let host = (warped_space != WarpedSpace::Absent).then(|| {
-        scenario
-            .add_enchantment_from_oracle(P0, "Warped Space", WARPED_SPACE)
-            .id()
-    });
+    let host = (warped_space != WarpedSpace::Absent).then(|| add_warped_space(&mut scenario));
 
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
     scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
     let saga = scenario
         .add_creature(P0, "Summon: Esper Valigarmanda", 6, 6)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 3,
+        })
         .as_enchantment()
         .with_subtypes(vec!["Saga"])
         .from_oracle_text(saga_text)
@@ -225,6 +293,7 @@ fn reach_chapter_two_on_with(
         .from_oracle_text("You gain 5 life.")
         .id();
     let mut runner = scenario.build();
+    seed_unlocked_warped_space(&mut runner);
 
     // Chapter I: the CR 714.3c lore counter triggers it; it exiles one
     // instant or sorcery card from each graveyard.
@@ -754,6 +823,11 @@ fn warped_space_keeps_casualty_for_a_card_with_no_mana_cost() {
                 })
                 .expect("sacrifice Fodder");
         }
+        if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("commit zero mana and casualty together");
+        }
         assert_eq!(
             runner.state().objects[&evermind].zone,
             Zone::Stack,
@@ -1206,43 +1280,54 @@ fn a_linked_fling_without_casualty_pays_its_sacrifice_once() {
     assert_eq!(resolve_fling(&mut runner), 2);
 }
 
-/// Warped Space with the linked Fling: the alternative-cost offer excludes a
-/// card with an additional cost (`payable_spell_alternative_cost_details`),
-/// so Fling pays `{1}{R}` with the chapter's mana, casualty is offered, and
-/// Fling's sacrifice still follows. Warped Space stays unused.
+/// CR 118.9d + CR 601.2f: the Room's alternative replaces only Fling's
+/// mana cost. Its sacrifice and each elected casualty remain independent.
 #[test]
-fn a_linked_fling_beside_warped_space_pays_its_mana_and_sacrifice() {
+fn a_linked_fling_composes_warped_space_with_its_sacrifice_and_casualty() {
     for casualty in [false, true] {
-        let FlingCast {
-            prompts,
-            fling_choices: _,
-            big,
-            small,
-            runner,
-            fling,
-        } = cast_linked_fling(true, casualty, WarpedSpace::Unspent, true);
-        assert_eq!(prompts, vec!["casualty", "fling"]);
-        assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
-        assert_eq!(runner.state().objects[&small].zone, Zone::Graveyard);
-        let big_zone = if casualty {
-            Zone::Graveyard
-        } else {
-            Zone::Battlefield
-        };
-        assert_eq!(runner.state().objects[&big].zone, big_zone);
-        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
-        assert!(runner.state().alt_cost_grant_permissions_used.is_empty());
+        for pay_zero in [false, true] {
+            let FlingCast {
+                prompts,
+                fling_choices,
+                big,
+                small,
+                mut runner,
+                fling,
+            } = cast_linked_fling(true, casualty, WarpedSpace::Unspent, pay_zero);
+            assert_eq!(prompts, vec!["alternative", "casualty", "fling"]);
+            assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
+            assert_eq!(runner.state().objects[&small].zone, Zone::Graveyard);
+            assert_eq!(
+                runner.state().objects[&big].zone,
+                if casualty {
+                    Zone::Graveyard
+                } else {
+                    Zone::Battlefield
+                }
+            );
+            assert!(fling_choices[0].contains(&small));
+            assert_eq!(fling_choices[0].contains(&big), !casualty);
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                if pay_zero { 2 } else { 0 }
+            );
+            assert_eq!(
+                runner.state().alt_cost_grant_permissions_used.len(),
+                usize::from(pay_zero)
+            );
+            assert_eq!(resolve_fling(&mut runner), if casualty { 4 } else { 2 });
+        }
     }
 }
 
 /// CR 118.9: Warped Space's {0} is offered to a targeted spell with Anhelo's
-/// casualty. The engine declares casualty before targets and the other costs,
-/// the alternative among them, after targets, as for any targeted spell.
+/// casualty. The alternative is elected before the casualty selection;
+/// both declarations survive target selection.
 /// P1's `{1}{W}` "Target player draws a card.": accepting pays {0} and spends
 /// Warped Space; declining pays `{1}{W}` with the chapter's mana. Casualty
 /// copies either way.
 #[test]
-fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
+fn warped_space_is_elected_before_casualty_and_targets_for_a_targeted_card() {
     for pay_zero in [true, false] {
         let card = OpponentCard {
             name: "Linked Draw",
@@ -1309,7 +1394,7 @@ fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
                 _ => break,
             }
         }
-        assert_eq!(prompts, vec!["casualty", "targets", "alternative"]);
+        assert_eq!(prompts, vec!["alternative", "casualty", "targets"]);
         assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
         assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
         let (mana_left, uses) = if pay_zero { (pool_before, 1) } else { (0, 0) };
@@ -1337,13 +1422,11 @@ fn warped_space_follows_casualty_and_targets_for_a_targeted_card() {
     }
 }
 
-/// CR 118.6a + CR 601.2h: P1's targeted linked card has no mana cost, so
-/// only the {0} of a creature carrying Warped Space's text casts it. That
-/// creature sacrificed for Anhelo's casualty before targets takes the {0}
-/// with it, and the cast is refused once targets are chosen instead of
-/// resolving for free. With the 3/3 paying casualty the {0} still applies.
+/// CR 601.2b/f/h: elect Warped Space's {0} before paying Anhelo's casualty.
+/// Opalescence animates the Room; sacrificing that actual grantor does not
+/// invalidate the elected alternative. Other fodder is the positive partner.
 #[test]
-fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodder() {
+fn a_linked_card_with_no_mana_cost_retains_the_alternative_when_its_source_is_sacrificed() {
     for sacrifice_grantor in [true, false] {
         let card = OpponentCard {
             name: "Linked Draw",
@@ -1363,14 +1446,27 @@ fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodde
             WarpedSpace::Absent,
             |scenario| {
                 scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
-                let grantor = scenario
-                    .add_creature_from_oracle(P0, "Warped Golem", 3, 3, WARPED_SPACE)
-                    .id();
+                scenario.add_enchantment_from_oracle(P0, "Opalescence",
+                    "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.");
+                let grantor = add_warped_space(scenario);
                 let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
                 ids = Some((grantor, fodder));
             },
         );
         let (grantor, fodder) = ids.expect("the creatures are on the battlefield");
+        assert_eq!(runner.state().objects[&grantor].name, "Warped Space");
+        assert_eq!(
+            runner.state().objects[&grantor].power,
+            Some(6),
+            "Opalescence uses the unlocked right door's printed {{4}}{{R}}{{R}}"
+        );
+        assert_eq!(
+            runner.state().objects[&grantor].room_unlocks,
+            Some(engine::game::game_object::RoomUnlockState {
+                left_unlocked: false,
+                right_unlocked: true
+            })
+        );
         runner
             .act(GameAction::SelectCards {
                 cards: vec![linked],
@@ -1384,9 +1480,17 @@ fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodde
                     assert_eq!(origin, AdditionalCostOrigin::Casualty);
                     runner.act(GameAction::DecideOptionalCost { pay: true })
                 }
-                WaitingFor::PayCost { .. } => runner.act(GameAction::SelectCards {
-                    cards: vec![paid_with],
-                }),
+                WaitingFor::PayCost { .. } => {
+                    let result = runner.act(GameAction::SelectCards {
+                        cards: vec![paid_with],
+                    });
+                    assert_eq!(
+                        runner.state().objects[&paid_with].zone,
+                        Zone::Battlefield,
+                        "zero-mana selection is still unpaid before targets and final payment"
+                    );
+                    result
+                }
                 WaitingFor::TargetSelection { .. } => runner.act(GameAction::SelectTargets {
                     targets: vec![TargetRef::Player(P0)],
                 }),
@@ -1398,11 +1502,1559 @@ fn a_linked_card_with_no_mana_cost_loses_its_alternative_with_the_casualty_fodde
                 break;
             }
         }
-        // The casualty sacrifice was paid before targets; the cancel does not
-        // rewind it (the existing cancel path).
+        assert!(
+            !refused,
+            "the elected alternative survives its source's departure"
+        );
         assert_eq!(runner.state().objects[&paid_with].zone, Zone::Graveyard);
-        assert_eq!(refused, sacrifice_grantor);
-        let on_stack = runner.state().objects[&linked].zone == Zone::Stack;
-        assert_eq!(on_stack, !sacrifice_grantor, "cast only through the {{0}}");
+        assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+        assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+        assert!(runner.state().pending_cast.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+/// Synthetic grammar witness from review: the real parser and reducer must
+/// consume a forwarded two-card pool as one resolution-time choice (CR 608.2g).
+#[test]
+fn a_forwarded_linked_exile_pool_casts_at_most_one_card_without_lingering_permissions() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        let first = scenario
+            .add_spell_to_library_top(P0, "First", true)
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text(GAIN_ONE)
+            .id();
+        let second = scenario
+            .add_spell_to_library_top(P0, "Second", false)
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text(GAIN_THREE)
+            .id();
+        let source = scenario.add_spell_to_hand(P0, "Forwarded pool witness", true)
+            .with_mana_cost(ManaCost::zero())
+            .from_oracle_text("Exile the top two cards of your library. You may cast an instant or sorcery card exiled with ~.").id();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: source,
+                card_id: runner.state().objects[&source].card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("cast producer");
+        settle(&mut runner);
+        let mut offered = pool_of(&runner);
+        offered.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(
+            offered, expected,
+            "reach guard: both linked members offered now"
+        );
+        assert!(runner
+            .act(GameAction::SelectCards {
+                cards: vec![first, second]
+            })
+            .is_err());
+        assert_eq!(pool_of(&runner).len(), 2);
+        runner
+            .act(GameAction::SelectCards {
+                cards: if accept { vec![first] } else { vec![] },
+            })
+            .expect("choose zero or one");
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pay zero");
+        }
+        assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&first].zone,
+            if accept { Zone::Stack } else { Zone::Exile }
+        );
+        assert!(runner.state().objects[&second]
+            .casting_permissions
+            .is_empty());
+        assert!(runner.state().objects[&first]
+            .casting_permissions
+            .is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().pending_cast.is_none());
+    }
+}
+
+/// CR 601.2f/h + CR 733.1: targeting Terror adds an unpayable life cost
+/// after casualty was declared. Reversal settles the entire cast and chapter;
+/// with enough life, the same entry pays the imposed cost and both sacrifices.
+#[test]
+fn an_illegal_linked_cast_reverses_its_declaration_and_resumes_its_parent() {
+    for enough_life in [false, true] {
+        let card = OpponentCard {
+            name: "Fling",
+            instant: true,
+            cost: ManaCost::zero(),
+            text: FLING,
+        };
+        let mut ids = None;
+        let Board {
+            mut runner,
+            sorcery: linked,
+            saga,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            card,
+            WarpedSpace::Absent,
+            |scenario| {
+                scenario.with_life(P0, if enough_life { 5 } else { 2 });
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                let fodder = scenario.add_creature(P0, "Casualty Fodder", 3, 3).id();
+                let small = scenario.add_creature(P0, "Fling Fodder", 1, 1).id();
+                let terror = scenario.add_creature_from_oracle(P1, "Terror of the Peaks", 5, 4,
+                    "Flying\nSpells your opponents cast that target this creature cost an additional 3 life to cast.\nWhenever another creature you control enters, this creature deals damage equal to that creature's power to any target.").id();
+                ids = Some((fodder, small, terror));
+            },
+        );
+        let (fodder, small, terror) = ids.unwrap();
+        let mana_before = runner.state().players[0].mana_pool.clone();
+        let mut events = Vec::new();
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![linked],
+            })
+            .inspect(|result| {
+                events.extend(result.events.clone());
+            })
+            .expect("pick Fling");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .inspect(|result| {
+                events.extend(result.events.clone());
+            })
+            .expect("elect casualty");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![fodder],
+            })
+            .inspect(|result| {
+                events.extend(result.events.clone());
+            })
+            .expect("reserve casualty fodder");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let _result = runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(terror)],
+            })
+            .inspect(|result| {
+                events.extend(result.events.clone());
+            })
+            .expect("settle legal declaration or reverse illegal cast");
+        if enough_life {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::PayCost { .. }
+            ));
+            runner
+                .act(GameAction::SelectCards { cards: vec![small] })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("Fling sacrifice");
+            runner
+                .act(GameAction::PassPriority)
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("commit total");
+            assert_eq!(runner.life(P0), 2);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+            assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&small].zone, Zone::Graveyard);
+        } else {
+            assert_eq!(runner.life(P0), 2);
+            assert_eq!(runner.state().players[0].mana_pool, mana_before);
+            assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&small].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Exile);
+            assert!(runner.state().objects[&linked]
+                .casting_permissions
+                .is_empty());
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.id != linked && entry.source_id != saga));
+            assert!(runner.state().pending_cast.is_none());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(cast_completions(&events, saga), 1);
+        }
+    }
+}
+
+// Reproduce the pre-election save omissions through the normal decoder.
+fn legacy_pending_save(state: &engine::types::game_state::GameState) -> serde_json::Value {
+    fn omit_election(value: &mut serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let own = usize::from(fields.remove("alternative_cost_election").is_some());
+                own + fields.values_mut().map(omit_election).sum::<usize>()
+            }
+            serde_json::Value::Array(values) => values.iter_mut().map(omit_election).sum(),
+            _ => 0,
+        }
+    }
+    let mut value = serde_json::to_value(state).expect("save current unfinished cast");
+    assert!(value
+        .as_object_mut()
+        .unwrap()
+        .remove("spell_cast_reversal")
+        .is_some());
+    assert!(
+        omit_election(&mut value) > 0,
+        "the fixture really lacks the new declaration field"
+    );
+    value
+}
+
+/// CR 733.1: life/discard paid in an earlier answer is restored when the cast
+/// is canceled, including after save/restore. Deferred casualty stays unpaid.
+#[test]
+fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapter() {
+    for discard in [false, true] {
+        for (reload, library_operation) in [(false, 0u8), (true, 0), (false, 2), (false, 1)] {
+            let library_disclosure = library_operation != 0;
+            let card = OpponentCard { name: "Bitter Triumph", instant: true,
+            cost: ManaCost::generic(2),
+            text: "As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker." };
+            let mut ids = None;
+            let Board {
+                mut runner,
+                sorcery: linked,
+                saga,
+                ..
+            } = reach_chapter_two_on_with(
+                VALIGARMANDA,
+                GAIN_ONE,
+                card,
+                WarpedSpace::Unspent,
+                |scenario| {
+                    scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                    scenario.add_land_to_hand(P0, "Plains");
+                    scenario.add_land_to_hand(P0, "Island");
+                    scenario
+                        .add_spell_to_hand(P0, "Unrelated private hand marker 9751", true)
+                        .with_mana_cost(ManaCost::zero())
+                        .from_oracle_text(GAIN_ONE);
+                    let fodder = scenario.add_creature(P0, "Fodder", 3, 3).id();
+                    let target = scenario.add_creature(P1, "Target", 3, 3).id();
+                    // Synthetic accepted mana grammar, for CR 733.1's library exception.
+                    let forest = if library_disclosure {
+                        scenario
+                            .add_land_from_oracle(
+                                P0,
+                                "Library exception witness",
+                                if library_operation == 2 {
+                                    "{T}: Add {G}. Shuffle your library."
+                                } else {
+                                    "{T}: Add {G}. Reveal the top card of your library."
+                                },
+                            )
+                            .id()
+                    } else {
+                        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green)
+                    };
+                    ids = Some((fodder, target, forest));
+                },
+            );
+            let (fodder, target, forest) = ids.unwrap();
+            runner.state_mut().loop_detection =
+                engine::types::game_state::LoopDetectionMode::Interactive;
+            let life_before = runner.life(P0);
+            let hand_before = runner.state().players[0].hand.clone();
+            let card_to_discard = hand_before[0];
+            let mana_before = runner.state().players[0].mana_pool.clone();
+            let mut events = Vec::new();
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![linked],
+                })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("pick Bitter Triumph");
+            if !discard && !reload && !library_disclosure {
+                let error = serde_json::from_value::<engine::types::game_state::GameState>(
+                    legacy_pending_save(runner.state()),
+                )
+                .expect_err("legacy alternative-vs-additional Choice has no provenance");
+                assert!(error.to_string().contains(
+                    "Legacy cost choice has no alternative-vs-additional declaration authority"
+                ));
+            }
+            runner
+                .act(GameAction::DecideOptionalCost { pay: true })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("elect zero");
+            runner
+                .act(GameAction::DecideOptionalCost { pay: true })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("elect casualty");
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![fodder],
+                })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("reserve fodder");
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target)],
+                })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("target creature");
+            runner
+                .act(GameAction::DecideOptionalCost { pay: discard })
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("decide printed cost");
+            if discard {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![card_to_discard],
+                    })
+                    .inspect(|result| {
+                        events.extend(result.events.clone());
+                    })
+                    .expect("pay discard");
+                assert_eq!(
+                    runner.state().objects[&card_to_discard].zone,
+                    Zone::Graveyard
+                );
+            } else {
+                assert_eq!(
+                    runner.life(P0),
+                    life_before - 3,
+                    "reach guard: prior life payment"
+                );
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ManaPayment { .. }
+            ));
+            let saved = serde_json::to_value(runner.state()).unwrap();
+            let reversal = saved
+                .get("spell_cast_reversal")
+                .expect("paid cast has a reversal descriptor");
+            assert!(
+                reversal.get("baseline").is_none(),
+                "there is no nested game snapshot"
+            );
+            assert!(
+                !reversal
+                    .to_string()
+                    .contains("Unrelated private hand marker 9751"),
+                "the unrelated private card is not copied into the undo descriptor"
+            );
+            for edit in reversal["undo"].as_array().unwrap() {
+                let data = edit.as_object().unwrap().values().next().unwrap();
+                let path = data["path"].as_array().unwrap();
+                assert!(
+                    !(path.len() == 3 && path[0] == "players" && path[2] == "library"),
+                    "ordinary payment does not retain library contents"
+                );
+                assert!(
+                    path.len() > 1 || (path[0] != "objects" && path[0] != "players"),
+                    "only changed members are retained, never the complete object or player store"
+                );
+            }
+            runner
+                .act(GameAction::SetPriorityPassingMode {
+                    mode: engine::types::game_state::PriorityPassingMode::FullControl,
+                })
+                .expect("change an independent preference during payment");
+            let order: Vec<_> = runner.state().players[0]
+                .hand
+                .iter()
+                .rev()
+                .copied()
+                .collect();
+            runner
+                .act(GameAction::ReorderHand {
+                    order: order.clone(),
+                })
+                .expect("reorder the current hand");
+            let restored_order: Vec<_> = if discard {
+                std::iter::once(card_to_discard).chain(order).collect()
+            } else {
+                order
+            };
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                hand_before.len() - usize::from(discard)
+            );
+            let selection =
+                engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+                    .into_iter()
+                    .find(|selection| selection.source.object_id == forest)
+                    .expect("Forest mana selection during the payment window");
+            let library_command_start = runner.state().resolved_rules_journal.entries().len();
+            runner
+                .act(GameAction::TapLandForMana { selection })
+                .expect("activate Forest after earlier spell cost");
+            assert!(runner.state().objects[&forest].tapped);
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                mana_before.total() + 1
+            );
+            if reload {
+                let mut legacy = GameRunner::from_state(
+                    serde_json::from_value(legacy_pending_save(runner.state()))
+                        .expect("legacy determined mana total can resume"),
+                );
+                let before = serde_json::to_value(legacy.state()).unwrap();
+                let error = legacy
+                    .act(GameAction::CancelCast)
+                    .expect_err("legacy save must not invent missing cost history");
+                assert!(error.to_string().contains("cannot be canceled safely"));
+                assert_eq!(serde_json::to_value(legacy.state()).unwrap(), before);
+                legacy
+                    .act(GameAction::PassPriority)
+                    .expect("finish already determined legacy total");
+                assert_eq!(legacy.state().objects[&linked].zone, Zone::Stack);
+                assert_eq!(legacy.state().objects[&fodder].zone, Zone::Graveyard);
+                assert_eq!(legacy.state().alt_cost_grant_permissions_used.len(), 1);
+                let saved =
+                    serde_json::to_string(runner.state()).expect("save paid unfinished cast");
+                runner = GameRunner::from_state(
+                    serde_json::from_str(&saved).expect("restore paid unfinished cast"),
+                );
+            }
+            let names: std::sync::Arc<[String]> = vec!["Bitter Triumph".into()].into();
+            runner.state_mut().all_card_names = names.clone();
+            for viewer in [P0, P1] {
+                let projected =
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), viewer);
+                assert!(serde_json::to_value(projected)
+                    .unwrap()
+                    .get("spell_cast_reversal")
+                    .is_none());
+            }
+            if library_disclosure {
+                if library_operation == 2 {
+                    assert!(runner.state().resolved_rules_journal.entries_since(library_command_start)
+                        .iter().any(|entry| matches!(entry.command.as_ref(), Some(
+                            engine::types::resolved_commands::ResolvedRulesCommand::LibraryShuffle(_)))),
+                        "reach: the mana ability really shuffled the library");
+                } else {
+                    let top = *runner.state().players[0]
+                        .library
+                        .front()
+                        .expect("library still has a card");
+                    assert!(
+                        runner.state().public_revealed_cards.contains(&top),
+                        "reach: the mana ability revealed the library top"
+                    );
+                }
+                let before_cancel = serde_json::to_value(runner.state()).unwrap();
+                let error = runner
+                    .act(GameAction::CancelCast)
+                    .expect_err("cannot undo a library shuffle or disclosure");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Cannot undo a library disclosure"),
+                    "{error:?}"
+                );
+                assert_eq!(
+                    serde_json::to_value(runner.state()).unwrap(),
+                    before_cancel,
+                    "refused cancel leaves the legal payment procedure intact"
+                );
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the cast can still finish");
+                assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+                assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+                continue;
+            }
+            let _result = runner
+                .act(GameAction::CancelCast)
+                .inspect(|result| {
+                    events.extend(result.events.clone());
+                })
+                .expect("reverse whole cast");
+            assert_eq!(runner.life(P0), life_before);
+            assert_eq!(
+                runner.state().players[0]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                restored_order
+            );
+            assert_eq!(
+                runner.state().priority_passing_mode(P0),
+                engine::types::game_state::PriorityPassingMode::FullControl,
+                "canceling a cast must retain a later actor-scoped preference"
+            );
+            assert_eq!(runner.state().objects[&card_to_discard].zone, Zone::Hand);
+            assert_eq!(runner.state().players[0].mana_pool, mana_before);
+            assert!(
+                !runner.state().objects[&forest].tapped,
+                "earlier-cost reversal also undoes legal mana"
+            );
+            assert_eq!(
+                runner.state().all_card_names,
+                names,
+                "reload runtime metadata survives cancellation"
+            );
+            if !reload {
+                let trace = engine::game::play_trace_view(runner.state()).expect("live play trace");
+                assert!(trace.entries.iter().all(|entry| !matches!(&entry.kind,
+                engine::game::EntryKind::Play { locus: engine::game::PlayLocus::Mana(id, _), .. } if *id == forest)),
+                "the trace must not retain the undone Forest activation");
+            }
+            assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Exile);
+            assert!(runner.state().objects[&linked]
+                .casting_permissions
+                .is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.id != linked && entry.source_id != saga));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().alt_cost_grant_permissions_used.is_empty());
+            assert_eq!(cast_completions(&events, saga), 1);
+        }
+    }
+}
+
+/// CR 118.9d + CR 601.2b/f: the alternative declaration and the printed
+/// choice/kicker are separate questions, through the real linked-Saga route.
+#[test]
+fn linked_alternative_costs_preserve_printed_choice_and_kicker() {
+    for kicker in [false, true] {
+        for pay_zero in [false, true] {
+            for pay_extra in [false, true] {
+                let card = OpponentCard {
+                    name: "Additional declaration witness",
+                    instant: true,
+                    cost: ManaCost::generic(1),
+                    text: if kicker {
+                        "Kicker {1}\nYou gain 1 life."
+                    } else {
+                        "As an additional cost to cast this spell, discard a card or pay 3 life. You gain 1 life."
+                    },
+                };
+                let Board {
+                    mut runner,
+                    sorcery: linked,
+                    ..
+                } = reach_chapter_two_on(VALIGARMANDA, GAIN_ONE, card, WarpedSpace::Unspent);
+                let hand = runner.state().players[0].hand[0];
+                let life = runner.life(P0);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![linked],
+                    })
+                    .expect("pick linked card");
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalCostChoice {
+                        cost: AdditionalCost::Choice(..),
+                        ..
+                    }
+                ));
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: pay_zero })
+                    .expect("elect alternative");
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::OptionalCostChoice { .. }
+                    ),
+                    "reach guard: printed additional obligation still offered"
+                );
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: pay_extra })
+                    .expect("elect printed extra");
+                if !kicker && pay_extra {
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![hand] })
+                        .expect("discard one card");
+                }
+                for _ in 0..8 {
+                    match runner.state().waiting_for {
+                        WaitingFor::ManaPayment { .. } => {
+                            runner.act(GameAction::PassPriority).expect("commit mana");
+                        }
+                        _ => break,
+                    }
+                }
+                assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+                assert_eq!(
+                    runner.state().alt_cost_grant_permissions_used.len(),
+                    usize::from(pay_zero)
+                );
+                let paid_mana = usize::from(!pay_zero) + usize::from(kicker && pay_extra);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 2 - paid_mana);
+                if kicker {
+                    let entry = runner
+                        .state()
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == linked)
+                        .unwrap();
+                    assert_eq!(
+                        entry.ability().unwrap().context.kickers_paid.len(),
+                        usize::from(pay_extra)
+                    );
+                } else {
+                    assert_eq!(runner.life(P0), life - if pay_extra { 0 } else { 3 });
+                    assert_eq!(
+                        runner.state().objects[&hand].zone,
+                        if pay_extra {
+                            Zone::Graveyard
+                        } else {
+                            Zone::Hand
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// CR 118.9a/d: a selected free permission is already the alternative;
+/// Warped Space must not replace it or spend a second grant's once-turn slot.
+#[test]
+fn a_selected_free_cast_keeps_its_required_cost_without_a_second_alternative() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_warped_space(&mut scenario);
+    let caster = scenario.add_creature_from_oracle(P0, "Free cast grammar witness", 1, 1,
+        "{T}: Exile target instant or sorcery card from your graveyard. You may cast that card without paying its mana cost.").id();
+    let fodder = scenario.add_creature(P0, "Fling Fodder", 3, 3).id();
+    let fling = scenario.add_spell_to_graveyard(P0, "Fling", true)
+        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Red], generic: 1 })
+        .from_oracle_text("As an additional cost to cast this spell, sacrifice a creature.\nFling deals damage equal to the sacrificed creature's power to any target.").id();
+    let mut runner = scenario.build();
+    seed_unlocked_warped_space(&mut runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: caster,
+            ability_index: 0,
+        })
+        .expect("activate the free-cast instruction");
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&fling].zone,
+        Zone::Exile,
+        "the production instruction exiled Fling"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the parsed free cast is offered as its granting ability resolves; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("choose the free cast");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("target P1");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "only Fling's required sacrifice remains; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .expect("pay required sacrifice");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("commit free cast plus sacrifice");
+    }
+    assert_eq!(runner.state().objects[&fling].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert!(runner.state().alt_cost_grant_permissions_used.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// CR 601.2f/h: even a replacement-ordering sacrifice must not remove a
+/// cost-floor source before the spell's alternative plus kicker total is locked.
+#[test]
+fn a_linked_kicker_cast_locks_its_floor_before_replacement_ordering_sacrifices() {
+    for (replacements, reload) in [(false, false), (true, false), (true, true)] {
+        let mut ids = None;
+        let Board { mut runner, sorcery: linked, .. } = reach_chapter_two_on_with(
+            VALIGARMANDA, GAIN_ONE,
+            OpponentCard { name: "Vines of Vastwood", instant: true,
+                cost: ManaCost::Cost { shards: vec![ManaCostShard::Green], generic: 0 },
+                text: "Kicker {G} (You may pay an additional {G} as you cast this spell.)\nTarget creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn." },
+            WarpedSpace::Unspent, |scenario| {
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 3, ANHELO);
+                scenario.add_enchantment_from_oracle(P0, "March of the Machines",
+                    "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)")
+                    .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Blue], generic: 3 });
+                let trinisphere = scenario.add_artifact_from_oracle(P0, "Trinisphere",
+                    "As long as this artifact is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)")
+                    .with_mana_cost(ManaCost::generic(3)).id();
+                let target = scenario.add_creature(P0, "Target", 3, 3).id();
+                let forests: Vec<_> = (0..3).map(|_| scenario.add_basic_land(P0,
+                    engine::types::mana::ManaColor::Green)).collect();
+                if replacements {
+                    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void",
+                        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.")
+                        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black, ManaCostShard::Black], generic: 2 });
+                    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2,
+                        "Shadow (This creature can block or be blocked by only creatures with shadow.)\nIf a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.\n{T}, Sacrifice this creature: Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.")
+                        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black, ManaCostShard::Black], generic: 0 });
+                }
+                ids = Some((trinisphere, target, forests));
+            });
+        let (trinisphere, target, forests) = ids.unwrap();
+        assert_eq!(runner.state().objects[&trinisphere].power, Some(3));
+        assert!(!runner.state().objects[&trinisphere].tapped);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![linked],
+            })
+            .expect("pick Vines");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("elect Room zero");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("elect casualty");
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![trinisphere],
+            })
+            .expect("select animated floor source");
+        assert_eq!(
+            runner.state().objects[&trinisphere].zone,
+            Zone::Battlefield,
+            "selection must not pay a replacement-aware sacrifice"
+        );
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target)],
+            })
+            .expect("target the other creature");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("elect kicker");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        assert_eq!(
+            runner
+                .state()
+                .pending_cast
+                .as_ref()
+                .unwrap()
+                .cost
+                .mana_value(),
+            3,
+            "zero alternative plus one-mana kicker keeps the original three-mana floor"
+        );
+        for forest in forests {
+            let selection =
+                engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+                    .into_iter()
+                    .find(|selection| selection.source.object_id == forest)
+                    .expect("each untapped Forest is an authoritative mana source");
+            runner
+                .act(GameAction::TapLandForMana { selection })
+                .expect("activate Forest for the locked total");
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay the locked three mana");
+        if replacements {
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "reach: two actual sacrifice replacements require ordering at payment"
+            );
+            if reload {
+                runner = GameRunner::from_state(
+                    serde_json::from_str(&serde_json::to_string(runner.state()).unwrap()).unwrap(),
+                );
+            }
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("resume the paid spell after replacement ordering");
+        }
+        assert_eq!(
+            runner.state().objects[&trinisphere].zone,
+            if replacements {
+                Zone::Exile
+            } else {
+                Zone::Graveyard
+            }
+        );
+        assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+        let entry = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == linked)
+            .unwrap();
+        let engine::types::game_state::StackEntryKind::Spell {
+            actual_mana_spent, ..
+        } = &entry.kind
+        else {
+            panic!("the original cast must be a spell");
+        };
+        assert_eq!(
+            *actual_mana_spent, 3,
+            "one exact mana payment across the pause"
+        );
+        assert_eq!(entry.ability().unwrap().context.kickers_paid.len(), 1);
+        assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+        assert!(runner.state().pending_cast.is_none());
+        assert!(runner.state().pending_cost_move_resume.is_none());
+    }
+}
+
+/// CR 733.1 + CR 800.4a: undo this spell's prior payment, while a different
+/// player's independent concession remains settled. Both survive serde restore.
+#[test]
+fn canceling_a_paid_cast_preserves_another_players_concession() {
+    for reload in [false, true] {
+        let p2 = engine::types::player::PlayerId(2);
+        let mut scenario = GameScenario::new_n_player(3, 9751);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_land_to_hand(P0, "Forest");
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Black,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ),
+                engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Black,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ),
+            ],
+        );
+        let target = scenario.add_creature(P0, "Target", 3, 3).id();
+        let spell = scenario.add_spell_to_hand(P0, "Bitter Triumph", true)
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 1 })
+            .from_oracle_text("As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker.").id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("announce the printed spell");
+        let WaitingFor::OptionalCostChoice { pending_cast, .. } = &runner.state().waiting_for
+        else {
+            panic!("the sole legal target leads to the printed cost choice");
+        };
+        assert_eq!(
+            pending_cast.ability.targets,
+            vec![TargetRef::Object(target)]
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("pay three life");
+        assert_eq!(
+            runner.life(P0),
+            17,
+            "reach: an earlier spell payment was committed"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        runner
+            .act(GameAction::Concede { player_id: p2 })
+            .expect("the third player concedes independently");
+        assert!(runner.state().players[2].is_eliminated);
+        if reload {
+            runner = GameRunner::from_state(
+                serde_json::from_str(&serde_json::to_string(runner.state()).unwrap()).unwrap(),
+            );
+        }
+        runner
+            .act(GameAction::CancelCast)
+            .expect("cancel only the unfinished spell");
+        assert_eq!(runner.life(P0), 20);
+        assert!(
+            runner.state().players[2].is_eliminated,
+            "concession is not a casting payment"
+        );
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+        assert!(runner.state().pending_cast.is_none());
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+}
+
+/// CR 601.2g-h + CR 733.1: reserved casualty fodder cannot pay a second
+/// sacrifice. A different Blood Vassal can legally pay its mana ability; cancel
+/// returns that payment and the earlier life payment, while completion keeps both.
+#[test]
+fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
+    for (cancel_cast, reload) in [(true, false), (true, true), (false, false)] {
+        let mut ids = None;
+        let Board { mut runner, sorcery: linked, saga, .. } = reach_chapter_two_on_with(
+            VALIGARMANDA, GAIN_ONE,
+            OpponentCard { name: "Bitter Triumph", instant: true,
+                cost: ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 1 },
+                text: "As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker." },
+            WarpedSpace::Unspent, |scenario| {
+                scenario.add_land_to_hand(P0, "Forest");
+                scenario.add_creature_from_oracle(P0, "Anhelo, the Painter", 1, 1, ANHELO);
+                let reserved = scenario.add_creature_from_oracle(P0, "Blood Vassal", 2, 2,
+                    "Sacrifice this creature: Add {B}{B}.")
+                    .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 2 })
+                    .with_subtypes(vec!["Thrull"]).id();
+                let other = scenario.add_creature_from_oracle(P0, "Blood Vassal", 2, 2,
+                    "Sacrifice this creature: Add {B}{B}.")
+                    .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 2 })
+                    .with_subtypes(vec!["Thrull"]).id();
+                let target = scenario.add_creature(P1, "Target", 3, 3).id();
+                ids = Some((reserved, other, target));
+            });
+        let (reserved, other, target) = ids.unwrap();
+        runner.state_mut().loop_detection =
+            engine::types::game_state::LoopDetectionMode::Interactive;
+        let mana_before = runner.state().players[0].mana_pool.clone();
+        let mut events = Vec::new();
+        for action in [
+            GameAction::SelectCards {
+                cards: vec![linked],
+            },
+            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { pay: true },
+            GameAction::SelectCards {
+                cards: vec![reserved],
+            },
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target)],
+            },
+            GameAction::DecideOptionalCost { pay: false },
+        ] {
+            events.extend(
+                runner
+                    .act(action)
+                    .expect("declare and pay the printed life choice")
+                    .events,
+            );
+        }
+        assert_eq!(runner.life(P0), 17, "reach: a prior action paid three life");
+        assert_eq!(runner.state().objects[&reserved].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        let before_rejected = serde_json::to_value(runner.state()).unwrap();
+        let error = runner
+            .act(GameAction::ActivateAbility {
+                source_id: reserved,
+                ability_index: 0,
+            })
+            .expect_err("one permanent cannot pay both sacrifices");
+        assert!(error
+            .to_string()
+            .contains("already committed to a spell sacrifice cost"));
+        assert_eq!(
+            serde_json::to_value(runner.state()).unwrap(),
+            before_rejected
+        );
+        events.extend(
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: other,
+                    ability_index: 0,
+                })
+                .expect("activate the other Blood Vassal during the mana window")
+                .events,
+        );
+        assert_eq!(
+            runner.state().objects[&other].zone,
+            Zone::Graveyard,
+            "reach: the legal mana ability really sacrificed its own source"
+        );
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            mana_before.total() + 2
+        );
+        if reload {
+            runner = GameRunner::from_state(
+                serde_json::from_str(&serde_json::to_string(runner.state()).unwrap()).unwrap(),
+            );
+        }
+        let action = if cancel_cast {
+            GameAction::CancelCast
+        } else {
+            GameAction::PassPriority
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("cancel the paid cast or finish its legal total")
+                .events,
+        );
+        if cancel_cast {
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().players[0].mana_pool, mana_before);
+            assert_eq!(runner.state().objects[&reserved].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Exile);
+            assert!(runner.state().objects[&linked]
+                .casting_permissions
+                .is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.id != linked && entry.source_id != saga));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().alt_cost_grant_permissions_used.is_empty());
+            assert_eq!(cast_completions(&events, saga), 1);
+            if !reload {
+                let trace = engine::game::play_trace_view(runner.state()).expect("live play trace");
+                assert!(trace.entries.iter().all(|entry| !matches!(&entry.kind,
+                    engine::game::EntryKind::Play { locus: engine::game::PlayLocus::Mana(id, _), .. } if *id == other)),
+                    "the trace does not retain the reversed mana sacrifice");
+            }
+            let sources =
+                engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0);
+            assert!(
+                sources
+                    .iter()
+                    .any(|selection| selection.source.object_id == other),
+                "the returned creature keeps its printed mana ability"
+            );
+        } else {
+            assert_eq!(runner.life(P0), 17);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+            assert_eq!(runner.state().objects[&reserved].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
+            assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+        }
+    }
+}
+
+/// CR 118.9d + CR 733.1: synthetic no-mana-cost spell with one supported
+/// life cost. The printed Room supplies its sole alternative and Dovin supplies
+/// a mana increase, so the selecting input pays life and leaves payment open.
+#[test]
+fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life() {
+    for (cancel, reload) in [(true, false), (true, true), (false, false)] {
+        let Board {
+            mut runner,
+            sorcery: linked,
+            saga,
+            chapter_two_events,
+            ..
+        } = reach_chapter_two_on_with(
+            VALIGARMANDA,
+            GAIN_ONE,
+            OpponentCard {
+                name: "No printed cost life payment witness",
+                instant: true,
+                cost: ManaCost::NoCost,
+                text: "As an additional cost to cast this spell, pay 3 life.\nYou gain 1 life.",
+            },
+            WarpedSpace::Unspent,
+            |scenario| {
+                scenario.add_planeswalker_from_oracle(P1, "Dovin, Hand of Control", "Dovin", 5,
+                    "Artifact, instant, and sorcery spells your opponents cast cost {1} more to cast.\n[−1]: Until your next turn, prevent all damage that would be dealt to and dealt by target permanent an opponent controls.")
+                    .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::WhiteBlue], generic: 2 });
+            },
+        );
+        let mana_before = runner.state().players[0].mana_pool.clone();
+        let mut events = chapter_two_events;
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![linked],
+                })
+                .expect("elect the sole alternative and begin its additional cost")
+                .events,
+        );
+        assert_eq!(
+            runner.life(P0),
+            17,
+            "reach: the selecting input itself paid life"
+        );
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner
+                .state()
+                .pending_cast
+                .as_ref()
+                .unwrap()
+                .cost
+                .mana_value(),
+            1,
+            "the real cost increase leaves a nonzero mana component"
+        );
+        assert_eq!(
+            cast_completions(&events, saga),
+            1,
+            "the shared instruction marker already exists while its cast waits for payment"
+        );
+        if reload {
+            runner = GameRunner::from_state(
+                serde_json::from_str(&serde_json::to_string(runner.state()).unwrap()).unwrap(),
+            );
+        }
+        if cancel {
+            events.extend(
+                runner
+                    .act(GameAction::CancelCast)
+                    .expect("cancel the paid initial input")
+                    .events,
+            );
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Exile);
+            assert!(runner.state().objects[&linked]
+                .casting_permissions
+                .is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.id != linked && entry.source_id != saga));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(cast_completions(&events, saga), 1);
+            assert!(runner.state().alt_cost_grant_permissions_used.is_empty());
+            assert_eq!(runner.state().players[0].mana_pool, mana_before);
+        } else {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay the cost increase and complete")
+                    .events,
+            );
+            assert_eq!(cast_completions(&events, saga), 1);
+            assert_eq!(runner.life(P0), 17);
+            assert_eq!(runner.state().objects[&linked].zone, Zone::Stack);
+            assert_eq!(runner.state().alt_cost_grant_permissions_used.len(), 1);
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                mana_before.total() - 1
+            );
+        }
+    }
+}
+
+/// CR 606.3 + CR 733.1: canceling a spell cannot give a planeswalker a
+/// second loyalty activation after its unrelated earlier ability resolved.
+#[test]
+fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
+    for cancel_cast in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Forest", "Forest"]);
+        scenario.with_library_top(P1, &["Forest", "Forest"]);
+        let jace = scenario.add_planeswalker_from_oracle(P0, "Jace Beleren", "Jace", 3,
+            "[+2]: Each player draws a card.\n[−1]: Target player draws a card.\n[−10]: Target player mills twenty cards.").id();
+        let blood = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Blood Vassal",
+                2,
+                2,
+                "Sacrifice this creature: Add {B}{B}.",
+            )
+            .id();
+        let target = scenario.add_creature(P1, "Target", 3, 3).id();
+        let spell = scenario.add_spell_to_hand(P0, "Bitter Triumph", true)
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 1 })
+            .from_oracle_text("As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker.").id();
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| {
+                    engine::types::mana::ManaUnit::new(
+                        engine::types::mana::ManaType::Black,
+                        ObjectId(0),
+                        false,
+                        vec![],
+                    )
+                })
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner.activate(jace, 0).resolve();
+        assert_eq!(
+            runner.state().objects[&jace].loyalty_activations_this_turn,
+            1
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: jace,
+                ability_index: 0,
+            })
+            .expect_err("the earlier resolved activation has spent this turn's loyalty window");
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Manual,
+            })
+            .expect("announce Bitter Triumph");
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target)],
+            })
+            .expect("select the creature through the announcement prompt");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("pay three life");
+        assert_eq!(runner.life(P0), 17);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ManaPayment { .. }
+        ));
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: blood,
+                ability_index: 0,
+            })
+            .expect("sacrifice Blood Vassal for mana during payment");
+        assert_eq!(runner.state().objects[&blood].zone, Zone::Graveyard);
+        runner
+            .act(if cancel_cast {
+                GameAction::CancelCast
+            } else {
+                GameAction::PassPriority
+            })
+            .expect("cancel or complete the spell");
+        assert_eq!(
+            runner.state().objects[&spell].zone,
+            if cancel_cast { Zone::Hand } else { Zone::Stack }
+        );
+        assert_eq!(
+            runner.state().objects[&blood].zone,
+            if cancel_cast {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            }
+        );
+        assert_eq!(runner.life(P0), if cancel_cast { 20 } else { 17 });
+        assert_eq!(
+            runner.state().objects[&jace].loyalty_activations_this_turn,
+            1,
+            "an unrelated resolved loyalty activation is not a casting payment"
+        );
+        if cancel_cast {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: jace,
+                    ability_index: 0,
+                })
+                .expect_err("canceling another spell cannot reopen the loyalty window");
+        }
+    }
+}
+
+/// Synthetic review witness, not printed Oracle text. CR 605.1a/605.3b:
+/// exile-to-stack does not disqualify a mana ability, but this inline resolver
+/// cannot suspend for the cast. The parser must expose the whole ability as a
+/// gap. With a library-moving activation cost, the same cast legitimately uses
+/// the stack and remains supported (CR 608.2g).
+fn check_linked_paid_cast_mana_boundary(route: &str) {
+    for mana_first in [false, true] {
+        for mana_ability in [false, true] {
+            for accept in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let cost = if mana_ability {
+                    "{T}"
+                } else {
+                    "{T}, Mill a card"
+                };
+                let effects = if mana_first {
+                    "Add {G}."
+                } else {
+                    "You gain 1 life. Add {G}."
+                };
+                let activated = format!(
+                    "{cost}: {effects} You may cast an instant or sorcery card exiled with ~."
+                );
+                let body = match route {
+                    "printed" => activated.to_string(),
+                    "quoted" => format!("This artifact has \"{activated}\"."),
+                    "station" => format!("0+ | {activated}"),
+                    _ => unreachable!("fixed test routes"),
+                };
+                let text = format!(
+                    "{{0}}: Exile target instant or sorcery card from a graveyard.\n{body}"
+                );
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Linked cast boundary", &text)
+                    .with_subtypes(vec!["Spacecraft"])
+                    .id();
+                let child = scenario
+                    .add_spell_to_graveyard(P0, "Linked child", true)
+                    .with_mana_cost(ManaCost::zero())
+                    .from_oracle_text(GAIN_ONE)
+                    .id();
+                let mill = scenario
+                    .add_spell_to_library_top(P0, "Mill cost", true)
+                    .with_mana_cost(ManaCost::zero())
+                    .from_oracle_text(GAIN_ONE)
+                    .id();
+                let mut runner = scenario.build();
+                runner.activate(source, 0).target_object(child).resolve();
+                assert_eq!(
+                    runner.state().objects[&source].abilities.len(),
+                    2,
+                    "route {route}"
+                );
+                assert_eq!(runner.state().objects[&child].zone, Zone::Exile);
+                let ability = &runner.state().objects[&source].abilities[1];
+                if mana_ability {
+                    assert!(
+                        matches!(&*ability.effect, engine::types::ability::Effect::Unimplemented {name, ..}
+                    if name == "linked_exile_mana_cast")
+                    );
+                    assert!(ability.sub_ability.is_none());
+                    assert!(!engine::game::mana_abilities::is_mana_ability(ability));
+                    assert!(
+                        engine::game::mana_sources::activatable_mana_source_selections(
+                            runner.state(),
+                            P0
+                        )
+                        .iter()
+                        .all(|selection| selection.source.object_id != source)
+                    );
+                    continue;
+                }
+                assert!(runner
+                    .state()
+                    .exile_links
+                    .iter()
+                    .any(|link| link.source_id == source && link.exiled_id == child));
+                if mana_first {
+                    assert!(matches!(
+                        &*ability.effect,
+                        engine::types::ability::Effect::Mana { .. }
+                    ));
+                } else {
+                    assert!(matches!(
+                        &*ability.effect,
+                        engine::types::ability::Effect::GainLife { .. }
+                    ));
+                }
+                assert!(!engine::game::mana_abilities::is_mana_ability(ability));
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: source,
+                        ability_index: 1,
+                    })
+                    .expect("activate the stack-using partner");
+                assert_eq!(runner.state().objects[&mill].zone, Zone::Graveyard);
+                settle(&mut runner);
+                assert_eq!(pool_of(&runner), vec![child]);
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: if accept { vec![child] } else { vec![] },
+                    })
+                    .expect("choose zero or one linked spell");
+                for _ in 0..8 {
+                    if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                        break;
+                    }
+                    runner.act(GameAction::PassPriority).expect("pay zero");
+                }
+                assert_eq!(
+                    runner.state().objects[&child].zone,
+                    if accept { Zone::Stack } else { Zone::Exile }
+                );
+                assert!(runner.state().objects[&child]
+                    .casting_permissions
+                    .is_empty());
+                assert!(runner.state().pending_cast.is_none());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn linked_paid_casts_refuse_inline_mana_but_preserve_stack_resolution() {
+    check_linked_paid_cast_mana_boundary("printed");
+}
+
+#[test]
+fn linked_paid_casts_refuse_quoted_inline_mana_but_preserve_stack_resolution() {
+    check_linked_paid_cast_mana_boundary("quoted");
+}
+
+#[test]
+fn linked_paid_casts_refuse_station_inline_mana_but_preserve_stack_resolution() {
+    check_linked_paid_cast_mana_boundary("station");
+}
+
+/// Synthetic review witness. CR 605.1b/605.4a: adding mana after a mana
+/// activation must resolve immediately even when a later clause casts a card.
+/// A life-gain trigger with the same body is an ordinary stack-using partner.
+#[test]
+fn linked_paid_casts_refuse_mana_triggers_but_preserve_ordinary_triggers() {
+    for mana_trigger in [false, true] {
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            let text = if mana_trigger {
+                "{0}: Exile target instant or sorcery card from a graveyard.\nWhenever you tap a land for mana, add {G}. You may cast an instant or sorcery card exiled with ~."
+            } else {
+                "{0}: Exile target instant or sorcery card from a graveyard.\nWhenever you gain life, add {G}. You may cast an instant or sorcery card exiled with ~."
+            };
+            let source = scenario
+                .add_enchantment_from_oracle(P0, "Linked trigger boundary", text)
+                .id();
+            let child = scenario
+                .add_spell_to_graveyard(P0, "Linked child", true)
+                .with_mana_cost(ManaCost::zero())
+                .from_oracle_text(GAIN_ONE)
+                .id();
+            let producer = scenario
+                .add_spell_to_hand(P0, "Life gain producer", true)
+                .with_mana_cost(ManaCost::zero())
+                .from_oracle_text(GAIN_ONE)
+                .id();
+            let mut runner = scenario.build();
+            assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+            runner.activate(source, 0).target_object(child).resolve();
+            assert_eq!(runner.state().objects[&child].zone, Zone::Exile);
+            let trigger = &runner.state().objects[&source].trigger_definitions[0].definition;
+            let body = trigger.execute.as_deref().expect("parsed trigger body");
+            if mana_trigger {
+                assert_eq!(
+                    trigger.mode,
+                    engine::types::triggers::TriggerMode::TapsForMana
+                );
+                assert!(
+                    matches!(&*body.effect, engine::types::ability::Effect::Unimplemented {name, ..}
+                    if name == "linked_exile_mana_cast")
+                );
+                assert!(body.sub_ability.is_none());
+                continue;
+            }
+            assert!(matches!(
+                &*body.effect,
+                engine::types::ability::Effect::Mana { .. }
+            ));
+            assert!(runner
+                .state()
+                .exile_links
+                .iter()
+                .any(|link| link.source_id == source && link.exiled_id == child));
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: producer,
+                    card_id: runner.state().objects[&producer].card_id,
+                    targets: vec![],
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                })
+                .expect("cast the ordinary trigger's producer");
+            settle(&mut runner);
+            assert_eq!(pool_of(&runner), vec![child]);
+            runner
+                .act(GameAction::SelectCards {
+                    cards: if accept { vec![child] } else { vec![] },
+                })
+                .expect("choose zero or one linked spell");
+            for _ in 0..8 {
+                if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pay zero");
+            }
+            assert_eq!(
+                runner.state().objects[&child].zone,
+                if accept { Zone::Stack } else { Zone::Exile }
+            );
+            assert!(runner.state().objects[&child]
+                .casting_permissions
+                .is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
     }
 }

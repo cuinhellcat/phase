@@ -854,7 +854,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 140;
+// 141: durable spell cost election and its private cancellation boundary.
+export const PROTOCOL_VERSION = 141;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

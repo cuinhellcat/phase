@@ -39310,7 +39310,63 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
                 .collect(),
         );
     }
+    // CR 605.1a + CR 605.3b: classify after the activation envelope and
+    // stages, so a library-moving cost keeps the supported stack-using path.
+    refuse_linked_paid_cast_in_activated_mana_ability(&mut def, &ir.source_text);
     def
+}
+
+/// CR 602.1a + CR 605.1a: require the completed activation envelope before
+/// classifying this composition. Bare effect-body trial lowerings do not yet
+/// have their library-moving or loyalty costs and must not be refused early.
+/// Quoted grants and station abilities stamp those costs after body lowering,
+/// so they call this same gate once their own envelope is complete.
+pub(crate) fn refuse_linked_paid_cast_in_activated_mana_ability(
+    def: &mut AbilityDefinition,
+    source_text: &str,
+) {
+    if def.kind == AbilityKind::Activated
+        && def.cost.is_some()
+        && crate::game::mana_abilities::could_be_activated_mana_ability(def)
+    {
+        refuse_linked_paid_cast_in_mana_ability(def, source_text);
+    }
+}
+
+/// CR 605.3b + CR 605.4a + CR 608.2g: the inline mana resolvers cannot
+/// suspend for this linked paid cast. Callers establish mana-ability status
+/// through the existing activated/triggered authorities. Refuse the whole
+/// composition, instead of losing its cast offer or using the stack. Inspect
+/// only this resolution: separately registered abilities are independent.
+pub(crate) fn refuse_linked_paid_cast_in_mana_ability(
+    def: &mut AbilityDefinition,
+    source_text: &str,
+) {
+    if crate::types::ability_visit::visit_ability_def_scoped(
+        def,
+        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if matches!(effect, Effect::CastFromZone {
+                target,
+                without_paying_mana_cost: false,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                ..
+            } if target.references_exiled_by_source())
+            {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+    {
+        *def.effect = Effect::unimplemented("linked_exile_mana_cast", source_text);
+        def.sub_ability = None;
+        def.else_ability = None;
+        def.modal = None;
+        def.mode_abilities.clear();
+    }
 }
 
 /// Apply ordered whole-ability transforms after every chain and shell stage.

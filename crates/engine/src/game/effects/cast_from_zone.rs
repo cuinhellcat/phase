@@ -799,6 +799,16 @@ pub fn resolve(
     // populates `target_ids` from the live exile links and has already applied
     // the whole filter to them, so re-testing the residual here is idempotent.
     if !target_ids.is_empty() && target_filter.references_exiled_by_source() {
+        // CR 607.2a + CR 608.2g: this filter denotes a source-linked pool,
+        // including the exact batch forwarded by an earlier exile instruction.
+        // Explicit chosen targets use their own target filter instead.
+        pool_is_linked_exile = !used_last_revealed_library_fallback
+            && target_ids.iter().all(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|object| object.zone == Zone::Exile)
+            });
         // Apply the clause's OWN legs only. `without_exile_anaphor`
         // discharges the `ExiledBySource` leg the seam already satisfied and
         // returns what is left of the tree, preserving its `And`/`Or` structure

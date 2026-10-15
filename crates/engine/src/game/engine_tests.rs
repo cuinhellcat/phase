@@ -9328,6 +9328,8 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         chosen_modes: Vec::new(),
         additional_cost_decided: false,
         keyword_queue_before_targets: false,
+        alternative_cost_election:
+            crate::types::game_state::SpellAlternativeCostElection::Undecided,
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
@@ -9771,6 +9773,8 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         chosen_modes: Vec::new(),
         additional_cost_decided: false,
         keyword_queue_before_targets: false,
+        alternative_cost_election:
+            crate::types::game_state::SpellAlternativeCostElection::Undecided,
         declared_kickers_to_pay: Vec::new(),
         declined_kickers: Vec::new(),
         convoked_creatures: Vec::new(),
