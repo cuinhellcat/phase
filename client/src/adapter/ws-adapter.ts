@@ -215,6 +215,15 @@ export class NativeEngineVersionMismatchError extends Error {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
+ *       cost paused on a CR 616.1 replacement choice; the activation reads the
+ *       settled count, CR 118.11) and ManaAbilityCostCursor gains
+ *       counter_removal, carried in GameState.pending_cost_move_resume — see
+ *       PROTOCOL_VERSION's own `/// 154` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v153 peer cannot parse the tag;
+ *       the exact-match version check at connect refuses the pairing. Wire 136
+ *       moves with it. PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
  * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
  *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
  *       activated authority; the loyalty-grant sibling variant is
@@ -929,8 +938,8 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-// 157: durable spell cost election and its private cancellation boundary.
-export const PROTOCOL_VERSION = 157;
+// 158: durable spell cost election and its private cancellation boundary.
+export const PROTOCOL_VERSION = 158;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.

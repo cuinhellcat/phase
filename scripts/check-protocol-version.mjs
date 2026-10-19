@@ -85,6 +85,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // permission's `enters_with_modifications` becomes a `PendingEntersModifications` object
 // (was a `ContinuousModification` array) and `Effect::AddPendingEntersModifications`
 // carries its `rider` object in place of the required `modifications` array.
+// v154 (after v153, #10006's kind-selected activated grant) adds `PendingCostMoveResume::CounterCostRemovalPayment`
+// (CR 616.1 deferred counter-cost removal) and `ManaAbilityCostCursor.counter_removal` to GameState.
 // v134 adds `GameEvent::AbilityActivated.stack_entry` (the activation's stack object).
 // v147 adds the Eye to Eye / Mouth to Mouth physical contest.
 // v148 adds Timesifter's top-card exile contest (`Effect::ExileTopCardContest`,
@@ -193,8 +195,10 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 //      and `ShortcutProposal.leading_aims`.
 // +82: v153 adds the optional kind selector to GrantAllActivatedAbilitiesOf
 // and removes the loyalty-grant sibling variant.
-// +86: v157 retains the spell alternative declaration and private cost reversal boundary.
-const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 86;
+// +83: v154 adds `PendingCostMoveResume::CounterCostRemovalPayment` and
+//      `ManaAbilityCostCursor.counter_removal` to GameState.
+// +87: v158 retains the spell alternative declaration and private cost reversal boundary.
+const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 87;
 // The LOBBY message-set version, not derived from the full-game number above.
 // The classifier below refuses an expression only on the SOURCE constants; this
 // script never reads itself, so its own EXPECTED_* must stay literals.
@@ -302,8 +306,9 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +79: wire 133 moves with full-game v151 for populated Bestow payloads.
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
-// +85: wire 139 moves with full-game v157 for the spell election and reversal boundary.
-const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 85;
+// +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
+// +86: wire 140 moves with full-game v158 for the spell election and reversal boundary.
+const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 86;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this
 // script previously did not read at all: `DRAFT_PROTOCOL_VERSION` is an
 // EXACT-MATCH first-contact gate (p2p-draft-host.ts / p2p-draft-guest.ts refuse
