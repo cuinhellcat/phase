@@ -106,6 +106,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * seat or adopts reconnect state.
  *
  * Bumps to date:
+ *  137 — game_setup and state_update carry GameState whose parked ChangeZone
+ *       frame stores each remaining member with its pre-event entry
+ *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
+ *       from version 6 to 7; a v136 peer cannot parse it. Bumped in lockstep
+ *       with full-game protocol 155.
  *  136 — game_setup and state_update carry GameState whose
  *       pending_cost_move_resume may hold PendingCostMoveResume
  *       CounterCostRemovalPayment (a counter-removal cost paused on a CR 616.1

@@ -95,6 +95,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // carrier (`GameState.resolving_spell_final_part`; `deferred_spell_delivery` removed).
 // v152 adds `ShortcutDecisionSchema.suggested_declaration` and `.leading_aims`, and
 // `ShortcutProposal.leading_aims`.
+// v155 carries each parked ChangeZone member's pre-event entry modifications
+// (`ChangeZoneMemberEntry`, CR 603.6a + CR 614.12) in GameState.
 // Keep the measured base so a future merge cannot collapse independent wire
 // changes onto one number.
 const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
@@ -197,6 +199,8 @@ const UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION = 71;
 // and removes the loyalty-grant sibling variant.
 // +83: v154 adds `PendingCostMoveResume::CounterCostRemovalPayment` and
 //      `ManaAbilityCostCursor.counter_removal` to GameState.
+// +84: v155 retypes `PendingChangeZoneIteration.remaining` to `ChangeZoneMemberEntry`
+//      (pre-event entry modifications) and drops the raw gate fields.
 // +87: v158 retains the spell alternative declaration and private cost reversal boundary.
 const EXPECTED_PROTOCOL_VERSION = UPSTREAM_MAIN_FULL_GAME_PROTOCOL_VERSION + 87;
 // The LOBBY message-set version, not derived from the full-game number above.
@@ -307,6 +311,7 @@ const PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION = 54;
 // +80: wire 134 moves with full-game v152 for the shortcut suggestion fields.
 // +81: wire 135 moves with full-game v153 for the kind-selected activated grant.
 // +82: wire 136 moves with full-game v154 for the deferred counter-cost removal root.
+// +83: wire 137 moves with full-game v155 for the pre-event ChangeZone member entries.
 // +86: wire 140 moves with full-game v158 for the spell election and reversal boundary.
 const EXPECTED_WIRE_PROTOCOL_VERSION = PHASE_TWO_BASE_WIRE_PROTOCOL_VERSION + 86;
 // The P2P DRAFT wire version. A FIFTH independent surface, and the one this

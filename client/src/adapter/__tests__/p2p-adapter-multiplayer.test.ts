@@ -5674,7 +5674,7 @@ describe("P2P wire-protocol version gate", () => {
   // frame no longer equals it and would be refused instead of admitted,
   // though this single synchronous test body never reaches that second
   // assertion once the first has thrown. The admitting half is still the
-  // reach-guard — without it "refuses v135" is also satisfied by a client
+  // reach-guard — without it "refuses v136" is also satisfied by a client
   // that refuses everything.
   it("refuses the previous wire protocol (v139) and admits its own (v140)", async () => {
     const refusing = makeGuest();
@@ -5705,7 +5705,7 @@ describe("P2P wire-protocol version gate", () => {
     );
   });
 
-  it.each([137, 138, 139])("refuses old reconnect acknowledgement v%s before adopting populated Bestow state", async (version) => {
+  it.each([132, 133, 134, 135, 136, 137, 138, 139])("refuses old reconnect acknowledgement v%s before adopting populated Bestow state", async (version) => {
     const refusing = makeGuest(new FakeDataConnection(), undefined, "prior-token");
     await refusing.adapter.initialize();
     await refusing.conn.simulateData({ ...setupFrameAt(version), type: "reconnect_ack" });
@@ -5728,7 +5728,7 @@ describe("P2P wire-protocol version gate", () => {
     admitting.adapter.dispose();
   });
 
-  it.each([137, 138, 139])("host rejects previous peers v%s before seat or reconnect adoption", async (version) => {
+  it.each([132, 133, 134, 135, 136, 137, 138, 139])("host rejects previous peers v%s before seat or reconnect adoption", async (version) => {
     const { adapter, emitConnection } = makeHost(2);
     await adapter.initialize();
     const oldJoin = await joinGuest(emitConnection, {

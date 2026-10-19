@@ -3473,6 +3473,12 @@ mod tests {
         }
     }
 
+    /// v155: `PendingChangeZoneIteration.remaining` carries each member's
+    /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
+    /// CR 614.12) and drops the raw gate fields, and the persisted resolution
+    /// state moves from version 6 to 7; a v154 peer cannot parse a parked
+    /// ChangeZone frame, so it must be refused before it receives v155 state.
+    ///
     /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
     /// counter-removal cost paused on a CR 616.1 replacement choice, whose
     /// settled count the activation reads, CR 118.11) and

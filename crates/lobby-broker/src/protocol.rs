@@ -60,6 +60,14 @@ pub struct TournamentRequestId(pub u64);
 /// rather than a parse error, and the handshake is the only place that pairing
 /// can be refused. See 24.
 ///
+/// 155 — `PendingChangeZoneIteration` members carry their pre-event entry
+///      modifications (CR 603.6a + CR 614.12): `remaining` becomes
+///      `ChangeZoneMemberEntry` records and the raw gate fields are removed; old
+///      peers cannot parse a parked ChangeZone frame. `RESOLUTION_STATE_WIRE_VERSION`
+///      moves from 6 to 7 with it: a v154 peer refuses the version-7 resolution
+///      state. Full-game peers and P2P move in lockstep (wire 137); no lobby
+///      carrier names it.
+///
 /// 154 — `PendingCostMoveResume` gains `CounterCostRemovalPayment`, a
 ///      counter-removal cost paused while a replacement choice settles its
 ///      current removal (CR 616.1; the settled count is credited to the
