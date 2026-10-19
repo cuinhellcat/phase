@@ -7150,7 +7150,10 @@ pub(crate) fn parse_mana_value_suffix(
             // into your hand" on Beseech the Queen).
             let phrase_end = a.find([',', '.']).unwrap_or(a.len());
             let phrase = &a[..phrase_end];
-            let qty = crate::parser::oracle_quantity::parse_quantity_ref(phrase)?;
+            let qty = crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                phrase,
+                &mut ctx.clone_player_antecedents(),
+            )?;
             (qty, &a[phrase_end..])
         };
         let make_value = |off: i32| {
@@ -7202,7 +7205,11 @@ pub(crate) fn parse_mana_value_suffix(
                 .ok()?;
         let parse_value = |phrase: &str| -> Option<QuantityExpr> {
             let phrase = phrase.trim();
-            crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
+            crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+                phrase,
+                &mut ctx.clone_player_antecedents(),
+            )
+            .or_else(|| {
                 parse_mana_value_reference_expr(phrase)
                     .and_then(|(value, after)| after.trim().is_empty().then_some(value))
             })
@@ -7414,11 +7421,12 @@ fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
     }
 }
 
-/// Rewrite `scope: CostPaidObject` to `scope: Target` on every
-/// `QuantityRef` leaf that carries an `ObjectScope`, recursing through every
-/// `QuantityExpr` composition arm. Matches `quantity_expr_contains_scope`'s
-/// (`quantity.rs:834-865`) arm set exactly, so detection and rewrite cannot
-/// drift.
+/// Rewrite `scope: CostPaidObject` to `scope: Target` on the `QuantityRef`
+/// leaves listed below, recursing through every `QuantityExpr` composition
+/// arm. This list is NOT exhaustive: it omits `Intensity`, which the parser
+/// only emits as `Intensity { Source }`. The exhaustive object-scope
+/// classification is `game::quantity::quantity_ref_object_scope_read`, which
+/// backs `quantity_expr_contains_scope`.
 fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
     fn rebind_ref(qty: &mut QuantityRef) {
         let scope = match qty {
@@ -22171,6 +22179,44 @@ mod tests {
             ),
             "expected Cmc LE Fixed(3), got {prop:?}"
         );
+    }
+
+    /// CR 202.3 + CR 608.2c: a dynamic mana-value bound binds "that player"
+    /// in its count to the caller's player antecedent; a literal "you" stays
+    /// the controller (CR 109.5).
+    #[test]
+    fn mana_value_count_bound_binds_that_player_to_relative_scope() {
+        for (text, expected) in [
+            (
+                "with mana value less than or equal to the number of lands that player controls",
+                ControllerRef::TargetPlayer,
+            ),
+            (
+                "with mana value less than or equal to the number of lands you control",
+                ControllerRef::You,
+            ),
+        ] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TargetPlayer),
+                ..ParseContext::default()
+            };
+            let (prop, _) = parse_mana_value_suffix(text, &mut ctx).expect(text);
+            let FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+            } = &prop
+            else {
+                panic!("{text}: expected Cmc LE ObjectCount, got {prop:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Land), "{text}");
+            assert_eq!(typed.controller, Some(expected), "{text}");
+        }
     }
 
     /// CR 202.3: the branch is the MANA-VALUE suffix parser, so it must admit

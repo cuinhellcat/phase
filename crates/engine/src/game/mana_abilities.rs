@@ -5702,6 +5702,7 @@ pub(crate) fn resume_waiting_for(
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ability::ChooseOneOfKind;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -6832,6 +6833,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![link(wrapped.clone())],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
             (
@@ -6887,6 +6889,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![link(draw_one())],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
             (
@@ -7024,6 +7027,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![link(draw_one()), link(Effect::NoOp)],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ),
             (
@@ -7073,6 +7077,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::Controller,
                 branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
+                kind: ChooseOneOfKind::Ordinary,
             },
             Effect::FlipCoin {
                 win_effect: None,
@@ -7395,7 +7400,7 @@ mod tests {
             duration: None,
             graveyard_replacement,
             enters_with_counter: None,
-            enters_with_modifications: vec![],
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
