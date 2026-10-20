@@ -1978,6 +1978,35 @@ fn _gameobject_partition_is_total(o: &GameObject) {
     } = o;
 }
 
+/// CR 606.3: per-object rule state the ordinary object decoder never reads back
+/// (`skip_deserializing` / `serde(skip)`). Unlike the derived read-outs it is
+/// authoritative, so a serde reconstruction of game state carries it as this
+/// one unit. A skipped `GameObject` field that is not derived again belongs here;
+/// `decoder_skipped_object_fields_are_carried_or_derived` fails closed otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UndecodedObjectRules {
+    loyalty_activations_this_turn: u32,
+    extra_loyalty_activations_this_turn: u32,
+}
+
+impl GameObject {
+    pub(crate) fn undecoded_rules(&self) -> UndecodedObjectRules {
+        UndecodedObjectRules {
+            loyalty_activations_this_turn: self.loyalty_activations_this_turn,
+            extra_loyalty_activations_this_turn: self.extra_loyalty_activations_this_turn,
+        }
+    }
+
+    pub(crate) fn restore_undecoded_rules(&mut self, rules: UndecodedObjectRules) {
+        let UndecodedObjectRules {
+            loyalty_activations_this_turn,
+            extra_loyalty_activations_this_turn,
+        } = rules;
+        self.loyalty_activations_this_turn = loyalty_activations_this_turn;
+        self.extra_loyalty_activations_this_turn = extra_loyalty_activations_this_turn;
+    }
+}
+
 /// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
 /// slice. The generic "choose a card type" persists as a `CardType` attribute; a
 /// restricted card-type choice ("Choose creature or land", Winding Way) parses as
@@ -5962,5 +5991,51 @@ mod tests {
             GameObject::new(id, CardId(0), PlayerId(1), String::new(), Zone::Graveyard);
         skeleton.overlay_source_projection(&ctx);
         assert_inverse(&skeleton);
+    }
+
+    /// CR 606.3: every `GameObject` field the object decoder skips is either a
+    /// derived read-out computed again after a reconstruction, or rule state
+    /// carried by `UndecodedObjectRules`. A new skipped field fails here until it
+    /// is classified, so a serde reconstruction cannot drop it silently.
+    #[test]
+    fn decoder_skipped_object_fields_are_carried_or_derived() {
+        const DERIVED: [&str; 8] = [
+            "unimplemented_mechanics",
+            "has_summoning_sickness",
+            "devotion",
+            "has_mana_ability",
+            "mana_ability_index",
+            "available_mana_pips",
+            "blocked_abilities",
+            "commander_tax",
+        ];
+        let source = crate::source_census::code_lines(include_str!("game_object.rs"));
+        let body = source
+            .split_once("pub struct GameObject {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("GameObject definition");
+        let mut skipped = std::collections::BTreeSet::new();
+        let mut attributes = String::new();
+        for line in body.lines().map(str::trim) {
+            let Some((field, _)) = line.strip_prefix("pub ").and_then(|f| f.split_once(':')) else {
+                attributes.push_str(line);
+                continue;
+            };
+            if attributes
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|token| token == "skip" || token == "skip_deserializing")
+            {
+                skipped.insert(field.to_string());
+            }
+            attributes.clear();
+        }
+        let carried = serde_json::to_value(UndecodedObjectRules::default()).unwrap();
+        let expected: std::collections::BTreeSet<String> = DERIVED
+            .iter()
+            .map(|field| field.to_string())
+            .chain(carried.as_object().unwrap().keys().cloned())
+            .collect();
+        assert_eq!(skipped, expected);
     }
 }

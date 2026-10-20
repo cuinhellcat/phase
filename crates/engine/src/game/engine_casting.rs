@@ -11,6 +11,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
+use super::game_object::UndecodedObjectRules;
 use super::{casting, casting_costs, mana_abilities};
 use casting_costs::{CostSelection, SpellCostPayment};
 
@@ -158,38 +159,37 @@ fn restore_sparse_cast_fields(
         changed.insert(field.clone());
         apply_cast_undo(&mut value, edit)?;
     }
-    // CR 606.3: the ordinary object decoder skips the per-permanent loyalty
-    // history. This internal inverse reads authoritative state, not a display
-    // projection: retain that rule counter through reconstruction too. The
-    // other skipped object read-outs are derived again by finalization.
-    let loyalty_counts = value
-        .get("objects")
-        .and_then(serde_json::Value::as_object)
+    // CR 606.3: the ordinary object decoder skips per-permanent rule state.
+    // Each serialized object carries it beside itself (`cast_undo_value`), so
+    // the captured inverse restores it as one unit. The other skipped object
+    // read-outs are derived again by finalization.
+    let carried = value
+        .get_mut("objects")
+        .and_then(serde_json::Value::as_object_mut)
         .ok_or_else(|| EngineError::InvalidAction("Invalid cast undo objects".into()))?
-        .iter()
-        .filter_map(|(id, object)| {
-            object
-                .get("loyalty_activations_this_turn")
-                .map(|count| (id, count))
-        })
-        .map(|(id, count)| {
+        .iter_mut()
+        .map(|(id, object)| {
+            let rules = object
+                .as_object_mut()
+                .and_then(|object| object.remove(CAST_UNDO_OBJECT_RULES))
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("Missing cast undo object rules".into())
+                })?;
             Ok((
-                serde_json::from_str::<ObjectId>(id)?,
-                serde_json::from_value::<u32>(count.clone())?,
+                serde_json::from_str::<ObjectId>(id).map_err(invalid_cast_undo_rules)?,
+                serde_json::from_value::<UndecodedObjectRules>(rules)
+                    .map_err(invalid_cast_undo_rules)?,
             ))
         })
-        .collect::<Result<Vec<_>, serde_json::Error>>()
-        .map_err(|error| {
-            EngineError::InvalidAction(format!("Invalid cast undo loyalty: {error}"))
-        })?;
+        .collect::<Result<Vec<_>, EngineError>>()?;
     let mut restored: GameState = serde_json::from_value(value)
         .map_err(|error| EngineError::InvalidAction(format!("Invalid cast undo state: {error}")))?;
-    for (id, count) in loyalty_counts {
+    for (id, rules) in carried {
         restored
             .objects
             .get_mut(&id)
-            .ok_or_else(|| EngineError::InvalidAction("Missing cast undo loyalty object".into()))?
-            .loyalty_activations_this_turn = count;
+            .ok_or_else(|| EngineError::InvalidAction("Missing cast undo rules object".into()))?
+            .restore_undecoded_rules(rules);
     }
     state.restore_cast_fields(restored, &changed);
     state.layers_dirty.mark_full();
@@ -349,7 +349,33 @@ fn cast_undo_value(state: &GameState) -> Result<serde_json::Value, EngineError> 
         .as_object_mut()
         .expect("GameState serializes as an object")
         .remove("spell_cast_reversal");
+    let objects = value
+        .get_mut("objects")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| EngineError::InvalidAction("Invalid cast undo objects".into()))?;
+    for (id, object) in objects.iter_mut() {
+        let id = serde_json::from_str::<ObjectId>(id).map_err(invalid_cast_undo_rules)?;
+        let rules = state
+            .objects
+            .get(&id)
+            .ok_or_else(|| EngineError::InvalidAction("Missing cast undo rules object".into()))?
+            .undecoded_rules();
+        object
+            .as_object_mut()
+            .ok_or_else(|| EngineError::InvalidAction("Invalid cast undo object".into()))?
+            .insert(
+                CAST_UNDO_OBJECT_RULES.into(),
+                serde_json::to_value(rules).map_err(invalid_cast_undo_rules)?,
+            );
+    }
     Ok(value)
+}
+
+/// Serialized key of an object's `UndecodedObjectRules` inside a cast-undo value.
+const CAST_UNDO_OBJECT_RULES: &str = "cast_undo_object_rules";
+
+fn invalid_cast_undo_rules(error: serde_json::Error) -> EngineError {
+    EngineError::InvalidAction(format!("Invalid cast undo object rules: {error}"))
 }
 
 fn cast_undo_preserves(field: &str) -> bool {

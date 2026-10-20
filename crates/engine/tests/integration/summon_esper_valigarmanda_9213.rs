@@ -18,6 +18,7 @@
 //! exile link is the production one.
 
 use engine::game::casting::spell_objects_available_to_cast;
+use engine::game::planeswalker::can_activate_loyalty_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
@@ -25,11 +26,12 @@ use engine::types::ability::{AdditionalCost, AdditionalCostOrigin, EffectKind, T
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameRng, RandomDraw, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use rand::Rng;
 
 /// Summon: Esper Valigarmanda, verbatim (`client/public/card-data.json`).
 const VALIGARMANDA: &str = "(As this Saga enters and after your draw step, add a lore \
@@ -2713,8 +2715,33 @@ fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life()
     }
 }
 
+/// Verbatim Oracle text (MTGJSON `text`): U+2014 row separators, U+2212 minus signs.
+const COMET: &str = "[0]: Roll a six-sided die.\n\
+1 or 2 \u{2014} [+2], then create two 1/1 green Squirrel creature tokens. They gain haste until end of turn.\n\
+3 \u{2014} [\u{2212}1], then return a card with mana value 2 or less from your graveyard to your hand.\n\
+4 or 5 \u{2014} Comet deals damage equal to the number of loyalty counters on him to a creature or player, then [\u{2212}2].\n\
+6 \u{2014} [+1], and you may activate Comet's loyalty ability two more times this turn.";
+
+/// Make the next six-sided roll land on `face`: the generator and draw
+/// `roll_natural` uses, so the face is derived, not assumed.
+fn force_next_d6(runner: &mut GameRunner, face: u8) {
+    let seed = (0u64..10_000)
+        .find(|&seed| {
+            GameRng::seed_from_u64(seed)
+                .draw(RandomDraw::Outcome)
+                .random_range(1..=6u8)
+                == face
+        })
+        .expect("a seed exists for every face");
+    let state = runner.state_mut();
+    state.rng_seed = seed;
+    state.rng_word_pos = 0;
+    state.rng = GameRng::seed_from_u64(seed);
+}
+
 /// CR 606.3 + CR 733.1: canceling a spell cannot give a planeswalker a
-/// second loyalty activation after its unrelated earlier ability resolved.
+/// second loyalty activation after its unrelated earlier ability resolved,
+/// and cannot take away Comet's two extra activations granted earlier.
 #[test]
 fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
     for cancel_cast in [false, true] {
@@ -2724,6 +2751,9 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
         scenario.with_library_top(P1, &["Forest", "Forest"]);
         let jace = scenario.add_planeswalker_from_oracle(P0, "Jace Beleren", "Jace", 3,
             "[+2]: Each player draws a card.\n[−1]: Target player draws a card.\n[−10]: Target player mills twenty cards.").id();
+        let comet = scenario
+            .add_planeswalker_from_oracle(P0, "Comet, Stellar Pup", "Comet", 5, COMET)
+            .id();
         let blood = scenario
             .add_creature_from_oracle(
                 P0,
@@ -2762,6 +2792,39 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
                 ability_index: 0,
             })
             .expect_err("the earlier resolved activation has spent this turn's loyalty window");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: comet,
+                ability_index: 0,
+            })
+            .expect("activate Comet's [0]");
+        force_next_d6(&mut runner, 6);
+        let mut rolled = Vec::new();
+        while !runner.state().stack.is_empty() {
+            rolled.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve Comet's roll")
+                    .events,
+            );
+        }
+        assert!(rolled.iter().any(|event| matches!(
+            event,
+            GameEvent::DieRolled {
+                sides: 6,
+                result: Some(6),
+                ..
+            }
+        )));
+        assert!(runner.state().stack.is_empty());
+        let comet_rules = |runner: &GameRunner| {
+            let object = &runner.state().objects[&comet];
+            (
+                object.loyalty_activations_this_turn,
+                object.extra_loyalty_activations_this_turn,
+            )
+        };
+        assert_eq!(comet_rules(&runner), (1, 2));
         let card_id = runner.state().objects[&spell].card_id;
         runner
             .act(GameAction::CastSpell {
@@ -2816,7 +2879,15 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
             1,
             "an unrelated resolved loyalty activation is not a casting payment"
         );
+        assert_eq!(
+            comet_rules(&runner),
+            (1, 2),
+            "Comet's earlier grant is not part of the reversed action"
+        );
         if cancel_cast {
+            // CR 606.3: with the stack empty again, Comet's grant still opens
+            // his loyalty window; a still-pending spell would close it anyway.
+            assert!(can_activate_loyalty_ability(runner.state(), comet, P0, 0));
             runner
                 .act(GameAction::ActivateAbility {
                     source_id: jace,
