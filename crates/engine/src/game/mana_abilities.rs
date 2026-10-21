@@ -7014,7 +7014,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(wrapped.clone()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -7070,7 +7071,8 @@ mod tests {
             ),
             (
                 "FlipCoin win branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: Some(Box::new(link(draw_one()))),
                     lose_effect: None,
                     flipper: TargetFilter::Controller,
@@ -7208,7 +7210,8 @@ mod tests {
             ),
             (
                 "FlipCoin lose branch",
-                Effect::FlipCoin {
+                Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
                     win_effect: None,
                     lose_effect: Some(Box::new(link(draw_one()))),
                     flipper: TargetFilter::Controller,
@@ -7255,7 +7258,8 @@ mod tests {
                 branches: vec![link(Effect::NoOp), link(Effect::NoOp)],
                 kind: ChooseOneOfKind::Ordinary,
             },
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: crate::types::ability::CoinFlipRun::single(),
                 win_effect: None,
                 lose_effect: Some(Box::new(link(Effect::NoOp))),
                 flipper: TargetFilter::Controller,
