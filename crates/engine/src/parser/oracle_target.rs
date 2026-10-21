@@ -3181,6 +3181,7 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // informational suffixes ("creature card") or belong to the subtype slot.
     let mut extra_core_type_filters: Vec<TypeFilter> = Vec::new();
     let mut relative_core_type_filters: Vec<TypeFilter> = Vec::new();
+    let mut relative_token_legs: Vec<RelativeTokenLeg> = Vec::new();
     if matches!(
         card_type,
         Some(
@@ -3637,6 +3638,17 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     if let Some((neg_tfs, consumed)) = parse_that_isnt_subtype_suffix(&lower[pos..]) {
         neg_type_filters.extend(neg_tfs);
         pos += consumed;
+    }
+
+    // CR 111.1 + CR 205.3: "that's a token or a Rabbit" mixes an object property
+    // with a subtype, so each leg restricts its own copy of every finished typed
+    // branch below, joined as `Or`. A pending superlative ranks a population this disjunction
+    // would not narrow, so the clause is left unclaimed there.
+    if pending_bare_superlative.is_none() {
+        if let Some((legs, consumed)) = parse_that_is_token_or_subtype_suffix(&lower[pos..]) {
+            relative_token_legs = legs;
+            pos += consumed;
+        }
     }
 
     // CR 205.3 (#2905): positive "that's a/an <Subtype> [or a/an <Subtype>]"
@@ -4351,11 +4363,20 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     let mut filters = Vec::new();
     for type_filters in type_filter_branches {
         for properties in &property_branches {
-            filters.push(TargetFilter::Typed(TypedFilter {
+            let typed = TypedFilter {
                 type_filters: type_filters.clone(),
                 controller: controller.clone(),
                 properties: properties.clone(),
-            }));
+            };
+            if relative_token_legs.is_empty() {
+                filters.push(TargetFilter::Typed(typed));
+            } else {
+                filters.extend(
+                    relative_token_legs
+                        .iter()
+                        .map(|leg| TargetFilter::Typed(leg.apply(typed.clone()))),
+                );
+            }
         }
     }
     let filter = if filters.len() == 1 {
@@ -10126,6 +10147,90 @@ fn parse_that_is_core_type_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
     let (rest, type_filters) = parse_relative_core_type_list(after_intro).ok()?;
     let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
     Some((type_filters, consumed))
+}
+
+/// One leg of a positive relative clause that mixes token-ness with subtypes
+/// ("that's a token or a Rabbit").
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelativeTokenLeg {
+    /// CR 111.1: the object is a token.
+    Token,
+    /// CR 205.3: the object has this subtype.
+    Subtype(String),
+}
+
+impl RelativeTokenLeg {
+    /// Restrict one finished typed branch to this leg, at the leg's own layer.
+    fn apply(&self, mut typed: TypedFilter) -> TypedFilter {
+        match self {
+            RelativeTokenLeg::Token => typed.properties.push(FilterProp::Token),
+            RelativeTokenLeg::Subtype(subtype) => typed
+                .type_filters
+                .push(TypeFilter::Subtype(subtype.clone())),
+        }
+        typed
+    }
+}
+
+/// "a token" / "tokens" / "a Rabbit" — one leg of a token-or-subtype clause.
+fn parse_relative_token_leg(input: &str) -> Option<(RelativeTokenLeg, &str)> {
+    let (body, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("an "),
+        tag::<_, _, OracleError<'_>>("a "),
+    )))
+    .parse(input)
+    .ok()?;
+    if let Ok((rest, _)) = alt((
+        |i| parse_word_bounded(i, "tokens"),
+        |i| parse_word_bounded(i, "token"),
+    ))
+    .parse(body)
+    {
+        return Some((RelativeTokenLeg::Token, rest));
+    }
+    let (subtype, rest) = parse_relative_subtype_leg(input)?;
+    Some((RelativeTokenLeg::Subtype(subtype), rest))
+}
+
+/// CR 111.1 + CR 205.3: a positive "that's a token or a <Subtype>" clause (any
+/// order, Oxford-comma lists included). Returns `None` unless a token leg is
+/// present, so pure subtype lists stay with `parse_that_is_subtype_suffix`.
+/// The bytes consumed include leading whitespace.
+fn parse_that_is_token_or_subtype_suffix(text: &str) -> Option<(Vec<RelativeTokenLeg>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (after_intro, intro_len, negated) = parse_relative_clause_intro(trimmed)?;
+    if negated {
+        return None;
+    }
+    let (first, mut rest) = parse_relative_token_leg(after_intro)?;
+    let mut legs = vec![first];
+    let mut closed = (1usize, rest);
+    while let Ok((after_separator, closes)) = alt((
+        value(
+            true,
+            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
+        ),
+        value(false, tag(", ")),
+    ))
+    .parse(rest)
+    {
+        let Some((next, after_leg)) = parse_relative_token_leg(after_separator) else {
+            break;
+        };
+        legs.push(next);
+        rest = after_leg;
+        if closes {
+            closed = (legs.len(), rest);
+        }
+    }
+    let (count, end) = closed;
+    legs.truncate(count);
+    if !legs.contains(&RelativeTokenLeg::Token) {
+        return None;
+    }
+    let consumed = leading_ws + intro_len + (after_intro.len() - end.len());
+    Some((legs, consumed))
 }
 
 /// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
@@ -18928,6 +19033,51 @@ mod tests {
         assert!(stf
             .type_filters
             .contains(&TypeFilter::Subtype("Goblin".to_string())));
+    }
+
+    /// CR 111.1 + CR 205.3: "that's a token or a Rabbit" (Finneas, Ace Archer)
+    /// is a disjunction across layers — a token property OR a subtype — so it
+    /// distributes as one `Or` leg per disjunct, each keeping "other" and "you
+    /// control". A pure subtype list stays a single `AnyOf` filter.
+    #[test]
+    fn parse_type_phrase_token_or_subtype_relative_clause() {
+        use crate::types::ability::TypeFilter;
+
+        let leg = |extra_type: Option<&str>, token: bool| {
+            let mut type_filters = vec![TypeFilter::Creature];
+            type_filters.extend(extra_type.map(|t| TypeFilter::Subtype(t.to_string())));
+            let mut properties = vec![FilterProp::Another];
+            if token {
+                properties.push(FilterProp::Token);
+            }
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                properties,
+            })
+        };
+        for (text, expected) in [
+            (
+                "other creature you control that's a token or a Rabbit",
+                vec![leg(None, true), leg(Some("Rabbit"), false)],
+            ),
+            (
+                "other creature you control that's a Rabbit or a token",
+                vec![leg(Some("Rabbit"), false), leg(None, true)],
+            ),
+        ] {
+            let (filter, rest) = parse_type_phrase_folding(text);
+            assert_eq!(rest.trim(), "", "{text}");
+            assert_eq!(filter, TargetFilter::Or { filters: expected }, "{text}");
+        }
+
+        let (subtypes, rest) =
+            parse_type_phrase_folding("other creature you control that's a Rabbit or a Bat");
+        assert_eq!(rest.trim(), "");
+        assert!(
+            matches!(subtypes, TargetFilter::Typed(_)),
+            "a pure subtype list stays one typed filter, got {subtypes:?}"
+        );
     }
 
     #[test]
