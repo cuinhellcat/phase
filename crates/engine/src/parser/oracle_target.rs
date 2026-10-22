@@ -10036,13 +10036,23 @@ fn parse_relative_subtype_leg(input: &str) -> Option<(String, &str)> {
 /// clause — a single leg, a two-leg "X or Y", or an Oxford-comma list
 /// "X, Y, ..., or Z" (each leg may carry its own article). Returns the canonical
 /// subtypes and the bytes consumed.
+pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, usize)> {
+    parse_relative_list(input, parse_relative_subtype_leg)
+}
+
+/// The list grammar of a relative clause, shared by every leg kind: a single
+/// leg, a two-leg "X or Y", or an Oxford-comma list "X, Y, ..., or Z". Returns
+/// the legs and the bytes consumed.
 ///
 /// A list is closed only by an "or" leg, so a comma run that never
 /// closes ("a Demon, Zombies you control ...") is not read as a list: the result
 /// rolls back to the legs up to the last closing conjunction, or to the first leg.
-pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, usize)> {
-    let (first, mut rest) = parse_relative_subtype_leg(input)?;
-    let mut subtypes = vec![first];
+fn parse_relative_list<T>(
+    input: &str,
+    parse_leg: impl Fn(&str) -> Option<(T, &str)>,
+) -> Option<(Vec<T>, usize)> {
+    let (first, mut rest) = parse_leg(input)?;
+    let mut legs = vec![first];
     let mut closed = (1usize, rest);
     while let Ok((after_separator, closes)) = alt((
         value(
@@ -10053,18 +10063,18 @@ pub(crate) fn parse_relative_subtype_list(input: &str) -> Option<(Vec<String>, u
     ))
     .parse(rest)
     {
-        let Some((next, after_leg)) = parse_relative_subtype_leg(after_separator) else {
+        let Some((next, after_leg)) = parse_leg(after_separator) else {
             break;
         };
-        subtypes.push(next);
+        legs.push(next);
         rest = after_leg;
         if closes {
-            closed = (subtypes.len(), rest);
+            closed = (legs.len(), rest);
         }
     }
     let (count, end) = closed;
-    subtypes.truncate(count);
-    Some((subtypes, input.len() - end.len()))
+    legs.truncate(count);
+    Some((legs, input.len() - end.len()))
 }
 
 fn is_relative_core_type_filter(type_filter: &TypeFilter) -> bool {
@@ -10203,34 +10213,11 @@ fn parse_that_is_token_or_subtype_suffix(text: &str) -> Option<(Vec<RelativeToke
     if negated {
         return None;
     }
-    let (first, mut rest) = parse_relative_token_leg(after_intro)?;
-    let mut legs = vec![first];
-    let mut closed = (1usize, rest);
-    while let Ok((after_separator, closes)) = alt((
-        value(
-            true,
-            alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
-        ),
-        value(false, tag(", ")),
-    ))
-    .parse(rest)
-    {
-        let Some((next, after_leg)) = parse_relative_token_leg(after_separator) else {
-            break;
-        };
-        legs.push(next);
-        rest = after_leg;
-        if closes {
-            closed = (legs.len(), rest);
-        }
-    }
-    let (count, end) = closed;
-    legs.truncate(count);
+    let (legs, list_len) = parse_relative_list(after_intro, parse_relative_token_leg)?;
     if !legs.contains(&RelativeTokenLeg::Token) {
         return None;
     }
-    let consumed = leading_ws + intro_len + (after_intro.len() - end.len());
-    Some((legs, consumed))
+    Some((legs, leading_ws + intro_len + list_len))
 }
 
 /// CR 205.3 (#2905): the positive counterpart of `parse_that_isnt_subtype_suffix`.
