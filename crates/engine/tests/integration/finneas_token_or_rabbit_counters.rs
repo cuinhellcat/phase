@@ -4,7 +4,7 @@
 //!
 //! CR 111.1 + CR 205.3: the relative clause is a disjunction across a token
 //! property and a subtype; each leg keeps "other" and "you control".
-//! CR 508.1m: the attack trigger fires when Finneas is declared as an attacker.
+//! CR 508.3a: the attack trigger fires when Finneas is declared as an attacker.
 //! CR 608.2c: the draw checks total power after the counters are placed.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};

@@ -10230,11 +10230,15 @@ fn parse_that_is_token_or_subtype_suffix(text: &str) -> Option<(Vec<RelativeToke
     if !legs.contains(&RelativeTokenLeg::Token) {
         return None;
     }
-    // An "or" leg the list could not read ("a token or an artifact") widens the
+    // An "or" / "and/or" leg the list could not read ("a token or an artifact") widens the
     // clause; claiming only the read legs would narrow it, so leave it unparsed.
-    if alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or ")))
-        .parse(&after_intro[list_len..])
-        .is_ok()
+    if alt((
+        tag::<_, _, OracleError<'_>>(", or "),
+        tag(" or "),
+        tag(" and/or "),
+    ))
+    .parse(&after_intro[list_len..])
+    .is_ok()
     {
         return None;
     }
@@ -19106,17 +19110,44 @@ mod tests {
         let (subtypes, rest) =
             parse_type_phrase_folding("other creature you control that's a Rabbit or a Bat");
         assert_eq!(rest.trim(), "");
-        assert!(
-            matches!(subtypes, TargetFilter::Typed(_)),
-            "a pure subtype list stays one typed filter, got {subtypes:?}"
+        assert_eq!(
+            subtypes,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::AnyOf(vec![
+                        TypeFilter::Subtype("Rabbit".to_string()),
+                        TypeFilter::Subtype("Bat".to_string()),
+                    ]),
+                    TypeFilter::Creature,
+                ],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            }),
+            "a pure subtype list stays one typed filter"
         );
 
-        assert!(parse_that_is_token_or_subtype_suffix(" that's a token or a Rabbit").is_some());
-        assert_eq!(
-            parse_that_is_token_or_subtype_suffix(" that's a token or an artifact"),
-            None,
-            "an unread \"or\" leg must not shrink the clause to its token leg"
+        // A pending superlative ranks a population the legs would not narrow,
+        // so the clause stays unclaimed there.
+        let (ranked, rest) = parse_type_phrase_folding(
+            "creature you control with the greatest power that's a token or a Rabbit",
         );
+        assert!(
+            !matches!(ranked, TargetFilter::Or { .. }),
+            "a superlative phrase must not split into legs, got {ranked:?}"
+        );
+        assert_eq!(rest.trim(), "that's a token or a Rabbit");
+
+        assert!(parse_that_is_token_or_subtype_suffix(" that's a token or a Rabbit").is_some());
+        for unread in [
+            " that's a token or an artifact",
+            " that are tokens and/or have the word \"Maro\" in the name",
+        ] {
+            assert_eq!(
+                parse_that_is_token_or_subtype_suffix(unread),
+                None,
+                "an unread leg must not shrink the clause to its token leg: {unread}"
+            );
+        }
     }
 
     #[test]
