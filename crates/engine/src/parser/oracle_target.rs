@@ -10230,6 +10230,14 @@ fn parse_that_is_token_or_subtype_suffix(text: &str) -> Option<(Vec<RelativeToke
     if !legs.contains(&RelativeTokenLeg::Token) {
         return None;
     }
+    // An "or" leg the list could not read ("a token or an artifact") widens the
+    // clause; claiming only the read legs would narrow it, so leave it unparsed.
+    if alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or ")))
+        .parse(&after_intro[list_len..])
+        .is_ok()
+    {
+        return None;
+    }
     Some((legs, leading_ws + intro_len + list_len))
 }
 
@@ -19101,6 +19109,13 @@ mod tests {
         assert!(
             matches!(subtypes, TargetFilter::Typed(_)),
             "a pure subtype list stays one typed filter, got {subtypes:?}"
+        );
+
+        assert!(parse_that_is_token_or_subtype_suffix(" that's a token or a Rabbit").is_some());
+        assert_eq!(
+            parse_that_is_token_or_subtype_suffix(" that's a token or an artifact"),
+            None,
+            "an unread \"or\" leg must not shrink the clause to its token leg"
         );
     }
 
