@@ -19077,8 +19077,6 @@ mod tests {
     /// control". A pure subtype list stays a single `AnyOf` filter.
     #[test]
     fn parse_type_phrase_token_or_subtype_relative_clause() {
-        use crate::types::ability::TypeFilter;
-
         let leg = |extra_type: Option<&str>, token: bool| {
             let mut type_filters = vec![TypeFilter::Creature];
             type_filters.extend(extra_type.map(|t| TypeFilter::Subtype(t.to_string())));
