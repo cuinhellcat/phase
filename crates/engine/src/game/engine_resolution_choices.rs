@@ -7240,6 +7240,14 @@ pub(super) fn handle_resolution_choice(
                     };
                     let ability = *frame.pending.chain;
                     if chosen.len() == 1 {
+                        // CR 118.12 + CR 608.2c + CR 608.2g: the ability's "If you
+                        // do" instruction follows the cast as the ability
+                        // continues to resolve, before the cast spell does. It is
+                        // parked unperformed before the cast starts; the cast's
+                        // commit point marks it performed (CR 601.2i), so a cast
+                        // that is undone (CR 733.1) leaves it declined.
+                        let if_you_do =
+                            effects::cast_from_zone::stash_accepted_cast_if_you_do(state, &ability);
                         let used_during_resolution =
                             effects::cast_from_zone::complete_hand_pick_cast_from_zone(
                                 &mut *state,
@@ -7249,6 +7257,9 @@ pub(super) fn handle_resolution_choice(
                             )
                             .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                         if used_during_resolution {
+                            if if_you_do {
+                                resume_with_error_propagation(state, events)?;
+                            }
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
                                 state.waiting_for.clone(),
                             ));

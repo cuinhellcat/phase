@@ -545,6 +545,14 @@ pub struct LKISnapshot {
     /// which is exactly the pre-change fail-closed behavior.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+    /// CR 608.2h (digital-only Alchemy intensity): the object's
+    /// intensity as it last existed in its public zone, so an ability whose
+    /// source has left reads it ("mana value equal to Jarsyl, Dark Age
+    /// Scion's intensity" with Jarsyl removed in response; Great Desert
+    /// Hellion's leaves-the-battlefield draw). `#[serde(default)]` ⇒
+    /// pre-existing saved states deserialize to 0, the pre-change read.
+    #[serde(default)]
+    pub intensity: u32,
 }
 
 /// Complete event-time authority for a triggered ability's source.
@@ -44155,6 +44163,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44276,6 +44285,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44566,6 +44576,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44668,6 +44679,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
         fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
@@ -44870,6 +44882,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let position = |incarnation: u64| {
             let parked = PendingManaAbility {
