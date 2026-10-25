@@ -5524,7 +5524,8 @@ fn resolve_ref(
             targets,
             ability,
             |obj| Some(i32::try_from(obj.intensity).unwrap_or(i32::MAX)),
-            |_lki| None,
+            // CR 608.2h: a referent that has left reads its last known intensity.
+            |lki| Some(i32::try_from(lki.intensity).unwrap_or(i32::MAX)),
         ),
         QuantityRef::Toughness { scope } => resolve_object_pt(
             state,
@@ -26645,5 +26646,45 @@ mod intensity_tests {
         state.lki_by_incarnation.clear();
         let ctx = QuantityContext::for_trigger_source(Some(&context));
         assert_eq!(source_intensity(&state, &ctx, None), 3);
+    }
+
+    /// CR 608.2h: a non-source referent that has left (a sacrificed cost-paid
+    /// object) reads the intensity its last known information recorded.
+    #[test]
+    fn departed_referent_intensity_reads_its_last_known_information() {
+        let mut state = GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Sacrificed".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().intensity = 4;
+        let lki = state.objects[&id].snapshot_public_characteristics();
+        state.objects.remove(&id);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(crate::types::ability::CostPaidObjectSnapshot {
+            object_id: id,
+            lki,
+            incarnation: 0,
+        });
+        let intensity = QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &intensity, &ability),
+            4
+        );
     }
 }
