@@ -42,8 +42,8 @@ use crate::types::resolved_commands::ManaPaymentRecipient;
 use crate::types::statics::{
     ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
     CastingProhibitionCondition, CostModifyMode, CostReductionReach, ExileCardPool, ExileCastCost,
-    ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, ProhibitionScope, StaticMode,
-    StaticModeKind,
+    ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, PermissionCastLimit,
+    ProhibitionScope, StaticMode, StaticModeKind,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -3958,7 +3958,10 @@ fn own_exile_cast_permission(state: &GameState, obj: &GameObject, player: Player
                     graveyard_destination_replacement: None,
                     required_cast_keyword: None,
                     pool: GraveyardPermissionPool::OwnGraveyard,
-                }
+                    cast_limit: PermissionCastLimit::Unlimited,
+                    mana_spend_permission: None,
+                    ref enters_modifications,
+                } if enters_modifications.is_empty()
             ) && matches!(definition.affected, Some(TargetFilter::SelfRef))
         })
 }
@@ -5277,6 +5280,17 @@ pub(super) fn player_mana_spend_permission_for_optional_spell(
         })
     });
 
+    // CR 601.2a + CR 609.4b: a cast announced under a graveyard permission pays
+    // under that grant's concession (Whispersteel Dagger), latched as the cast
+    // was announced -- also for a graveyard cast made for the card's own
+    // alternative cost, which the latch records the same way.
+    if let Some(latch) = pending
+        .and_then(|pending| pending.ability.context.graveyard_permission_latch.as_ref())
+        .or(state.active_graveyard_permission_latch.as_deref())
+    {
+        return with_static(latch.mana_spend_permission);
+    }
+
     // CR 601.2a + CR 609.4b: The static source recorded on the elected
     // `ExilePermission` is the only static permission whose rider applies.
     if let Some(CastingVariant::ExilePermission { source, .. }) = casting_variant {
@@ -5489,6 +5503,15 @@ struct GraveyardPermissionSource<'a> {
     required_cast_keyword: Option<KeywordKind>,
     /// CR 109.5 + CR 404.1: whose graveyards this permission reaches.
     pool: GraveyardPermissionPool,
+    /// CR 601.3: how many casts the grant authorizes; a `Single`
+    /// grant ends with the cast made through it.
+    cast_limit: PermissionCastLimit,
+    /// CR 609.4b: the grant's own any-color/any-type mana concession for the
+    /// spell cast through it (Whispersteel Dagger).
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    /// CR 614.1c + CR 613.1d: modifications the spell cast through this grant
+    /// keeps as a permanent (The Tomb of Aclazotz: "is a Vampire").
+    enters_modifications: &'a crate::types::ability::PendingEntersModifications,
 }
 
 impl GraveyardPermissionSource<'_> {
@@ -6110,7 +6133,17 @@ fn graveyard_permission_sources(
                         ref enters_with_counter,
                         required_cast_keyword,
                         pool,
-                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
+                        cast_limit,
+                        mana_spend_permission,
+                        ref enters_modifications,
+                    } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter)
+                        // CR 601.3: a `Single` grant is used up by ending the
+                        // effect that granted it; a printed static has no such
+                        // effect, so it would never be used up. Refused (fail
+                        // closed): the parser builds `Single` only for a
+                        // resolution-created grant.
+                        && cast_limit.is_unlimited() =>
+                    {
                         definition
                             .affected
                             .as_ref()
@@ -6130,6 +6163,9 @@ fn graveyard_permission_sources(
                                 enters_with_counter,
                                 required_cast_keyword,
                                 pool,
+                                cast_limit,
+                                mana_spend_permission,
+                                enters_modifications,
                             })
                     }
                     _ => None,
@@ -6233,6 +6269,9 @@ fn transient_graveyard_permission_sources(
                         ref enters_with_counter,
                         required_cast_keyword,
                         pool,
+                        cast_limit,
+                        mana_spend_permission,
+                        ref enters_modifications,
                     } = definition.mode
                     else {
                         return None;
@@ -6281,6 +6320,9 @@ fn transient_graveyard_permission_sources(
                             enters_with_counter,
                             required_cast_keyword,
                             pool,
+                            cast_limit,
+                            mana_spend_permission,
+                            enters_modifications,
                         })
                 },
             )
@@ -6545,6 +6587,9 @@ impl GraveyardCastAuthority {
                 permission: source.permission,
                 extra_cost: source.extra_cost.clone(),
                 enters_with_counter: source.enters_with_counter.clone(),
+                cast_limit: source.cast_limit,
+                mana_spend_permission: source.mana_spend_permission,
+                enters_modifications: source.enters_modifications.clone(),
             },
         }
     }
@@ -21262,6 +21307,20 @@ fn can_cast_prepared_now_with_probe(
     // requires — for a modal spell, a legal mode selection (see
     // `spell_has_legal_targets_in_flushed_state`).
     let targets_ok = spell_has_legal_targets_with_probe(state, obj.id, player, probe);
+    // CR 601.2a + CR 609.4b: an option announced under a graveyard grant that
+    // carries a mana concession (Whispersteel Dagger) is priced under that
+    // concession, as its payment will be (`active_graveyard_permission_latch`).
+    let concession_state = prepared
+        .graveyard_authority
+        .as_ref()
+        .map(|resolution| &resolution.authority().latch)
+        .filter(|latch| latch.mana_spend_permission.is_some())
+        .map(|latch| {
+            let mut priced = state.clone();
+            priced.active_graveyard_permission_latch = Some(Box::new(latch.clone()));
+            priced
+        });
+    let state = concession_state.as_ref().unwrap_or(state);
     let mana_payable = can_feasibly_pay_harmonize_mana_cost_with_probe(
         state,
         player,

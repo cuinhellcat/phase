@@ -24317,7 +24317,7 @@ fn resolve_chain_body(
         // (recorded on the granted `ExileWithAltCost`). Resolving the structural
         // `AddPendingETBCounters` rider here would read the (absent) SpellCast
         // trigger event of the granting ability, not the future graveyard cast —
-        // so it is skipped (Osteomancer Adept, The Tomb of Aclazotz). The same
+        // so it is skipped (Osteomancer Adept's rider shape). The same
         // metadata treatment applies to the gains-modifications rider ("If you
         // cast a [quality] spell this way, it gains …", Strago and Relm); both
         // are spliced out of the walk at the top of this block

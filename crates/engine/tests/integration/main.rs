@@ -1482,6 +1482,7 @@ mod siege_behemoth_unblocked_grant;
 mod sift_through_sands;
 mod sigarda_tajuru_tamiyo_forced_action_protection;
 mod sin_spiras_punishment_repeat;
+mod single_graveyard_cast_grant_9334;
 mod skitterfang_reflexive_without_counter;
 mod skullwinder_chosen_opponent;
 mod slaughter_the_strong_total_power_4380;

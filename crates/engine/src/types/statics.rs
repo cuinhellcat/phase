@@ -333,6 +333,34 @@ impl GraveyardPermissionPool {
     }
 }
 
+/// CR 601.3: How many casts a resolution-created graveyard
+/// permission authorizes over its whole duration.
+///
+/// The article decides it: "you may cast Zombie SPELLS from your graveyard
+/// this turn" (Liliana, Untouched by Death) is `Unlimited`; "you may cast A
+/// creature SPELL from your graveyard this turn" (Chainer, Nightmare Adept; The
+/// Tomb of Aclazotz; Whispersteel Dagger) is `Single`. A `Single` grant ends
+/// with the cast it authorizes, so a second creature card in the same graveyard
+/// is no longer castable through it; each resolution grants its own cast.
+///
+/// An axis of its own rather than a [`CastFrequency`]: a frequency is a
+/// per-turn slot of the permission's SOURCE that resets each turn,
+/// while this is the lifetime of one GRANT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum PermissionCastLimit {
+    /// Any number of casts while the permission lasts.
+    #[default]
+    Unlimited,
+    /// One cast; the grant ends when the spell cast through it is cast.
+    Single,
+}
+
+impl PermissionCastLimit {
+    pub fn is_unlimited(&self) -> bool {
+        matches!(self, PermissionCastLimit::Unlimited)
+    }
+}
+
 impl fmt::Display for CastFrequency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1611,6 +1639,30 @@ pub enum StaticMode {
             skip_serializing_if = "GraveyardPermissionPool::is_own_graveyard"
         )]
         pool: GraveyardPermissionPool,
+        /// CR 601.3: how many casts the grant authorizes.
+        /// `Single` is built only for a resolution-created grant ("you may cast
+        /// a creature spell from your graveyard this turn"); casting through it
+        /// ends the granting effect (`casting_costs` at finalization). A printed
+        /// static never carries it, and one that did is refused by
+        /// `casting::graveyard_permission_sources` (it has no effect to end).
+        #[serde(default, skip_serializing_if = "PermissionCastLimit::is_unlimited")]
+        cast_limit: PermissionCastLimit,
+        /// CR 609.4b: "you may spend mana as though it were mana of any color to
+        /// cast that spell" riding on the grant (Whispersteel Dagger). Applies
+        /// only to a spell cast through this permission; latched at announcement
+        /// and read by `casting::player_mana_spend_permission_for_optional_spell`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+        /// CR 614.1c + CR 205.1b + CR 613.1d: "If you do, it … is a Vampire in
+        /// addition to its other types" (The Tomb of Aclazotz) — modifications
+        /// the spell cast through this permission keeps as a permanent.
+        /// Latched at announcement and applied at finalization beside
+        /// `enters_with_counter`, as the exile-cast grant's rider is.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::types::ability::PendingEntersModifications::is_empty"
+        )]
+        enters_modifications: crate::types::ability::PendingEntersModifications,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -3021,9 +3073,12 @@ impl Hash for StaticMode {
                 extra_cost,
                 required_cast_keyword,
                 pool,
+                cast_limit,
+                mana_spend_permission,
                 // `CounterType` derives Hash but is collision-safe to skip: the
                 // enters-with rider never distinguishes two otherwise-equal
-                // permissions in the interned set (mirrors `extra_cost` below).
+                // permissions in the interned set (mirrors `extra_cost` below);
+                // the enters-modifications rider likewise.
                 ..
             } => {
                 frequency.hash(state);
@@ -3031,6 +3086,8 @@ impl Hash for StaticMode {
                 graveyard_destination_replacement.hash(state);
                 required_cast_keyword.hash(state);
                 pool.hash(state);
+                cast_limit.hash(state);
+                mana_spend_permission.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only (mirrors the `alt_cost` treatment) so the
                 // alternative/additional shapes don't collide.
@@ -3420,14 +3477,28 @@ impl fmt::Display for StaticMode {
                 graveyard_destination_replacement,
                 extra_cost,
                 pool,
-                // CR 122.1: the enters-with counter payload rides on serde, not
-                // the Display round-trip (mirrors `extra_cost`); FromStr
-                // defaults it to None.
+                cast_limit,
+                mana_spend_permission,
+                // CR 122.1: the enters-with counter and enters-modifications
+                // payloads ride on serde, not the Display round-trip (mirrors
+                // `extra_cost`); FromStr defaults them to empty.
                 ..
             } => {
                 write!(f, "GraveyardCastPermission({play_mode},{frequency}")?;
                 if matches!(pool, GraveyardPermissionPool::AnyGraveyard) {
                     write!(f, ",pool=any_graveyard")?;
+                }
+                if matches!(cast_limit, PermissionCastLimit::Single) {
+                    write!(f, ",single")?;
+                }
+                match mana_spend_permission {
+                    Some(crate::types::ability::ManaSpendPermission::AnyColor) => {
+                        write!(f, ",anycolor")?;
+                    }
+                    Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor) => {
+                        write!(f, ",anymana")?;
+                    }
+                    None => {}
                 }
                 if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
                     write!(f, ",exile_on_graveyard")?;
@@ -3938,6 +4009,9 @@ impl FromStr for StaticMode {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
@@ -3963,6 +4037,19 @@ impl FromStr for StaticMode {
                         } else {
                             GraveyardPermissionPool::OwnGraveyard
                         },
+                        cast_limit: if rest.contains(&"single") {
+                            PermissionCastLimit::Single
+                        } else {
+                            PermissionCastLimit::Unlimited
+                        },
+                        mana_spend_permission: if rest.contains(&"anymana") {
+                            Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor)
+                        } else if rest.contains(&"anycolor") {
+                            Some(crate::types::ability::ManaSpendPermission::AnyColor)
+                        } else {
+                            None
+                        },
+                        enters_modifications: Default::default(),
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
@@ -3973,6 +4060,9 @@ impl FromStr for StaticMode {
                         enters_with_counter: None,
                         required_cast_keyword: None,
                         pool: GraveyardPermissionPool::OwnGraveyard,
+                        cast_limit: PermissionCastLimit::Unlimited,
+                        mana_spend_permission: None,
+                        enters_modifications: Default::default(),
                     }
                 }
             }
@@ -5067,6 +5157,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -5076,6 +5169,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
@@ -5085,6 +5181,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::AnyGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             // CR 601.2f: Festival of Embers — graveyard cast with an additional
             // pay-life cost. NOTE: `extra_cost`-bearing variants are NOT in this
@@ -5279,6 +5378,9 @@ mod tests {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             },
             StaticMode::ExileCastPermission {
                 frequency: CastFrequency::Unlimited,

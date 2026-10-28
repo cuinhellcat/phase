@@ -9473,6 +9473,21 @@ fn retire_ended_effects(
     true
 }
 
+/// CR 601.3: end the resolution-created effect `effect_id` whose
+/// single cast permission has just been used ("you may cast a creature spell
+/// from your graveyard this turn" authorizes one cast). Its stated duration
+/// has not run out — the cast it allowed ends it — so it is removed here, as
+/// the `prune_*` passes remove the effects whose durations end at a step.
+pub(crate) fn retire_used_single_cast_grant(state: &mut GameState, effect_id: u64) {
+    let before = state.transient_continuous_effects.len();
+    state
+        .transient_continuous_effects
+        .retain(|effect| effect.id != effect_id);
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 611.2b: end every duration the settled board shows has ended, one family
 /// per derivation. Host-bound durations end first, so a state duration is
 /// never judged against a board still carrying an effect that already ended.

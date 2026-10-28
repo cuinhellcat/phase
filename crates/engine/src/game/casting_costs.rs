@@ -13471,7 +13471,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // the granted `ExileWithAltCost`. When that cast finalizes, register a pending
     // ETB counter so the object enters the battlefield carrying it (CR 122.1h: a
     // finality counter exiles the permanent instead of letting it die).
-    // Osteomancer Adept, The Tomb of Aclazotz.
+    // (Osteomancer Adept's rider shape.)
     //
     // CR 608.2c: the binding uses the selected-permission authority — the rider is
     // read from the permission that actually supports THIS cast, not any permission
@@ -13511,7 +13511,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     }
 
     // CR 205.1b + CR 613.1d: A `CastFromZone` grant whose rider was "… is a
-    // [type] in addition to its other types" (The Tomb of Aclazotz) records the
+    // [type] in addition to its other types" records the
     // additive type-changing modifications on the granted `ExileWithAltCost`.
     // Apply them as a `Duration::Permanent` continuous effect (CR 611.2a: no
     // stated duration → until end of game) scoped to the one cast object
@@ -13525,27 +13525,33 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // evaluated against the elected spell, which has all the characteristics of
     // its card (CR 601.2a). A cast that does not match the printed quality is
     // granted no modifications, per the instruction as written.
-    let rider_quality_matches =
-        cast_this_way_enters_mods
-            .cast_filter
-            .as_ref()
-            .is_none_or(|filter| {
-                crate::game::filter::matches_target_filter(
-                    state,
-                    object_id,
-                    filter,
-                    &crate::game::filter::FilterContext::neutral(),
-                )
-            });
-    if rider_quality_matches && !cast_this_way_enters_mods.is_empty() {
-        state.add_transient_continuous_effect(
-            object_id,
-            player,
-            crate::types::ability::Duration::Permanent,
-            crate::types::ability::TargetFilter::SpecificObject { id: object_id },
-            cast_this_way_enters_mods.modifications,
-            None,
-        );
+    //
+    // A graveyard cast permission carries the same rider on its own grant
+    // (`GraveyardCastPermission::enters_modifications`), latched as the cast
+    // was announced; it applies the same way.
+    let graveyard_enters_mods = graveyard_permission_latch
+        .as_ref()
+        .map(|latch| latch.enters_modifications.clone())
+        .unwrap_or_default();
+    for rider in [cast_this_way_enters_mods, graveyard_enters_mods] {
+        let rider_quality_matches = rider.cast_filter.as_ref().is_none_or(|filter| {
+            crate::game::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &crate::game::filter::FilterContext::neutral(),
+            )
+        });
+        if rider_quality_matches && !rider.is_empty() {
+            state.add_transient_continuous_effect(
+                object_id,
+                player,
+                crate::types::ability::Duration::Permanent,
+                crate::types::ability::TargetFilter::SpecificObject { id: object_id },
+                rider.modifications,
+                None,
+            );
+        }
     }
 
     if casting_variant == CastingVariant::Foretell {
@@ -13681,6 +13687,24 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .pending
             .chain
             .set_first_optional_effect_performed_gate(true);
+    }
+
+    // CR 601.3: a grant for ONE cast ("you may cast a creature
+    // spell from your graveyard this turn" — Chainer, Nightmare Adept) is used
+    // up by the cast it authorized: end the effect that granted it, so no
+    // second card is castable through it. Read off the announcement latch, the
+    // grant this cast committed to.
+    if let Some(crate::types::game_state::GraveyardPermissionLatch {
+        cast_limit: crate::types::statics::PermissionCastLimit::Single,
+        permission:
+            crate::types::game_state::GraveyardPermissionId {
+                grant: crate::types::game_state::PermissionGrant::Transient { effect_id, .. },
+                ..
+            },
+        ..
+    }) = &graveyard_permission_latch
+    {
+        super::layers::retire_used_single_cast_grant(state, *effect_id);
     }
 
     // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell
@@ -17114,6 +17138,12 @@ fn finalize_mana_payment_with_resume(
     // a later spend.)
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_graveyard_permission_latch = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .clone()
+        .map(Box::new);
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
@@ -17437,6 +17467,7 @@ fn finalize_mana_payment_with_resume(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
@@ -17545,6 +17576,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // empty outside an in-progress finalize spend".
     state.active_payment_pins = pending.pinned_pool_units.clone();
     state.active_casting_permission_index = pending.casting_permission_index;
+    state.active_graveyard_permission_latch = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .clone()
+        .map(Box::new);
     let spend_only_on_x_count = state
         .objects
         .get(&pending.object_id)
@@ -17879,6 +17916,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     // CR 118.3a: the transient is self-contained — cleared on Ok and Err alike.
     state.active_payment_pins.clear();
     state.active_casting_permission_index = None;
+    state.active_graveyard_permission_latch = None;
     state.active_spend_only_on_x_count = None;
     match finalize_result {
         Ok(waiting_for) => Ok(waiting_for),
@@ -18850,6 +18888,9 @@ mod tests {
                         enters_with_counter: None,
                         required_cast_keyword: None,
                         pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                        cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                        mana_spend_permission: None,
+                        enters_modifications: Default::default(),
                     },
                 )
                 .affected(crate::types::ability::TargetFilter::Typed(
