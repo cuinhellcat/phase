@@ -6624,6 +6624,18 @@ impl GraveyardCastAuthority {
         }
     }
 
+    /// CR 601.2a + CR 609.4b: `state` with this grant's mana concession
+    /// (Whispersteel Dagger) latched, as the cast's payment reads it, so an
+    /// offer prices the cast the way it will be paid. `None` when the grant
+    /// carries no concession and `state` already prices it.
+    fn concession_state(&self, state: &GameState) -> Option<GameState> {
+        self.latch.mana_spend_permission.is_some().then(|| {
+            let mut priced = state.clone();
+            priced.active_graveyard_permission_latch = Some(Box::new(self.latch.clone()));
+            priced
+        })
+    }
+
     /// The menu projection: the announcement plus the terms the menu displays.
     fn choice(&self) -> crate::types::game_state::CastAuthorityChoice {
         let (frequency, graveyard_destination_replacement) = match self.variant {
@@ -20836,8 +20848,11 @@ fn castable_spell_verdict_with_probe(
             .options
             .is_empty()
     {
+        // CR 601.2a + CR 609.4b: the payment mode is chosen under the
+        // concession the cast will pay with, so an off-color sacrificial
+        // source that only the concession makes a payer keeps its choice.
         return Some(CastableSpellVerdict {
-            payment_state: None,
+            payment_state: prepared_concession_state(state, &prepared),
             prepared_cost: Some(prepared.mana_cost),
         });
     }
@@ -20989,6 +21004,15 @@ fn can_feasibly_pay_mana_cost_with_assist(
                 probe,
             )
     })
+}
+
+/// CR 601.2a + CR 609.4b: `state` priced under the mana concession of the
+/// graveyard grant `prepared` is announced under, or `None` when it has none.
+fn prepared_concession_state(state: &GameState, prepared: &PreparedSpellCast) -> Option<GameState> {
+    prepared
+        .graveyard_authority
+        .as_ref()
+        .and_then(|resolution| resolution.authority().concession_state(state))
 }
 
 fn can_cast_prepared_now_with_probe(
@@ -21340,16 +21364,7 @@ fn can_cast_prepared_now_with_probe(
     // CR 601.2a + CR 609.4b: an option announced under a graveyard grant that
     // carries a mana concession (Whispersteel Dagger) is priced under that
     // concession, as its payment will be (`active_graveyard_permission_latch`).
-    let concession_state = prepared
-        .graveyard_authority
-        .as_ref()
-        .map(|resolution| &resolution.authority().latch)
-        .filter(|latch| latch.mana_spend_permission.is_some())
-        .map(|latch| {
-            let mut priced = state.clone();
-            priced.active_graveyard_permission_latch = Some(Box::new(latch.clone()));
-            priced
-        });
+    let concession_state = prepared_concession_state(state, prepared);
     let state = concession_state.as_ref().unwrap_or(state);
     let mana_payable = can_feasibly_pay_harmonize_mana_cost_with_probe(
         state,
@@ -26593,6 +26608,10 @@ fn alternative_cost_offer_payable(
     residual: &Option<AbilityCost>,
     target_assignments: &[Vec<TargetRef>],
 ) -> bool {
+    // CR 601.2a + CR 609.4b: the alternative cost is priced under the
+    // permission's mana concession, as its payment will be.
+    let concession_state = authority.and_then(|authority| authority.concession_state(state));
+    let state = concession_state.as_ref().unwrap_or(state);
     if !residual
         .as_ref()
         .is_none_or(|cost| cost.is_payable(state, player, object_id))

@@ -12020,7 +12020,8 @@ pub struct GraveyardPermissionLatch {
     pub extra_cost: Option<crate::types::statics::CastExtraCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enters_with_counter: Option<crate::types::counter::CounterType>,
-    /// CR 601.3: a `Single` grant ends when this cast finalizes.
+    /// CR 601.3 + CR 601.2i: a `Single` grant allows one cast and ends when
+    /// this cast becomes cast.
     #[serde(
         default,
         skip_serializing_if = "crate::types::statics::PermissionCastLimit::is_unlimited"

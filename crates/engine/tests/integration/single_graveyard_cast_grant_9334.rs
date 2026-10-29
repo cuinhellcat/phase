@@ -14,6 +14,7 @@
 //! Cards are built from their verbatim Oracle text
 //! (`client/public/card-data.json`); CI has no card database.
 
+use engine::ai_support::legal_actions;
 use engine::game::casting::{can_cast_object_now, spell_objects_available_to_cast};
 use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;
@@ -22,6 +23,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::keywords::{BlitzCost, Keyword};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -41,6 +43,13 @@ fn mana(kind: ManaType, count: usize) -> Vec<ManaUnit> {
 
 fn colorless(count: usize) -> Vec<ManaUnit> {
     mana(ManaType::Colorless, count)
+}
+
+fn black(count: usize) -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; count],
+        generic: 0,
+    }
 }
 
 fn one_generic() -> ManaCost {
@@ -215,23 +224,8 @@ struct DaggerHit {
 }
 
 fn dagger_hits_p1(double_strike: bool) -> DaggerHit {
-    let black_one_drop = ManaCost::Cost {
-        shards: vec![ManaCostShard::Black],
-        generic: 0,
-    };
+    let black_one_drop = black(1);
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let attacker = {
-        let mut builder = scenario.add_creature(P0, "Attacker", 1, 1);
-        if double_strike {
-            builder.double_strike();
-        }
-        builder.id()
-    };
-    let dagger = scenario
-        .add_artifact_from_oracle(P0, "Whispersteel Dagger", WHISPERSTEEL_DAGGER)
-        .with_subtypes(vec!["Equipment"])
-        .id();
     let theirs = ["Their Bear", "Their Second Bear", "Their Third Bear"].map(|name| {
         scenario
             .add_creature_to_graveyard(P1, name, 2, 2)
@@ -245,6 +239,37 @@ fn dagger_hits_p1(double_strike: bool) -> DaggerHit {
     let in_hand = scenario
         .add_creature_to_hand(P0, "Hand Bear", 2, 2)
         .with_mana_cost(black_one_drop)
+        .id();
+    let mut runner = dagger_strikes_p1(scenario, double_strike);
+    for unit in mana(ManaType::Red, 3) {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
+    DaggerHit {
+        runner,
+        theirs,
+        mine,
+        in_hand,
+    }
+}
+
+/// Adds an attacker carrying Whispersteel Dagger to `scenario`, has it deal
+/// combat damage to P1, and stops in P0's postcombat main phase with an empty
+/// mana pool.
+fn dagger_strikes_p1(
+    mut scenario: GameScenario,
+    double_strike: bool,
+) -> engine::game::scenario::GameRunner {
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = {
+        let mut builder = scenario.add_creature(P0, "Attacker", 1, 1);
+        if double_strike {
+            builder.double_strike();
+        }
+        builder.id()
+    };
+    let dagger = scenario
+        .add_artifact_from_oracle(P0, "Whispersteel Dagger", WHISPERSTEEL_DAGGER)
+        .with_subtypes(vec!["Equipment"])
         .id();
     let mut runner = scenario.build();
     attach_to(runner.state_mut(), dagger, attacker);
@@ -260,17 +285,8 @@ fn dagger_hits_p1(double_strike: bool) -> DaggerHit {
         .expect("declare attackers");
     runner.combat_damage();
     runner.advance_to_phase(Phase::PostCombatMain);
-    let pool = &mut runner.state_mut().players[0].mana_pool;
-    pool.clear();
-    for unit in mana(ManaType::Red, 3) {
-        pool.add(unit);
-    }
-    DaggerHit {
-        runner,
-        theirs,
-        mine,
-        in_hand,
-    }
+    runner.state_mut().players[0].mana_pool.clear();
+    runner
 }
 
 /// Whispersteel Dagger: after the equipped creature deals combat damage to P1,
@@ -298,6 +314,11 @@ fn whispersteel_dagger_grants_one_cast_from_the_damaged_players_graveyard() {
     assert!(
         !castable.contains(&mine),
         "\"that player's graveyard\" is P1's (CR 400.3), not P0's own"
+    );
+
+    assert!(
+        can_cast_object_now(runner.state(), P0, theirs[1]),
+        "before the cast, a second creature card is castable too"
     );
 
     // CR 609.4b: red mana pays the {B} of the spell cast through the grant.
@@ -466,6 +487,104 @@ fn whispersteel_concession_holds_for_manual_payment() {
         .act(GameAction::PassPriority)
         .expect("red mana pays {B} under the grant");
     assert_eq!(runner.state().objects[&theirs[0]].zone, Zone::Stack);
+}
+
+/// The grant's concession prices the card's own alternative cost too: with
+/// three red mana, a card in P1's graveyard whose printed cost is out of reach
+/// is cast for its Blitz {B}{B} (CR 702.152a), and the same card in P0's hand,
+/// not cast through the grant, is not castable.
+#[test]
+fn whispersteel_concession_prices_a_graveyard_blitz() {
+    let blitz_card = |builder: &mut engine::game::scenario::CardBuilder<'_>| {
+        builder
+            .with_mana_cost(black(9))
+            .with_keyword(Keyword::Blitz(BlitzCost::Mana(black(2))));
+    };
+    let mut scenario = GameScenario::new();
+    let theirs = {
+        let mut builder = scenario.add_creature_to_graveyard(P1, "Their Blitzer", 2, 2);
+        blitz_card(&mut builder);
+        builder.id()
+    };
+    let in_hand = {
+        let mut builder = scenario.add_creature_to_hand(P0, "Hand Blitzer", 2, 2);
+        blitz_card(&mut builder);
+        builder.id()
+    };
+    let mut runner = dagger_strikes_p1(scenario, false);
+    for unit in mana(ManaType::Red, 3) {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
+
+    assert!(
+        !can_cast_object_now(runner.state(), P0, in_hand),
+        "red mana cannot pay blitz {{B}}{{B}} for a spell not cast through the grant"
+    );
+    assert!(
+        can_cast_object_now(runner.state(), P0, theirs),
+        "red mana prices blitz {{B}}{{B}} under the grant's concession"
+    );
+    let card_id = runner.state().objects[&theirs].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: theirs,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the blitz cast is accepted as offered");
+    assert_eq!(runner.state().objects[&theirs].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        1,
+        "blitz {{B}}{{B}} = 2 of the 3 red mana is spent"
+    );
+}
+
+/// The payment mode is chosen under the concession: when a sacrificial {R}
+/// source is the only payer, it keeps its explicit choice
+/// (`AutoExceptSacrificialMana`) for a {B} card the concession lets it pay,
+/// exactly as for an {R} card it pays anyway.
+#[test]
+fn whispersteel_concession_keeps_the_sacrificial_source_choice() {
+    let mut scenario = GameScenario::new();
+    let off_color = scenario
+        .add_creature_to_graveyard(P1, "Their Black Bear", 2, 2)
+        .with_mana_cost(black(1))
+        .id();
+    let on_color = scenario
+        .add_creature_to_graveyard(P1, "Their Red Bear", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Red Petal", "{T}, Sacrifice this artifact: Add {R}.");
+    let runner = dagger_strikes_p1(scenario, false);
+
+    let offered_modes = |object: engine::types::identifiers::ObjectId| -> Vec<CastPaymentMode> {
+        legal_actions(runner.state())
+            .into_iter()
+            .filter_map(|action| match action {
+                GameAction::CastSpell {
+                    object_id,
+                    payment_mode,
+                    ..
+                } if object_id == object => Some(payment_mode),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        offered_modes(on_color),
+        vec![CastPaymentMode::AutoExceptSacrificialMana],
+        "the sacrificial source is the only payer of {{R}}"
+    );
+    assert_eq!(
+        offered_modes(off_color),
+        vec![CastPaymentMode::AutoExceptSacrificialMana],
+        "under the concession it is the only payer of {{B}} too"
+    );
 }
 
 /// A printed static permission carrying `PermissionCastLimit::Single` has no
