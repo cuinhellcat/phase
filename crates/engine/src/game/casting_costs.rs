@@ -440,6 +440,16 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     if matches!(cost, AbilityCost::Unimplemented { .. }) {
         return Ok(false);
     }
+    // CR 601.2a + CR 609.4b + CR 611.2f: the cast is priced under the terms of
+    // the graveyard grant it is announced under (Whispersteel Dagger's
+    // concession), which ride its ability until it becomes the pending cast.
+    let terms_state = pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .as_ref()
+        .and_then(|latch| super::casting::latch_payment_terms_state(state, latch));
+    let state = terms_state.as_ref().unwrap_or(state);
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
     if let Some(residual) = split.residual.as_ref() {
@@ -12904,6 +12914,28 @@ enum ReturnedCreatureCostMove {
     Delivered,
 }
 
+/// CR 608.2c + CR 601.2a: whether a cast permission's "… is a [type] in
+/// addition to its other types" rider applies to the cast of `object_id`: its
+/// printed spell-quality condition ("If you cast a creature spell this way")
+/// is evaluated against the elected spell, which has all the characteristics
+/// of its card. The single gate for the rider, read at finalization and by the
+/// payment-time spell projection (`casting::build_spell_meta`).
+pub(super) fn enters_rider_applies(
+    state: &GameState,
+    object_id: ObjectId,
+    rider: &crate::types::ability::PendingEntersModifications,
+) -> bool {
+    !rider.is_empty()
+        && rider.cast_filter.as_ref().is_none_or(|filter| {
+            crate::game::filter::matches_target_filter(
+                state,
+                object_id,
+                filter,
+                &crate::game::filter::FilterContext::neutral(),
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finalize_cast_with_phyrexian_choices_inner(
     state: &mut GameState,
@@ -13536,15 +13568,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .map(|latch| latch.enters_modifications.clone())
         .unwrap_or_default();
     for rider in [cast_this_way_enters_mods, graveyard_enters_mods] {
-        let rider_quality_matches = rider.cast_filter.as_ref().is_none_or(|filter| {
-            crate::game::filter::matches_target_filter(
-                state,
-                object_id,
-                filter,
-                &crate::game::filter::FilterContext::neutral(),
-            )
-        });
-        if rider_quality_matches && !rider.is_empty() {
+        if enters_rider_applies(state, object_id, &rider) {
             state.add_transient_continuous_effect(
                 object_id,
                 player,

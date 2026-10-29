@@ -20,11 +20,12 @@ use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::types::ability::{AbilityCost, AdditionalCost};
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{AlternativeCastKeyword, CastPaymentMode, WaitingFor};
 use engine::types::keywords::{BlitzCost, Keyword};
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -167,6 +168,118 @@ fn tomb_of_aclazotz_cast_enters_with_finality_as_a_vampire() {
         !can_cast_object_now(runner.state(), P0, second),
         "the grant is one cast"
     );
+}
+
+/// CR 611.2f: the Tomb's "is a Vampire in addition to its other types" applies
+/// while the spell is cast, so mana spendable only on Vampire creature spells
+/// (Cavern of Souls naming Vampire) pays for a non-Vampire creature cast
+/// through the grant, also pinned in the interactive payment step; the same
+/// card in hand, not cast through it, can't use it.
+#[test]
+fn tomb_rider_makes_the_spell_a_vampire_for_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    let from_graveyard = scenario
+        .add_creature_to_graveyard(P0, "Graveyard Bear", 2, 2)
+        .with_mana_cost(black(1))
+        .id();
+    let in_hand = scenario
+        .add_creature_to_hand(P0, "Hand Bear", 2, 2)
+        .with_mana_cost(black(1))
+        .id();
+    let cavern_mana = ManaUnit::new(
+        ManaType::Black,
+        engine::types::identifiers::ObjectId(0),
+        false,
+        vec![ManaRestriction::OnlyForCreatureType("Vampire".to_string())],
+    );
+    scenario.with_mana_pool(P0, vec![cavern_mana]);
+    let mut runner = scenario.build();
+
+    runner.activate(tomb, 1).resolve();
+    assert!(
+        !can_cast_object_now(runner.state(), P0, in_hand),
+        "Vampire-only mana can't pay for a non-Vampire spell"
+    );
+    assert!(
+        can_cast_object_now(runner.state(), P0, from_graveyard),
+        "cast through the Tomb, the spell is a Vampire as it is paid for"
+    );
+    let card_id = runner.state().objects[&from_graveyard].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: from_graveyard,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the graveyard cast starts");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "manual payment opens the payment step, got {:?}",
+        runner.state().waiting_for
+    );
+    let pip_id = runner.state().players[0]
+        .mana_pool
+        .unit_at(0)
+        .unwrap()
+        .pip_id;
+    runner
+        .act(GameAction::SpendPoolMana { pip_id })
+        .expect("Vampire-only mana may be pinned to the Vampire spell");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("Vampire-only mana pays for the Vampire spell");
+    assert_eq!(runner.state().objects[&from_graveyard].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// CR 611.2f + CR 601.2f: the spell is already a Vampire as its total cost is
+/// determined, so "Vampire spells you cast cost {1} less to cast" reduces a
+/// non-Vampire creature card cast through the Tomb; the same card in hand pays
+/// full price.
+#[test]
+fn tomb_rider_makes_the_spell_a_vampire_for_cost_reductions() {
+    let two_drop = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black],
+        generic: 1,
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Vampire Reducer",
+        "Vampire spells you cast cost {1} less to cast.",
+    );
+    let from_graveyard = scenario
+        .add_creature_to_graveyard(P0, "Graveyard Bear", 2, 2)
+        .with_mana_cost(two_drop.clone())
+        .id();
+    let in_hand = scenario
+        .add_creature_to_hand(P0, "Hand Bear", 2, 2)
+        .with_mana_cost(two_drop)
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    let mut runner = scenario.build();
+
+    runner.activate(tomb, 1).resolve();
+    assert!(
+        !can_cast_object_now(runner.state(), P0, in_hand),
+        "a non-Vampire spell costs its full {{1}}{{B}}"
+    );
+    assert!(
+        can_cast_object_now(runner.state(), P0, from_graveyard),
+        "cast through the Tomb, the Vampire spell costs {{B}}"
+    );
+    let outcome = runner.cast(from_graveyard).resolve();
+    assert_eq!(outcome.zone_of(from_graveyard), Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
 }
 
 /// A creature cast from hand while the Tomb's grant stands is neither a
@@ -538,6 +651,136 @@ fn whispersteel_concession_prices_a_graveyard_blitz() {
         runner.state().players[0].mana_pool.total(),
         1,
         "blitz {{B}}{{B}} = 2 of the 3 red mana is spent"
+    );
+}
+
+/// CR 118.9b: alternative costs are optional. When the concession makes both
+/// the printed cost ({1}{R}) and Blitz ({2}{R}) payable with three blue mana,
+/// the player chooses (Riveteers Requisitioner), and the printed cost is paid
+/// under the concession.
+#[test]
+fn whispersteel_concession_keeps_the_printed_cost_choice() {
+    let red = |generic: u32| ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic,
+    };
+    let mut scenario = GameScenario::new();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "Their Requisitioner", 2, 1)
+        .with_mana_cost(red(1))
+        .with_keyword(Keyword::Blitz(BlitzCost::Mana(red(2))))
+        .id();
+    let mut runner = dagger_strikes_p1(scenario, false);
+    for unit in mana(ManaType::Blue, 3) {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
+
+    let card_id = runner.state().objects[&theirs].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: theirs,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the graveyard cast starts");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AlternativeCastChoice {
+                keyword: AlternativeCastKeyword::Blitz,
+                ..
+            }
+        ),
+        "both costs are payable, so the player chooses, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Normal,
+        })
+        .expect("the printed cost is chosen");
+    assert_eq!(runner.state().objects[&theirs].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        1,
+        "the printed {{1}}{{R}} = 2 of the 3 blue mana is spent"
+    );
+}
+
+/// CR 118.3 + CR 601.2f-h: a mandatory choice of additional costs is judged
+/// under the concession too. Bayou Groff ({1}{G}; "As an additional cost to
+/// cast this spell, sacrifice a creature or pay {3}.") in P1's graveyard is
+/// castable with five red mana, offers both branches and is cast paying {3};
+/// the same card in P0's hand is not castable.
+#[test]
+fn whispersteel_concession_prices_an_additional_cost_choice() {
+    // The additional cost as `client/public/card-data.json` parses Bayou Groff.
+    let groff_cost: AdditionalCost = serde_json::from_str(
+        r#"{"type":"Choice","data":[{"type":"Sacrifice","target":{"type":"Typed","type_filters":["Creature"],"controller":null,"properties":[]},"count":1},{"type":"Mana","cost":{"type":"Cost","shards":[],"generic":3}}]}"#,
+    )
+    .expect("Bayou Groff's additional cost");
+    assert!(matches!(
+        &groff_cost,
+        AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })
+    ));
+    let groff_mana = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 1,
+    };
+    let mut scenario = GameScenario::new();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "Their Bayou Groff", 5, 4)
+        .with_mana_cost(groff_mana.clone())
+        .with_additional_cost(groff_cost.clone())
+        .id();
+    let in_hand = scenario
+        .add_creature_to_hand(P0, "Hand Bayou Groff", 5, 4)
+        .with_mana_cost(groff_mana)
+        .with_additional_cost(groff_cost)
+        .id();
+    let mut runner = dagger_strikes_p1(scenario, false);
+    for unit in mana(ManaType::Red, 5) {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
+
+    assert!(
+        !can_cast_object_now(runner.state(), P0, in_hand),
+        "red mana pays neither branch with {{1}}{{G}} outside the grant"
+    );
+    assert!(
+        can_cast_object_now(runner.state(), P0, theirs),
+        "under the concession red mana pays {{1}}{{G}} with either branch"
+    );
+    let card_id = runner.state().objects[&theirs].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: theirs,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the offered cast is accepted");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(..),
+                ..
+            }
+        ),
+        "both branches are payable, so the player chooses, got {:?}",
+        runner.state().waiting_for
+    );
+    // CR 601.2b: declining the preferred sacrifice picks "pay {3}".
+    runner
+        .act(GameAction::DecideOptionalCost { pay: false })
+        .expect("red mana pays {1}{G} plus {3} under the concession");
+    assert_eq!(runner.state().objects[&theirs].zone, Zone::Stack);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "{{1}}{{G}} + {{3}} = all five red mana is spent"
     );
 }
 
