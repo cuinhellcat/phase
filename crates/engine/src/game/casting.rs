@@ -3661,6 +3661,18 @@ fn graveyard_rider_spell_projection(
     Some(projected)
 }
 
+/// CR 611.2f: `state` with the spell `spell_id` replaced by its rider
+/// projection, for reads that judge the spell through the object-filter
+/// authority by id rather than through an object in hand. `None` when no
+/// in-flight rider applies.
+fn graveyard_rider_projected_state(state: &GameState, spell_id: ObjectId) -> Option<GameState> {
+    let projected =
+        graveyard_rider_spell_projection(state, spell_id, state.objects.get(&spell_id)?)?;
+    let mut view = state.clone();
+    view.objects.insert(spell_id, projected);
+    Some(view)
+}
+
 /// CR 107.4f + CR 601.2f/h: Check an explicit Phyrexian payment route
 /// against the complete pending cost. Individual shard options deliberately
 /// do not reserve contested mana, so callers must validate the full vector
@@ -25062,10 +25074,20 @@ fn apply_mana_spell_grants(
     let Some(caster) = state.objects.get(&spell_id).map(|obj| obj.controller) else {
         return;
     };
+    // CR 611.2f: a graveyard grant's rider applies from the moment the spell is
+    // put on the stack, so the spend grants' filters judge the spell with it
+    // ("a creature spell that shares a creature type with your commander").
+    let rider_view = graveyard_rider_projected_state(state, spell_id);
     let has_cant_be_countered = spent_units.iter().any(|unit| {
         unit.grants.iter().any(|grant| {
             matches!(grant, ManaSpellGrant::CantBeCountered { filter }
-                if mana_grant_matches_spell(state, spell_id, caster, unit, filter))
+            if mana_grant_matches_spell(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                caster,
+                unit,
+                filter,
+            ))
         })
     });
 
@@ -25134,7 +25156,13 @@ fn apply_mana_spell_grants(
             else {
                 continue;
             };
-            if !mana_grant_matches_spell(state, spell_id, caster, unit, filter) {
+            if !mana_grant_matches_spell(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                caster,
+                unit,
+                filter,
+            ) {
                 continue;
             }
             let count =
@@ -25183,7 +25211,12 @@ fn apply_mana_spell_grants(
                 declared_slot_view: None,
                 granting_object: None,
             };
-            if !crate::game::filter::matches_target_filter(state, spell_id, filter, &filter_ctx) {
+            if !crate::game::filter::matches_target_filter(
+                rider_view.as_ref().unwrap_or(state),
+                spell_id,
+                filter,
+                &filter_ctx,
+            ) {
                 continue;
             }
             let timestamp = state.next_timestamp() as u32;
@@ -26595,7 +26628,14 @@ fn blitz_offer(
     // mana sub-cost and non-mana residual ("Discard a card" / "Pay 2 life"), then
     // apply active cost modifiers to the mana sub-cost only — CR 118.9d applies
     // modifiers to the alternative cost that is actually being paid.
+    //
+    // CR 611.2f + CR 118.9d: priced under the permission's terms, so a reduction
+    // reads the spell as the grant's rider makes it (a Vampire through the Tomb).
     let (mana_part, residual) = split_blitz_cost_components(&blitz_cost);
+    let terms_state = authority
+        .as_deref()
+        .and_then(|authority| authority.payment_terms_state(state));
+    let state = terms_state.as_ref().unwrap_or(state);
     let mana = mana_part
         .map(|m| apply_cost_modifiers_to_base(state, player, object_id, m.clone()).unwrap_or(m));
     // CR 601.2c: a creature spell cast for its blitz cost has no targets, so
@@ -26667,9 +26707,16 @@ fn bestow_offer(
     // CR 601.2f-h + CR 118.9d: split the (possibly compound) bestow cost into its
     // mana sub-cost and Collect-evidence residual, then apply active cost
     // modifiers to the mana sub-cost.
+    //
+    // CR 611.2f + CR 118.9d: priced under the permission's terms, as payment
+    // will price it.
     let (mana_part, residual) = split_bestow_cost_components(&bestow_cost);
+    let terms_state = authority
+        .as_deref()
+        .and_then(|authority| authority.payment_terms_state(&bestowed));
+    let priced = terms_state.as_ref().unwrap_or(&bestowed);
     let mana = mana_part.as_ref().map(|m| {
-        apply_cost_modifiers_to_base(&bestowed, player, object_id, m.clone())
+        apply_cost_modifiers_to_base(priced, player, object_id, m.clone())
             .unwrap_or_else(|| m.clone())
     });
     // CR 601.2c + CR 601.2f-h: bestow is on offer when its total is payable for
@@ -26681,7 +26728,7 @@ fn bestow_offer(
         .map(|target| vec![target])
         .collect();
     let offerable = alternative_cost_offer_payable(
-        &bestowed,
+        priced,
         player,
         object_id,
         CastingVariant::Bestow,

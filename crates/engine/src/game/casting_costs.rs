@@ -13567,6 +13567,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .as_ref()
         .map(|latch| latch.enters_modifications.clone())
         .unwrap_or_default();
+    let mut rider_installed = false;
     for rider in [cast_this_way_enters_mods, graveyard_enters_mods] {
         if enters_rider_applies(state, object_id, &rider) {
             state.add_transient_continuous_effect(
@@ -13577,7 +13578,15 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 rider.modifications,
                 None,
             );
+            rider_installed = true;
         }
+    }
+    // CR 611.2f: the rider applies from the moment the spell is put on the
+    // stack, so settle it onto the spell before the cast-time snapshots below
+    // (`snapshot_cast_spell_keywords`, `record_spell_cast_from_zone`) copy its
+    // characteristics into cast history, which later settlement can't repair.
+    if rider_installed {
+        super::layers::flush_layers(state);
     }
 
     if casting_variant == CastingVariant::Foretell {
@@ -13715,7 +13724,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
             .set_first_optional_effect_performed_gate(true);
     }
 
-    // CR 601.3: a grant for ONE cast ("you may cast a creature
+    // A grant whose Oracle wording authorizes ONE cast ("you may cast a creature
     // spell from your graveyard this turn" — Chainer, Nightmare Adept) is used
     // up by the cast it authorized: end the effect that granted it, so no
     // second card is castable through it. Read off the announcement latch, the

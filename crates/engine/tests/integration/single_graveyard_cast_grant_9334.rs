@@ -884,3 +884,253 @@ fn printed_single_cast_static_is_refused() {
         );
     }
 }
+
+const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+
+const PATH_OF_ANCESTRY: &str = "This land enters tapped.\n{T}: Add one mana of any color in your commander's color identity. When that mana is spent to cast a creature spell that shares a creature type with your commander, scry 1. (Look at the top card of your library. You may put that card on the bottom.)";
+
+fn is_vampire(subtypes: &[String]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Vampire")
+}
+
+/// Walking Corpse ({1}{B} Zombie) in P0's graveyard.
+fn walking_corpse(scenario: &mut GameScenario) -> engine::types::identifiers::ObjectId {
+    scenario
+        .add_creature_to_graveyard(P0, "Walking Corpse", 2, 2)
+        .with_subtypes(vec!["Zombie"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id()
+}
+
+/// CR 601.3: the cast the Tomb allowed ends its grant, and that retirement is
+/// journaled like every other continuous-effect edit, so replaying the recorded
+/// commands from before the cast reaches the live state: the grant is gone in
+/// both, and a later installation's recorded position still holds.
+#[test]
+fn used_tomb_grant_retirement_replays() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    let corpse = walking_corpse(&mut scenario);
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 2));
+    let mut runner = scenario.build();
+
+    runner.activate(tomb, 1).resolve();
+    let grant_ids: Vec<u64> = runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .map(|effect| effect.id)
+        .collect();
+    assert_eq!(
+        grant_ids.len(),
+        1,
+        "the Tomb's grant is one installed effect"
+    );
+    let pre_state = runner.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+
+    runner.cast(corpse).resolve();
+    let outcome = runner.cast(growth).target_object(corpse).resolve();
+    let state = outcome.state();
+    assert_eq!(
+        state.objects[&corpse].power,
+        Some(5),
+        "the later Giant Growth installed and applied"
+    );
+    assert!(
+        state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| effect.id != grant_ids[0]),
+        "the used grant is gone live"
+    );
+
+    let mut replay = pre_state;
+    for entry in state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+    {
+        if let Some(engine::types::resolved_commands::ResolvedRulesCommand::ContinuousEffect(
+            edit,
+        )) = &entry.command
+        {
+            replay
+                .apply_resolved_continuous_effect_edit(edit)
+                .expect("each recorded continuous-effect edit replays in order");
+        }
+    }
+    assert_eq!(
+        replay.transient_continuous_effects, state.transient_continuous_effects,
+        "replay reaches the live continuous effects, the used grant gone in both"
+    );
+}
+
+/// CR 611.2f: the spell is a Vampire from the moment it is put on the stack,
+/// so the cast-history record taken as it is cast says so, and a cast reader
+/// (Edgar Markov's eminence, "Whenever you cast another Vampire spell")
+/// sees it. Walking Corpse is a Zombie in the graveyard.
+#[test]
+fn tomb_rider_reaches_the_cast_record() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    let corpse = walking_corpse(&mut scenario);
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 2));
+    let mut runner = scenario.build();
+
+    assert!(
+        !is_vampire(&runner.state().objects[&corpse].card_types.subtypes),
+        "Walking Corpse is not a Vampire in the graveyard"
+    );
+    runner.activate(tomb, 1).resolve();
+    let card_id = runner.state().objects[&corpse].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: corpse,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Tomb cast is accepted");
+    assert_eq!(runner.state().objects[&corpse].zone, Zone::Stack);
+    let record = runner.state().spells_cast_this_turn_by_player[&P0]
+        .last()
+        .expect("the cast is recorded")
+        .clone();
+    assert!(
+        is_vampire(&record.subtypes),
+        "the cast record carries the Tomb's Vampire, got {:?}",
+        record.subtypes
+    );
+}
+
+/// CR 611.2f + CR 106.6: Path of Ancestry's "When that mana is spent to cast a
+/// creature spell that shares a creature type with your commander, scry 1"
+/// sees the Tomb's Vampire on Walking Corpse, with Edgar Markov (a Vampire
+/// Knight) as commander.
+#[test]
+fn tomb_rider_reaches_a_spend_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    let path = scenario
+        .add_land_from_oracle(P0, "Path of Ancestry", PATH_OF_ANCESTRY)
+        .id();
+    let edgar = scenario
+        .add_creature(P0, "Edgar Markov", 4, 4)
+        .with_subtypes(vec!["Vampire", "Knight"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Red,
+                ManaCostShard::White,
+                ManaCostShard::Black,
+            ],
+            generic: 3,
+        })
+        .id();
+    scenario.with_commander(edgar);
+    let corpse = walking_corpse(&mut scenario);
+    scenario.with_mana_pool(P0, colorless(1));
+    let mut runner = scenario.build();
+
+    assert!(
+        !is_vampire(&runner.state().objects[&corpse].card_types.subtypes),
+        "Walking Corpse is not a Vampire in the graveyard"
+    );
+    runner.activate(tomb, 1).resolve();
+    let card_id = runner.state().objects[&corpse].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: corpse,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Tomb cast is accepted");
+    assert_eq!(runner.state().objects[&corpse].zone, Zone::Stack);
+    assert!(
+        runner.state().objects[&path].tapped,
+        "Path of Ancestry's mana paid the {{B}}"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == path),
+        "Path's scry trigger is on the stack, got {:?}",
+        runner.state().stack
+    );
+}
+
+/// CR 611.2f + CR 118.9d: a reduction applies to the alternative cost being
+/// paid, read against the spell as the Tomb makes it. Girder Goons (an Ogre
+/// Warrior, {4}{B}, Blitz {3}{B}) through the Tomb, with "Vampire spells you
+/// cast cost {2} less to cast", blitzes for {1}{B}.
+#[test]
+fn tomb_rider_reduces_a_graveyard_blitz() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tomb = scenario
+        .add_land_from_oracle(P0, "The Tomb of Aclazotz", TOMB_OF_ACLAZOTZ)
+        .id();
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Vampire Reducer",
+        "Vampire spells you cast cost {2} less to cast.",
+    );
+    let goons = scenario
+        .add_creature_to_graveyard(P0, "Girder Goons", 4, 3)
+        .with_subtypes(vec!["Ogre", "Warrior"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
+        .with_keyword(Keyword::Blitz(BlitzCost::Mana(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 3,
+        })))
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 2));
+    let mut runner = scenario.build();
+
+    runner.activate(tomb, 1).resolve();
+    assert!(
+        can_cast_object_now(runner.state(), P0, goons),
+        "blitz {{3}}{{B}} less {{2}} is payable with two black mana"
+    );
+    let card_id = runner.state().objects[&goons].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: goons,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Tomb cast is accepted");
+    if let WaitingFor::AlternativeCastChoice { .. } = runner.state().waiting_for {
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            })
+            .expect("blitz is chosen");
+    }
+    assert_eq!(runner.state().objects[&goons].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}

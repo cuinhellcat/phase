@@ -317,10 +317,11 @@ impl GraveyardPermissionPool {
     }
 }
 
-/// CR 601.3: How many casts a resolution-created graveyard
-/// permission authorizes over its whole duration.
+/// How many casts a resolution-created graveyard permission (CR 601.3: "a
+/// rule or effect allows that player to cast it") authorizes over its whole
+/// duration.
 ///
-/// The article decides it: "you may cast Zombie SPELLS from your graveyard
+/// The Oracle wording decides it, not a rule; its article does: "you may cast Zombie SPELLS from your graveyard
 /// this turn" (Liliana, Untouched by Death) is `Unlimited`; "you may cast A
 /// creature SPELL from your graveyard this turn" (Chainer, Nightmare Adept; The
 /// Tomb of Aclazotz; Whispersteel Dagger) is `Single`. A `Single` grant ends
@@ -1623,7 +1624,7 @@ pub enum StaticMode {
             skip_serializing_if = "GraveyardPermissionPool::is_own_graveyard"
         )]
         pool: GraveyardPermissionPool,
-        /// CR 601.3: how many casts the grant authorizes.
+        /// How many casts the grant authorizes, as its Oracle wording says.
         /// `Single` is built only for a resolution-created grant ("you may cast
         /// a creature spell from your graveyard this turn"); casting through it
         /// ends the granting effect (`casting_costs` at finalization). A printed
