@@ -17037,37 +17037,54 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
             &policy.filter,
             &context,
         );
-        let allowed = matches
-            && cast_permission_constraint_allows_cast(
+        if !matches
+            || !cast_permission_constraint_allows_cast(
                 &projected,
                 object,
                 &policy.constraint,
                 Some(object.spell_mana_value()),
             )
-            && {
-                #[cfg(test)]
-                record_resolution_cast_projection_measurement(|measurements| {
-                    measurements.projected_target_checks += 1;
-                });
-                spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
+        {
+            continue;
+        }
+        // Preparation owns zone admission and every live "can't cast" rule
+        // for the exact indexed grant and prospective face.
+        let Ok(prepared) = prepare_spell_cast_with_variant_override_inner(
+            &projected,
+            player,
+            object_id,
+            force_normal_cost.then_some(CastingVariant::Normal),
+            None,
+            Some(permission_index),
+            CastingMode::Actual,
+        ) else {
+            continue;
+        };
+        #[cfg(test)]
+        record_resolution_cast_projection_measurement(|measurements| {
+            measurements.projected_target_checks += 1;
+        });
+        let targets_ok = match &prepared.modal {
+            Some(modal) if !force_normal_cost && !modal.mode_costs.is_empty() => {
+                prepared_has_payable_mode_in_flushed_state(
+                    &projected,
+                    player,
+                    &prepared,
+                    &modal.mode_costs,
+                    None,
+                )
             }
-            // Preparation owns zone admission and every live "can't cast"
-            // rule.  It is intentionally run on this clone after the exact
-            // indexed grant and prospective face have been installed.
-            && prepare_spell_cast_with_variant_override_inner(
-                &projected,
-                player,
-                object_id,
-                force_normal_cost.then_some(CastingVariant::Normal),
-                None,
-                Some(permission_index),
-                CastingMode::Actual,
-            )
-            .is_ok_and(|prepared| match &object.additional_cost {
+            _ => spell_has_legal_targets_in_flushed_state(&projected, object.id, player),
+        };
+        let allowed = targets_ok
+            && match &object.additional_cost {
                 // CR 118.9d + CR 601.2h: the elected face's mandatory
                 // additional costs must be payable under this permission.
                 Some(AdditionalCost::Required(cost)) => prepared_declaration_offerable(
-                    &projected, player, &prepared, std::slice::from_ref(cost),
+                    &projected,
+                    player,
+                    &prepared,
+                    std::slice::from_ref(cost),
                 ),
                 Some(AdditionalCost::Choice(choices)) => {
                     prepared_declaration_offerable(&projected, player, &prepared, choices)
@@ -17075,9 +17092,10 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => {
                     // A normal-cost grant leaves alternative costs open for announcement.
                     // A replacement cost is elected already, including a free suspend cast.
-                    force_normal_cost || prepared_face_mana_payable(&projected, player, &prepared, None)
+                    force_normal_cost
+                        || prepared_face_mana_payable(&projected, player, &prepared, None)
                 }
-            });
+            };
         if back_face {
             legality.back = allowed;
         } else {
@@ -23548,6 +23566,35 @@ fn prepared_face_mana_payable(
         })
 }
 
+/// CR 702.172a / CR 702.183a: Spree and Tiered spells require at least one
+/// payable mode with legal targets. Price each choosable mode with the cost
+/// of the elected spell face and its casting permission.
+fn prepared_has_payable_mode_in_flushed_state(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    mode_costs: &[ManaCost],
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    let Some(choosable) = castable_spell_modes_in_flushed_state(state, prepared.object_id, player)
+    else {
+        return false;
+    };
+    choosable.into_iter().any(|mode| {
+        let Some(mode_cost) = mode_costs.get(mode) else {
+            return false;
+        };
+        let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
+        can_feasibly_pay_mana_cost_with_probe(
+            state,
+            player,
+            Some(prepared.object_id),
+            &total,
+            probe,
+        )
+    })
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23866,33 +23913,16 @@ fn can_cast_prepared_now_with_probe(
         return castable && spell_has_legal_targets_with_probe(state, obj.id, player, probe);
     }
 
-    // CR 702.172a / CR 702.183a: Spree and Tiered spells must afford at least
-    // one mode to be castable — and, CR 700.2a, one that can be chosen: a mode
-    // whose targets have no legal choice can't be, however affordable its cost.
-    // CR 117.1d + CR 601.2g: Use the feasibility predicate so non-tap mana
-    // abilities (Sacrifice / Discard / PayLife) the controller could activate
-    // manually during cost payment are counted as castable mana sources.
-    if let Some(ref modal) = prepared.modal {
-        if !modal.mode_costs.is_empty() {
-            let Some(choosable) = with_flushed_cast_state(state, player, probe, |flushed| {
-                castable_spell_modes_in_flushed_state(flushed, obj.id, player)
-            }) else {
-                return false;
-            };
-            return choosable.iter().any(|&mode| {
-                let Some(mode_cost) = modal.mode_costs.get(mode) else {
-                    return false;
-                };
-                let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
-                can_feasibly_pay_mana_cost_with_probe(
-                    state,
-                    player,
-                    Some(prepared.object_id),
-                    &total,
-                    probe,
-                )
-            });
-        }
+    if let Some(modal) = prepared.modal.as_ref().filter(|m| !m.mode_costs.is_empty()) {
+        return with_flushed_cast_state(state, player, probe, |flushed| {
+            prepared_has_payable_mode_in_flushed_state(
+                flushed,
+                player,
+                prepared,
+                &modal.mode_costs,
+                probe,
+            )
+        });
     }
 
     // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —

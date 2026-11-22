@@ -1503,6 +1503,68 @@ fn suspend_review_restoring_a_departed_parked_choice_finishes_resolution() {
 }
 
 #[test]
+fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
+    const DANCE: &str = "Spree (Choose one or more additional costs.)\n\
++ {1} — Search your library for a basic land card or a Desert card, put it onto the battlefield, then shuffle.\n\
++ {3} — Create an X/X green Elemental creature token, where X is the number of lands you control.";
+    for can_pay in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let dance = s
+            .add_spell_to_hand_from_oracle(P0, "Dance of the Tumbleweeds", false, DANCE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+        let land = can_pay.then(|| s.add_basic_land(P0, ManaColor::Green));
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards { cards: vec![dance] })
+            .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), dance), 4);
+        one_counter_upkeep(&mut r, dance);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), dance), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+        if let Some(land) = land {
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            r.act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::ModeChoice { player: P0, .. }
+            ));
+            r.act(GameAction::SelectModes { indices: vec![0] }).unwrap();
+            assert_eq!(r.state().stack.back().unwrap().id, dance);
+            assert!(r.state().objects[&land].tapped);
+            assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        } else {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                r.state().waiting_for
+            );
+            assert_eq!(r.state().objects[&dance].zone, Zone::Exile);
+            assert!(r.state().objects[&dance].casting_permissions.is_empty());
+            assert!(r.state().stack.is_empty());
+        }
+    }
+}
+
+#[test]
 fn suspend_review_wren_requires_a_payable_branch_and_charges_its_mana() {
     for count in [2, 3] {
         let mut s = GameScenario::new();
