@@ -1292,67 +1292,209 @@ fn suspend_last_counter_rejects_a_prohibited_creature_spell() {
     assert!(r.state().objects[&card].casting_permissions.is_empty());
 }
 
+fn restore_suspend_save(saved: PersistedGameState, with_db: bool) -> GameRunner {
+    use engine::types::game_state::PersistedRestoreFinalization;
+    let state = if with_db {
+        saved
+            .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+            .unwrap()
+            .finalize_after_rehydration(|state| {
+                engine::game::rehydrate_game_from_card_db_with_finalization(
+                    state,
+                    crate::support::shared_card_db().unwrap(),
+                    engine::game::CardDbRehydrationFinalization::Defer,
+                );
+                Ok(())
+            })
+            .unwrap()
+    } else {
+        saved.into_game_state().unwrap()
+    };
+    GameRunner::from_state(state)
+}
+
 #[test]
-fn suspend_last_counter_restores_the_keyword_origin_on_the_stack_or_at_the_choice() {
+fn suspend_review_historical_install_generates_the_correct_future_trigger_on_first_load() {
     use engine::types::ability::AbilityTag;
     use engine::types::game_state::StackEntryKind;
     let card = ObjectId(2);
-    let mut old = restore(include_str!(
-        "../fixtures/activation_cost/greater_gargadon_pre_special_action_manual.json"
+    for with_db in [false, true] {
+        let mut r = restore_suspend_save(
+            serde_json::from_str(include_str!(
+                "../fixtures/activation_cost/greater_gargadon_pre_special_action_manual.json"
+            ))
+            .unwrap(),
+            with_db,
+        );
+        let mountain = r.state().battlefield[0];
+        r.act(mana_source(&r, mountain, ManaType::Red)).unwrap();
+        r.act(GameAction::PassPriority).unwrap();
+        one_counter_upkeep(&mut r, card);
+        pass_pair(&mut r);
+        let StackEntryKind::TriggeredAbility { ability, .. } =
+            &r.state().stack.back().unwrap().kind
+        else {
+            panic!("expected the last-counter ability")
+        };
+        assert_eq!(
+            ability.context.ability_tag,
+            Some(AbilityTag::SuspendLastCounter)
+        );
+        engine::game::zones::move_to_zone(r.state_mut(), card, Zone::Graveyard, &mut vec![]);
+        pass_pair(&mut r);
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    }
+}
+
+// Exported at the two suspension points by the historical writer; gzip -9 -n.
+fn old_suspend_save(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_reader(flate2::read::GzDecoder::new(bytes)).unwrap()
+}
+
+#[test]
+fn suspend_review_restores_the_pending_keyword_on_the_stack_or_at_the_choice() {
+    use engine::types::ability::AbilityTag;
+    use engine::types::game_state::StackEntryKind;
+    let card = ObjectId(2);
+    let trigger = old_suspend_save(include_bytes!(
+        "../fixtures/activation_cost/greater_gargadon_pre_intervening_trigger.json.gz"
     ));
-    let mountain = old.state().battlefield[0];
-    old.act(mana_source(&old, mountain, ManaType::Red)).unwrap();
-    old.act(GameAction::PassPriority).unwrap();
-    one_counter_upkeep(&mut old, card);
-    pass_pair(&mut old);
-    assert_eq!(old.state().stack.len(), 1);
-    let StackEntryKind::TriggeredAbility { ability, .. } = &old.state().stack.back().unwrap().kind
-    else {
-        panic!("old trigger")
-    };
-    assert_eq!(
-        ability.context.ability_tag, None,
-        "the historical card data really lacks the tag"
-    );
-    let mut restored =
-        restore(&serde_json::to_string(&PersistedGameState::capture(old.state().clone())).unwrap());
-    let StackEntryKind::TriggeredAbility { ability, .. } =
-        &restored.state().stack.back().unwrap().kind
-    else {
-        panic!("restored trigger")
-    };
-    assert_eq!(
-        ability.context.ability_tag,
-        Some(AbilityTag::SuspendLastCounter)
-    );
-    engine::game::zones::move_to_zone(restored.state_mut(), card, Zone::Graveyard, &mut vec![]);
-    pass_pair(&mut restored);
-    assert!(matches!(
-        restored.state().waiting_for,
-        WaitingFor::Priority { .. }
+    let choice = old_suspend_save(include_bytes!(
+        "../fixtures/activation_cost/greater_gargadon_pre_intervening_choice.json.gz"
     ));
-    pass_pair(&mut old);
-    let mut restored =
-        restore(&serde_json::to_string(&PersistedGameState::capture(old.state().clone())).unwrap());
-    assert!(matches!(
-        restored.state().waiting_for,
-        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    for with_db in [false, true] {
+        let mut r = restore_suspend_save(serde_json::from_value(trigger.clone()).unwrap(), with_db);
+        let StackEntryKind::TriggeredAbility { ability, .. } =
+            &r.state().stack.back().unwrap().kind
+        else {
+            panic!("expected the restored last-counter ability")
+        };
+        assert_eq!(
+            ability.context.ability_tag,
+            Some(AbilityTag::SuspendLastCounter)
+        );
+        engine::game::zones::move_to_zone(r.state_mut(), card, Zone::Graveyard, &mut vec![]);
+        pass_pair(&mut r);
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+
+        let mut r = restore_suspend_save(serde_json::from_value(choice.clone()).unwrap(), with_db);
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        assert_eq!(
+            r.state()
+                .resolution_stack
+                .active_optional_effect()
+                .unwrap()
+                .ability
+                .context
+                .ability_tag,
+            Some(AbilityTag::SuspendLastCounter)
+        );
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert_eq!(r.state().objects[&card].zone, Zone::Stack);
+    }
+}
+
+#[test]
+fn suspend_review_restoring_a_departed_parked_choice_finishes_resolution() {
+    let choice = old_suspend_save(include_bytes!(
+        "../fixtures/activation_cost/greater_gargadon_pre_intervening_choice.json.gz"
     ));
-    assert_eq!(
-        restored
-            .state()
-            .resolution_stack
-            .active_optional_effect()
-            .unwrap()
-            .ability
-            .context
-            .ability_tag,
-        Some(AbilityTag::SuspendLastCounter)
-    );
-    restored
-        .act(GameAction::DecideOptionalEffect { accept: true })
-        .unwrap();
-    assert_eq!(restored.state().objects[&card].zone, Zone::Stack);
+    let card = ObjectId(2);
+    for with_db in [false, true] {
+        for reenter in [false, true] {
+            // Preserve the historical parked frame and move its source through the zone pipeline.
+            let PersistedGameState::Raw(mut old) =
+                serde_json::from_value(choice["state"].clone()).unwrap()
+            else {
+                panic!("expected the raw state inside the historical envelope")
+            };
+            engine::game::zones::move_to_zone(&mut old, card, Zone::Graveyard, &mut vec![]);
+            if reenter {
+                engine::game::zones::move_to_zone(&mut old, card, Zone::Exile, &mut vec![]);
+            }
+            let r = restore_suspend_save(PersistedGameState::capture(*old), with_db);
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { player: P0 }),
+                "db={with_db} reentry={reenter}: {:?}",
+                r.state().waiting_for
+            );
+            assert!(
+                r.state().resolution_stack.is_empty() && r.state().resolving_stack_entry.is_none()
+            );
+            assert!(
+                r.state().stack.is_empty()
+                    && r.state().objects[&card].casting_permissions.is_empty()
+            );
+            assert_eq!(
+                r.state().objects[&card].zone,
+                if reenter {
+                    Zone::Exile
+                } else {
+                    Zone::Graveyard
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn suspend_review_wren_requires_a_payable_branch_and_charges_its_mana() {
+    for count in [2, 3] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let wren = s.add_creature_to_hand_from_oracle(
+            P0, "Wren's Run Vanquisher", 3, 3,
+            "As an additional cost to cast this spell, reveal an Elf card from your hand or pay {3}.\nDeathtouch",
+        ).with_mana_cost(ManaCost::Cost { generic: 1, shards: vec![ManaCostShard::Green] }).with_subtypes(vec!["Elf", "Warrior"]).id();
+        let lands: Vec<_> = (0..count)
+            .map(|_| s.add_basic_land(P0, ManaColor::Red))
+            .collect();
+        // Jhoira spends the floated mana. The lands price only the subsequent spell.
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, lands[0], false, vec![]); 2],
+        );
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards { cards: vec![wren] })
+            .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), wren), 4);
+        one_counter_upkeep(&mut r, wren);
+        assert!(lands.iter().all(|id| !r.state().objects[id].tapped));
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+        pass_pair(&mut r);
+        if count == 2 {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "{:?}",
+                r.state().waiting_for
+            );
+            assert_eq!(r.state().objects[&wren].zone, Zone::Exile);
+            assert!(r.state().objects[&wren].casting_permissions.is_empty());
+        } else {
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            r.act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert_eq!(
+                r.state().objects[&wren].zone,
+                Zone::Stack,
+                "{:?}",
+                r.state().waiting_for
+            );
+            assert!(lands.iter().all(|id| r.state().objects[id].tapped));
+        }
+    }
 }
 
 #[test]

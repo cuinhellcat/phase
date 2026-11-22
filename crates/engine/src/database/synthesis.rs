@@ -9309,14 +9309,10 @@ pub fn synthesize_suspend(face: &mut CardFace) {
     // Older exports carry the exact pre-intervening-if keyword definitions.
     // Replace those in their original slots so independent printed triggers
     // (Riftmarked Knight) keep their identities.
-    for current in [
-        build_suspend_upkeep_removal_trigger(),
-        build_suspend_last_counter_cast_trigger(),
-    ] {
+    for (legacy, current) in historical_suspend_companions() {
         if face.triggers.contains(&current) {
             continue;
         }
-        let legacy = legacy_suspend_companion(&current);
         if let Some(slot) = face
             .triggers
             .iter_mut()
@@ -9327,6 +9323,14 @@ pub fn synthesize_suspend(face: &mut CardFace) {
             face.triggers.push(current);
         }
     }
+}
+
+pub(crate) fn historical_suspend_companions() -> [(TriggerDefinition, TriggerDefinition); 2] {
+    [
+        build_suspend_upkeep_removal_trigger(),
+        build_suspend_last_counter_cast_trigger(),
+    ]
+    .map(|current| (legacy_suspend_companion(&current), current))
 }
 
 fn legacy_suspend_companion(current: &TriggerDefinition) -> TriggerDefinition {
@@ -18650,7 +18654,6 @@ mod suspend_synthesis_tests {
         assert_eq!(last_count, 1, "last-counter trigger must dedupe");
     }
 
-    /// Cards without `Keyword::Suspend` are completely untouched.
     #[test]
     fn synthesize_suspend_replaces_the_two_historical_companions_in_place() {
         let old: serde_json::Value = serde_json::from_str(include_str!(
@@ -18674,6 +18677,7 @@ mod suspend_synthesis_tests {
         assert_eq!(face.triggers, current);
     }
 
+    /// Cards without `Keyword::Suspend` are completely untouched.
     #[test]
     fn synthesize_suspend_is_noop_without_keyword() {
         let mut face = CardFace::default();

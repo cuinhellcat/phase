@@ -20449,7 +20449,7 @@ fn conjunct_steps_are_infeasible(
 /// can't be performed in full
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
-fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+pub(super) fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     optional_effect_infeasibility(state, ability).is_some()
 }
 
@@ -20745,14 +20745,22 @@ fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbili
                 && ability.context.ability_tag
                     == Some(crate::types::ability::AbilityTag::SuspendLastCounter)
             {
-                return !ability.self_ref_is_current(state)
-                    || cast_from_zone::resolution_play_face_legality(
-                        state,
-                        ability,
-                        ability.source_id,
-                    )
-                    .count()
-                        == 0;
+                // CR 603.4: the intervening condition names the exact exiled
+                // incarnation, even if a resolution retained its successor.
+                return !super::triggers::check_trigger_condition_with_source(
+                    state,
+                    &crate::types::ability::TriggerCondition::SourceInZone { zone: Zone::Exile },
+                    ability.controller,
+                    ability.trigger_source.as_ref(),
+                    ability.trigger_definition_ref.as_ref(),
+                    None,
+                ) || cast_from_zone::resolution_play_face_legality(
+                    state,
+                    ability,
+                    ability.source_id,
+                )
+                .count()
+                    == 0;
             }
             if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
                 // CR 608.2d: an untargeted free graveyard pick with nothing

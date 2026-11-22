@@ -2421,6 +2421,27 @@ pub(crate) fn finalize_persisted_restore(
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
     restore_engine_derived_retarget_prompts(state)?;
+    // CR 603.4 + CR 608.2d + CR 702.62a: older writers could park the last
+    // counter choice even after its card left exile. Finish that instruction
+    // through the same continuation as a live, unperformed optional effect.
+    if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
+        && state
+            .resolution_stack
+            .active_optional_effect()
+            .is_some_and(|frame| {
+                frame.ability.context.ability_tag
+                    == Some(crate::types::ability::AbilityTag::SuspendLastCounter)
+                    && effects::optional_effect_is_infeasible(state, &frame.ability)
+            })
+    {
+        let mut events = Vec::new();
+        let waiting_for =
+            engine_payment_choices::handle_optional_effect_choice(state, false, &mut events)
+                .map_err(|error| {
+                    PersistedRestoreError::PrioritySettlementFailed(error.to_string())
+                })?;
+        settle_restored_instruction(state, &mut events, &waiting_for)?;
+    }
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
     if recovered_terminal_rest {
@@ -2464,21 +2485,23 @@ fn restore_engine_derived_retarget_prompts(
             // pipeline finishes the owning spell and settles the resulting
             // trigger batch, or preserves a new continuation prompt. It makes
             // no priority pass or decision to resolve another stack entry.
-            // Scan this same buffer so continuation events are not discarded.
-            // As in persisted terminal-rest settlement, a serialized
-            // construction recipient is not authority for exceptional priority.
-            state.pending_trigger_construction_priority_recipient = None;
-            state.waiting_for = engine_priority::run_post_action_pipeline_from(
-                state,
-                &mut events,
-                0,
-                &waiting_for,
-                false,
-                false,
-            )
-            .map_err(|error| PersistedRestoreError::PrioritySettlementFailed(error.to_string()))?;
+            settle_restored_instruction(state, &mut events, &waiting_for)?;
         }
     }
+    Ok(())
+}
+
+/// Continue from the instruction's own events. A persisted construction
+/// recipient cannot authorize exceptional priority during restore.
+fn settle_restored_instruction(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting_for: &WaitingFor,
+) -> Result<(), PersistedRestoreError> {
+    state.pending_trigger_construction_priority_recipient = None;
+    state.waiting_for =
+        engine_priority::run_post_action_pipeline_from(state, events, 0, waiting_for, false, false)
+            .map_err(|error| PersistedRestoreError::PrioritySettlementFailed(error.to_string()))?;
     Ok(())
 }
 

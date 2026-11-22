@@ -988,8 +988,24 @@ fn deserialize_objects_with_trigger_provenance<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    ObjectMap::deserialize_with_migration(deserializer, |object| {
-        object.migrate_legacy_trigger_definitions()
+    let companions = crate::database::synthesis::historical_suspend_companions();
+    ObjectMap::deserialize_with_migration(deserializer, |object| -> Result<(), &'static str> {
+        object.migrate_legacy_trigger_definitions()?;
+        // CR 702.62a: both the live occurrence and the base it refreshes from
+        // keep their slots. Captured occurrences on pending abilities migrate separately.
+        for (legacy, current) in &companions {
+            for index in 0..object.base_trigger_definitions.len() {
+                if object.base_trigger_definitions[index] == *legacy {
+                    Arc::make_mut(&mut object.base_trigger_definitions)[index] = current.clone();
+                }
+            }
+            for index in 0..object.trigger_definitions.len() {
+                if object.trigger_definitions[index].definition == *legacy {
+                    object.trigger_definitions[index].definition = current.clone();
+                }
+            }
+        }
+        Ok(())
     })
 }
 

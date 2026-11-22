@@ -17034,22 +17034,7 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
             &policy.filter,
             &context,
         );
-        let object = projected
-            .objects
-            .get(&object_id)
-            .expect("projected object persists");
-        // CR 118.9d + CR 601.2h: a free cast still requires the additional
-        // costs of the chosen face (Bone Splinters still sacrifices a creature).
-        let additional_cost_payable = match &object.additional_cost {
-            Some(AdditionalCost::Required(cost)) => {
-                cost.is_payable_for_spell(&projected, player, object_id)
-            }
-            Some(AdditionalCost::Choice(choices)) => choices
-                .iter()
-                .any(|cost| cost.is_payable_for_spell(&projected, player, object_id)),
-            Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => true,
-        };
-        let allowed = matches && additional_cost_payable
+        let allowed = matches
             && cast_permission_constraint_allows_cast(
                 &projected,
                 object,
@@ -17075,7 +17060,17 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 Some(permission_index),
                 CastingMode::Actual,
             )
-            .is_ok();
+            .is_ok_and(|prepared| match &object.additional_cost {
+                // CR 118.9d + CR 601.2h: the elected face's mandatory
+                // additional costs must be payable under this permission.
+                Some(AdditionalCost::Required(cost)) => prepared_declaration_offerable(
+                    &projected, player, &prepared, std::slice::from_ref(cost),
+                ),
+                Some(AdditionalCost::Choice(choices)) => {
+                    prepared_declaration_offerable(&projected, player, &prepared, choices)
+                }
+                Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => true,
+            });
         if back_face {
             legality.back = allowed;
         } else {
@@ -23483,6 +23478,25 @@ fn prepared_payment_terms_state(
         .and_then(|resolution| resolution.authority().payment_terms_state(state))
 }
 
+/// CR 601.2b + CR 601.2h: price the mandatory declaration on the elected
+/// spell face, including its selected permission and every mana addition.
+fn prepared_declaration_offerable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    choices: &[AbilityCost],
+) -> bool {
+    let resolved = prepared.ability_def.as_ref().map_or_else(
+        || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
+        |def| build_resolved_from_def(def, prepared.object_id, player),
+    );
+    let pending = pending_cast_from_prepared(prepared, resolved);
+    choices.iter().any(|cost| {
+        casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
+            .unwrap_or(false)
+    })
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23779,27 +23793,7 @@ fn can_cast_prepared_now_with_probe(
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        let resolved = prepared.ability_def.as_ref().map_or_else(
-            || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
-            |def| build_resolved_from_def(def, prepared.object_id, player),
-        );
-        let mut pending = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        pending.base_cost = Some(prepared.base_mana_cost.clone());
-        pending.casting_variant = prepared.casting_variant;
-        pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
-        pending.cast_timing_permission = prepared.cast_timing_permission;
-        pending.origin_zone = prepared.origin_zone;
-        pending.payment_mode = prepared.payment_mode;
-        let branch_is_offerable = |cost: &AbilityCost| {
-            casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
-                .unwrap_or(false)
-        };
-        if !costs.iter().any(branch_is_offerable) {
+        if !prepared_declaration_offerable(state, player, prepared, costs) {
             return false;
         }
     }
