@@ -27,12 +27,14 @@
 //! activation pipeline (`GameAction::ActivateAbility` → cost payment → stack →
 //! resolution) rather than asserting a parsed filter shape.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::{CastPaymentMode, PayCostKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -267,4 +269,209 @@ fn mold_folk_cannot_sacrifice_itself_while_it_is_only_a_creature() {
         0,
         "the ability must not have resolved"
     );
+}
+
+const GARGADON: &str = "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.";
+
+fn suspended_gargadon() -> (GameScenario, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_exile(P0, "Greater Gargadon", 9, 7)
+        .from_oracle_text_with_keywords(&["Suspend"], GARGADON)
+        .id();
+    scenario.with_counter(source, CounterType::Time, 2);
+    (scenario, source)
+}
+
+fn gargadon_activation(runner: &GameRunner, source: ObjectId) -> GameAction {
+    let card = &runner.state().objects[&source];
+    assert_eq!(card.zone, Zone::Exile);
+    assert_eq!(card.counters.get(&CounterType::Time), Some(&2));
+    GameAction::ActivateAbility {
+        source_id: source,
+        ability_index: card
+            .abilities
+            .iter()
+            .position(|a| matches!(*a.effect, Effect::RemoveCounter { .. }))
+            .expect("printed counter-removal ability"),
+        payment_mode: CastPaymentMode::Auto,
+    }
+}
+
+fn assert_sacrifice_prompt(runner: &GameRunner, eligible: &[ObjectId]) {
+    let WaitingFor::PayCost {
+        player,
+        kind: PayCostKind::Sacrifice,
+        choices,
+        min_count,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a sacrifice choice, got {:?}",
+            runner.state().waiting_for
+        )
+    };
+    assert_eq!((*player, *min_count, *count), (P0, 1, 1));
+    let mut actual = choices.clone();
+    actual.sort();
+    let mut expected = eligible.to_vec();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+fn finish_gargadon_payment(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    selected: ObjectId,
+    battlefield: &[ObjectId],
+) {
+    let owner = runner.state().objects[&selected].owner;
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![selected],
+        })
+        .unwrap();
+    let state = runner.state();
+    assert_eq!(state.objects[&selected].zone, Zone::Graveyard);
+    assert!(state.players[owner.0 as usize]
+        .graveyard
+        .contains(&selected));
+    for id in battlefield.iter().filter(|id| **id != selected) {
+        assert_eq!(state.objects[id].zone, Zone::Battlefield);
+    }
+    assert_eq!(state.objects[&source].zone, Zone::Exile);
+    assert_eq!(
+        state.objects[&source].counters.get(&CounterType::Time),
+        Some(&2)
+    );
+    assert_eq!(state.stack.len(), 1);
+    let entry = state.stack.back().unwrap();
+    assert_eq!((entry.source_id, entry.controller), (source, P0));
+    assert!(matches!(
+        entry.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn greater_gargadon_pays_with_any_one_of_its_three_printed_types() {
+    let (mut scenario, source) = suspended_gargadon();
+    let ring = scenario
+        .add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.")
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    let thopter = scenario
+        .add_creature(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .id();
+    let enchantment = scenario
+        .add_enchantment_from_oracle(P0, "Enchantment", "")
+        .id();
+    let opponent = scenario.add_creature(P1, "Opponent creature", 2, 2).id();
+    let mut runner = scenario.build();
+    let eligible = [ring, bears, mountain, thopter];
+    for (id, types) in [
+        (ring, vec![CoreType::Artifact]),
+        (bears, vec![CoreType::Creature]),
+        (mountain, vec![CoreType::Land]),
+        (thopter, vec![CoreType::Artifact, CoreType::Creature]),
+        (enchantment, vec![CoreType::Enchantment]),
+        (opponent, vec![CoreType::Creature]),
+    ] {
+        let obj = &runner.state().objects[&id];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.card_types.core_types.len(), types.len());
+        assert!(types.iter().all(|t| obj.card_types.core_types.contains(t)));
+    }
+    runner.act(gargadon_activation(&runner, source)).unwrap();
+    assert_sacrifice_prompt(&runner, &eligible);
+    for cards in [
+        vec![enchantment],
+        vec![opponent],
+        vec![],
+        vec![ring, mountain],
+    ] {
+        let before = serde_json::to_value(runner.state()).unwrap();
+        assert!(runner.act(GameAction::SelectCards { cards }).is_err());
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+    }
+    for chosen in eligible {
+        let mut paying = GameRunner::from_state(runner.state().clone());
+        finish_gargadon_payment(
+            &mut paying,
+            source,
+            chosen,
+            &[ring, bears, mountain, thopter, enchantment, opponent],
+        );
+    }
+}
+
+#[test]
+fn greater_gargadon_needs_only_one_matching_permanent() {
+    for kind in [
+        None,
+        Some(CoreType::Artifact),
+        Some(CoreType::Creature),
+        Some(CoreType::Land),
+    ] {
+        let (mut scenario, source) = suspended_gargadon();
+        let enchantment = scenario
+            .add_enchantment_from_oracle(P0, "Enchantment", "")
+            .id();
+        let opponent = scenario.add_creature(P1, "Opponent creature", 2, 2).id();
+        let selected = kind.map(|kind| match kind {
+            CoreType::Artifact => scenario
+                .add_artifact_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.")
+                .id(),
+            CoreType::Creature => scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+            CoreType::Land => scenario.add_basic_land(P0, ManaColor::Red),
+            _ => unreachable!(),
+        });
+        let mut runner = scenario.build();
+        let action = gargadon_activation(&runner, source);
+        if let Some(selected) = selected {
+            runner.act(action).unwrap();
+            assert_sacrifice_prompt(&runner, &[selected]);
+            finish_gargadon_payment(
+                &mut runner,
+                source,
+                selected,
+                &[selected, opponent, enchantment],
+            );
+        } else {
+            assert!(runner.act(action).is_err());
+            assert!(runner.state().stack.is_empty());
+            assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[&enchantment].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&opponent].zone, Zone::Battlefield);
+        }
+    }
+}
+
+#[test]
+fn greater_gargadon_sacrifices_a_controlled_permanent_to_its_owners_graveyard() {
+    let (mut scenario, source) = suspended_gargadon();
+    let theirs = scenario.add_creature(P1, "Their creature", 2, 2).id();
+    let ours = scenario.add_creature(P0, "Our creature", 2, 2).id();
+    let mut runner = scenario.build();
+    for (id, controller) in [(theirs, P0), (ours, P1)] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.base_controller = Some(controller);
+        object.controller = controller;
+    }
+    runner.act(gargadon_activation(&runner, source)).unwrap();
+    assert_sacrifice_prompt(&runner, &[theirs]);
+    assert_eq!(runner.state().objects[&theirs].owner, P1);
+    finish_gargadon_payment(&mut runner, source, theirs, &[ours, theirs]);
 }
