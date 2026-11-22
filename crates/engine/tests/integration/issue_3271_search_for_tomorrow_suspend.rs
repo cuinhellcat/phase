@@ -20,6 +20,7 @@ use engine::types::zones::Zone;
 
 const SEARCH_FOR_TOMORROW_ORACLE: &str = "Search your library for a basic land card, put it onto the battlefield, then shuffle.\n\
 Suspend 2—{G} (Rather than cast this card from your hand, you may pay {G} and exile it with two time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)";
+const KILLIAN_ORACLE: &str = "Lifelink\nMenace (This creature can't be blocked except by two or more creatures.)\nSpells you cast that target a creature cost {2} less to cast.";
 
 fn suspend_ability_index(state: &engine::types::game_state::GameState, card: ObjectId) -> usize {
     legal_actions(state)
@@ -1591,13 +1592,12 @@ fn suspend_last_counter_prices_a_spree_mode_with_its_creature_target() {
     const RAMPAGE: &str = "Spree (Choose one or more additional costs.)\n\
 + {1} — Untap all creatures target player controls.\n\
 + {1} — Target creature gains double strike until end of turn.";
-    const KILLIAN: &str = "Lifelink\nMenace (This creature can't be blocked except by two or more creatures.)\nSpells you cast that target a creature cost {2} less to cast.";
     for with_reduction in [false, true] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
         let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
         if with_reduction {
-            s.add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN);
+            s.add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN_ORACLE);
         }
         let rampage = s
             .add_spell_to_hand_from_oracle(P0, "Rustler Rampage", true, RAMPAGE)
@@ -1924,6 +1924,142 @@ fn suspend_last_counter_additional_cost_and_target_are_paid_during_the_spell_cas
     assert_eq!(r.state().objects[&bone].zone, Zone::Stack);
     pass_pair(&mut r);
     assert_eq!(r.state().objects[&target].zone, Zone::Graveyard);
+}
+
+#[test]
+fn suspend_last_counter_prices_a_required_sacrifice_with_its_creature_target() {
+    use engine::types::ability::TargetRef;
+
+    const YASHARN: &str = "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.";
+    const GRAFTED_IDENTITY: &str = "As an additional cost to cast this spell, sacrifice a creature.\nEnchant creature\nYou control enchanted creature.\nEnchanted creature gets +1/+1.";
+    for (is_aura, with_reduction, sacrifice_prohibited) in [
+        (false, true, false),
+        (false, false, false),
+        (false, true, true),
+        (true, true, false),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let spell = if is_aura {
+            s.add_enchantment_to_hand_from_oracle(P0, "Grafted Identity", "")
+                .with_subtypes(vec!["Aura"])
+                .from_oracle_text_with_keywords(&["enchant"], GRAFTED_IDENTITY)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                })
+                .id()
+        } else {
+            printed_card(&mut s, P0, "Bone Splinters", Zone::Hand)
+        };
+        if with_reduction {
+            s.add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN_ORACLE);
+        }
+        if sacrifice_prohibited {
+            s.add_creature_from_oracle(P1, "Yasharn, Implacable Earth", 4, 4, YASHARN);
+        }
+        s.add_artifact_from_oracle(P1, "Sphere of Resistance", "Spells cost {1} more to cast.");
+        let target = s.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards { cards: vec![spell] })
+            .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), spell), 4);
+        if is_aura {
+            assert!(r.state().objects[&spell].keywords.iter().any(|keyword| {
+                matches!(keyword, engine::types::keywords::Keyword::Enchant(_))
+            }));
+        }
+        one_counter_upkeep(&mut r, spell);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), spell), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().stack.back().unwrap().source_id, spell);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+
+        if !with_reduction || sacrifice_prohibited {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "reduction={with_reduction} sacrifice prohibited={sacrifice_prohibited}: {:?}",
+                r.state().waiting_for
+            );
+            assert!(r.state().stack.is_empty());
+            assert_eq!(r.state().objects[&spell].zone, Zone::Exile);
+            assert!(r.state().objects[&spell].casting_permissions.is_empty());
+            assert_eq!(r.state().objects[&jhoira].zone, Zone::Battlefield);
+            continue;
+        }
+
+        assert!(
+            matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ),
+            "Killian covers Sphere's tax and Jhoira can be sacrificed (Aura={is_aura}): {:?}",
+            r.state().waiting_for
+        );
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::TargetSelection { player: P0, .. }
+        ));
+        r.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .unwrap();
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::PayCost { player: P0, .. }
+        ));
+        let paid = r
+            .act(GameAction::SelectCards {
+                cards: vec![jhoira],
+            })
+            .unwrap();
+        let sacrifices: Vec<_> = paid
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentSacrificed {
+                    object_id,
+                    player_id,
+                } => Some((*object_id, *player_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sacrifices, vec![(jhoira, P0)]);
+        assert_eq!(r.state().objects[&jhoira].zone, Zone::Graveyard);
+        assert_eq!(r.state().objects[&target].zone, Zone::Battlefield);
+        assert_eq!(r.state().objects[&spell].zone, Zone::Stack);
+        assert_eq!(r.state().stack.len(), 1);
+        let cast = r.state().stack.back().unwrap();
+        assert_eq!(cast.id, spell);
+        assert_eq!(cast.ability().unwrap().targets, [TargetRef::Object(target)]);
+        assert!(matches!(
+            cast.kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            }
+        ));
+        pass_pair(&mut r);
+        if is_aura {
+            assert_eq!(r.state().objects[&spell].zone, Zone::Battlefield);
+            assert_eq!(r.state().objects[&target].controller, P0);
+        } else {
+            assert_eq!(r.state().objects[&target].zone, Zone::Graveyard);
+        }
+    }
 }
 
 #[test]

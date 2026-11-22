@@ -17069,32 +17069,29 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 .modal
                 .as_ref()
                 .is_some_and(|modal| !modal.mode_costs.is_empty());
-        let targets_ok = if price_modes {
+        let required_costs = match &object.additional_cost {
+            Some(AdditionalCost::Required(cost)) => Some(std::slice::from_ref(cost)),
+            Some(AdditionalCost::Choice(choices)) => Some(choices.as_slice()),
+            Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => None,
+        };
+        let allowed = if let Some(costs) = required_costs.filter(|_| !force_normal_cost) {
+            announced_declaration_offerable(&projected, player, &prepared, costs)
+        } else if price_modes {
             announced_mana_payable_in_flushed_state(&projected, player, &prepared, None)
         } else {
             spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
-        };
-        let allowed = targets_ok
-            && match &object.additional_cost {
-                // CR 118.9d + CR 601.2h: the elected face's mandatory
-                // additional costs must be payable under this permission.
-                Some(AdditionalCost::Required(cost)) => prepared_declaration_offerable(
-                    &projected,
-                    player,
-                    &prepared,
-                    std::slice::from_ref(cost),
-                ),
-                Some(AdditionalCost::Choice(choices)) => {
-                    prepared_declaration_offerable(&projected, player, &prepared, choices)
-                }
-                Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => {
+                && match required_costs {
+                    Some(costs) => {
+                        prepared_declaration_offerable(&projected, player, &prepared, costs)
+                    }
                     // A normal-cost grant leaves alternative costs open for announcement.
                     // A replacement cost is elected already, including a free suspend cast.
-                    force_normal_cost
-                        || price_modes
-                        || prepared_face_mana_payable(&projected, player, &prepared, None)
+                    None => {
+                        force_normal_cost
+                            || prepared_face_mana_payable(&projected, player, &prepared, None)
+                    }
                 }
-            };
+        };
         if back_face {
             legality.back = allowed;
         } else {
@@ -21684,6 +21681,27 @@ fn pending_cast_from_prepared(
     pending
 }
 
+/// CR 303.4a + CR 702.5a: the enchant ability declares the Aura spell's
+/// attachment target even when the spell has no effect that declares a slot.
+fn aura_spell_target_slot(
+    state: &GameState,
+    object: &GameObject,
+    player: PlayerId,
+) -> Option<TargetSelectionSlot> {
+    object.keywords.iter().find_map(|keyword| {
+        let Keyword::Enchant(filter) = keyword else {
+            return None;
+        };
+        Some(TargetSelectionSlot {
+            legal_targets: targeting::find_legal_targets(state, filter, player, object.id),
+            optional: false,
+            chooser: None,
+            effect_kind: EffectKind::Attach,
+            effect_detail: TargetEffectDetail::None,
+        })
+    })
+}
+
 /// Continue the casting pipeline from a PreparedSpellCast.
 /// Handles modal selection, targeting, aura targeting, and mana payment.
 /// Shared by handle_cast_spell and handle_warp_cost_choice.
@@ -21845,30 +21863,13 @@ fn continue_with_prepared(
     let obj = state.objects.get(&prepared.object_id).unwrap();
     let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
     if is_aura {
-        let enchant_filter = obj.keywords.iter().find_map(|k| {
-            if let crate::types::keywords::Keyword::Enchant(filter) = k {
-                Some(filter.clone())
-            } else {
-                None
-            }
-        });
-        if let Some(filter) = enchant_filter {
-            let legal = targeting::find_legal_targets(state, &filter, player, prepared.object_id);
-            if legal.is_empty() {
+        if let Some(slot) = aura_spell_target_slot(state, obj, player) {
+            if slot.legal_targets.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets for Aura".to_string(),
                 ));
             }
-            // CR 303.4a + CR 702.5a: the enchant-defined target is the
-            // permanent this Aura will attach to on resolution, so `Attach` is
-            // the effect the chosen target will be subject to.
-            let target_slots = vec![crate::types::game_state::TargetSelectionSlot {
-                legal_targets: legal,
-                optional: false,
-                chooser: None,
-                effect_kind: EffectKind::Attach,
-                effect_detail: TargetEffectDetail::None,
-            }];
+            let target_slots = vec![slot];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -22751,28 +22752,7 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
 
     // CR 303.4a: An Aura spell requires a target defined by its enchant ability.
     if obj.card_types.subtypes.iter().any(|s| s == "Aura") {
-        return Ok(obj
-            .keywords
-            .iter()
-            .find_map(|keyword| {
-                if let Keyword::Enchant(filter) = keyword {
-                    Some(TargetSelectionSlot {
-                        legal_targets: targeting::find_legal_targets(
-                            state,
-                            filter,
-                            player,
-                            prepared.object_id,
-                        ),
-                        optional: false,
-                        chooser: None,
-                        // CR 303.4a + CR 702.5a: see the cast path above.
-                        effect_kind: EffectKind::Attach,
-                        effect_detail: TargetEffectDetail::None,
-                    })
-                } else {
-                    None
-                }
-            })
+        return Ok(aura_spell_target_slot(state, obj, player)
             .filter(|slot| !slot.legal_targets.is_empty())
             .into_iter()
             .collect());
@@ -22872,16 +22852,8 @@ fn spell_has_legal_targets_in_flushed_state(
     // Aura spells target via the Enchant keyword rather than the effect's target field.
     let is_aura = obj.card_types.subtypes.iter().any(|s| s == "Aura");
     if is_aura {
-        let enchant_filter = obj.keywords.iter().find_map(|k| {
-            if let crate::types::keywords::Keyword::Enchant(filter) = k {
-                Some(filter.clone())
-            } else {
-                None
-            }
-        });
-        return enchant_filter.is_some_and(|filter| {
-            !targeting::find_legal_targets(state, &filter, player, obj.id).is_empty()
-        });
+        return aura_spell_target_slot(state, obj, player)
+            .is_some_and(|slot| !slot.legal_targets.is_empty());
     }
 
     // CR 700.2a + CR 601.2b-c: Modal spells are castable only when a legal
@@ -23510,15 +23482,62 @@ fn prepared_declaration_offerable(
     prepared: &PreparedSpellCast,
     choices: &[AbilityCost],
 ) -> bool {
-    let resolved = prepared.ability_def.as_ref().map_or_else(
+    let pending =
+        pending_cast_from_prepared(prepared, resolved_spell_for_pricing(prepared, player));
+    required_declaration_is_offerable(state, player, &pending, choices)
+}
+
+fn required_declaration_is_offerable(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    choices: &[AbilityCost],
+) -> bool {
+    choices.iter().any(|cost| {
+        casting_costs::required_declaration_offerable(state, player, pending, cost, None)
+            .unwrap_or(false)
+    })
+}
+
+/// CR 118.9d + CR 601.2c/f/h: a required additional cost must be payable
+/// on the same announcement whose modes and targets determine the mana total.
+fn announced_declaration_offerable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    choices: &[AbilityCost],
+) -> bool {
+    let resolved = resolved_spell_for_pricing(prepared, player);
+    if ability_target_legality_needs_chosen_x(
+        &resolved,
+        prepared
+            .ability_def
+            .as_ref()
+            .and_then(|def| def.distribute.as_ref()),
+    ) {
+        // CR 601.2b-c: the cast's required-X declaration precedes target
+        // selection. Keep that entry point's target admission until X is known.
+        return spell_has_legal_targets_in_flushed_state(state, prepared.object_id, player)
+            && prepared_declaration_offerable(state, player, prepared, choices);
+    }
+    let chains = target_pricing_chains(state, player, prepared, &resolved, true);
+    any_payable_target_pricing_assignment(state, chains.iter(), |chain, chosen| {
+        let mut pending = pending_cast_from_prepared(prepared, chosen.clone());
+        pending
+            .declared_mana_additions
+            .extend(chain.mode_cost.clone());
+        required_declaration_is_offerable(state, player, &pending, choices)
+    })
+    .unwrap_or_else(|_| prepared_declaration_offerable(state, player, prepared, choices))
+}
+
+fn resolved_spell_for_pricing(prepared: &PreparedSpellCast, player: PlayerId) -> ResolvedAbility {
+    let mut resolved = prepared.ability_def.as_ref().map_or_else(
         || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
         |def| build_resolved_from_def(def, prepared.object_id, player),
     );
-    let pending = pending_cast_from_prepared(prepared, resolved);
-    choices.iter().any(|cost| {
-        casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
-            .unwrap_or(false)
-    })
+    stamp_prepared_cast_context(prepared, &mut resolved);
+    resolved
 }
 
 /// CR 601.2f + CR 601.2h: test the total for this prepared face and casting
@@ -24018,12 +24037,8 @@ fn announced_mana_payable_in_flushed_state(
     prepared: &PreparedSpellCast,
     probe: Option<&PriorityCastProbe>,
 ) -> bool {
-    let Some(ability_def) = prepared.ability_def.as_ref() else {
-        return false;
-    };
-    let mut resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
-    stamp_prepared_cast_context(prepared, &mut resolved);
-    let chains = target_pricing_chains(state, player, prepared, ability_def, &resolved);
+    let resolved = resolved_spell_for_pricing(prepared, player);
+    let chains = target_pricing_chains(state, player, prepared, &resolved, false);
     if chains.is_empty() {
         return false;
     }
@@ -24106,59 +24121,76 @@ fn announced_mana_payable_in_flushed_state(
                 defiler_payable(&price(cast, &chain.ability, mode_cost, &best_case))
             })
     };
-    // CR 700.2a + CR 601.2b-c: every chain's assignments share one budget,
-    // so a modal spell prices no more assignments than a plain one.
-    let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
-    let mut overflowed = false;
     let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
-    let assignments = chains.iter().filter(best_case_payable).flat_map(|chain| {
-        build_target_assignments_for_ability_with_limit(
+    any_payable_target_pricing_assignment(
+        state,
+        chains.iter().filter(best_case_payable),
+        |chain, chosen| {
+            // CR 601.2f: the modifiers and floors that read this assignment's
+            // targets, shared by both reduction sets.
+            let target_dependent = (
+                collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(chosen)),
+                collect_cost_floors(&view, Some(chosen), true),
+            );
+            let mode_cost = chain.mode_cost.as_ref();
+            let priced = price(&plain_cast, chosen, mode_cost, &target_dependent);
+            // CR 601.2f: an accepted Defiler reduction stacks with the
+            // target-dependent one, ahead of the floors.
+            let with_defiler = defiler_cast
+                .as_ref()
+                .map(|cast| price(cast, chosen, mode_cost, &target_dependent));
+            // Payability depends only on the priced pair, so assignments that
+            // price identically are checked once.
+            if checked
+                .iter()
+                .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
+            {
+                return false;
+            }
+            if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
+                return true;
+            }
+            checked.push((priced, with_defiler));
+            false
+        },
+    )
+    // An unpriced assignment could be payable after this chain's best case
+    // passed. The actual casting pipeline still enforces the announced total.
+    .unwrap_or(true)
+}
+
+struct TargetPricingBudgetExhausted;
+
+/// CR 700.2a + CR 601.2b-c: choose legal targets and bind them exactly as in
+/// casting. All mode selections share the same pricing budget.
+fn any_payable_target_pricing_assignment<'a>(
+    state: &GameState,
+    chains: impl Iterator<Item = &'a TargetPricingChain>,
+    mut payable: impl FnMut(&TargetPricingChain, &ResolvedAbility) -> bool,
+) -> Result<bool, TargetPricingBudgetExhausted> {
+    let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
+    for chain in chains {
+        let assignments = build_target_assignments_for_ability_with_limit(
             state,
             &chain.ability,
             &chain.slots,
             &chain.constraints,
-            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
-        )
-        .into_iter()
-        .map(move |assignment| (chain, assignment))
-    });
-    for (chain, assignment) in assignments {
-        if budget == 0 {
-            overflowed = true;
-            break;
-        }
-        budget -= 1;
-        let mut chosen = chain.ability.clone();
-        if assign_selected_slots_in_chain(state, &mut chosen, &assignment).is_err() {
-            continue;
-        }
-        // CR 601.2f: the modifiers and floors that read this assignment's
-        // targets, shared by both reduction sets.
-        let target_dependent = (
-            collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(&chosen)),
-            collect_cost_floors(&view, Some(&chosen), true),
+            Some(budget + 1),
         );
-        let mode_cost = chain.mode_cost.as_ref();
-        let priced = price(&plain_cast, &chosen, mode_cost, &target_dependent);
-        // CR 601.2f: an accepted Defiler reduction stacks with the
-        // target-dependent one, ahead of the floors.
-        let with_defiler = defiler_cast
-            .as_ref()
-            .map(|cast| price(cast, &chosen, mode_cost, &target_dependent));
-        // Payability depends only on the priced pair, so assignments that
-        // price identically are checked once.
-        if checked
-            .iter()
-            .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
-        {
-            continue;
+        for assignment in assignments {
+            if budget == 0 {
+                return Err(TargetPricingBudgetExhausted);
+            }
+            budget -= 1;
+            let mut chosen = chain.ability.clone();
+            if assign_selected_slots_in_chain(state, &mut chosen, &assignment).is_ok()
+                && payable(chain, &chosen)
+            {
+                return Ok(true);
+            }
         }
-        if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
-            return true;
-        }
-        checked.push((priced, with_defiler));
     }
-    overflowed
+    Ok(false)
 }
 
 struct TargetPricingChain {
@@ -24170,31 +24202,51 @@ struct TargetPricingChain {
 
 /// CR 700.2a + CR 601.2b-c: enumerate the same legal selections the prompt
 /// presents, keeping each chain paired with its own announced mana addition.
-/// A targetless chain needs pricing only if it announces a mode cost.
+/// Targetless chains also need pricing when the spell has a required cost.
 fn target_pricing_chains(
     state: &GameState,
     player: PlayerId,
     prepared: &PreparedSpellCast,
-    ability_def: &AbilityDefinition,
     resolved: &ResolvedAbility,
+    include_targetless: bool,
 ) -> Vec<TargetPricingChain> {
+    if let Some(object) = state.objects.get(&prepared.object_id).filter(|object| {
+        include_targetless
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+    }) {
+        return aura_spell_target_slot(state, object, player)
+            .map(|slot| TargetPricingChain {
+                ability: resolved.clone(),
+                slots: vec![slot],
+                constraints: Vec::new(),
+                mode_cost: None,
+            })
+            .into_iter()
+            .collect();
+    }
     let with_slots = |ability: ResolvedAbility, constraints, mode_cost: Option<ManaCost>| {
         let slots = build_target_slots(state, &ability).ok()?;
-        (!slots.is_empty() || mode_cost.is_some()).then_some(TargetPricingChain {
-            ability,
-            slots,
-            constraints,
-            mode_cost,
-        })
+        (include_targetless || !slots.is_empty() || mode_cost.is_some()).then_some(
+            TargetPricingChain {
+                ability,
+                slots,
+                constraints,
+                mode_cost,
+            },
+        )
     };
     let Some(modal) = prepared.modal.as_ref() else {
-        return with_slots(
-            resolved.clone(),
-            ability_def.target_constraints.clone(),
-            None,
-        )
-        .into_iter()
-        .collect();
+        let constraints = prepared
+            .ability_def
+            .as_ref()
+            .map_or_else(Vec::new, |def| def.target_constraints.clone());
+        return with_slots(resolved.clone(), constraints, None)
+            .into_iter()
+            .collect();
     };
     let SpellModeChoice {
         modal,
