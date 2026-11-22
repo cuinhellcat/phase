@@ -1585,6 +1585,86 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
 }
 
 #[test]
+fn suspend_last_counter_prices_a_spree_mode_with_its_creature_target() {
+    use engine::types::ability::TargetRef;
+
+    const RAMPAGE: &str = "Spree (Choose one or more additional costs.)\n\
++ {1} — Untap all creatures target player controls.\n\
++ {1} — Target creature gains double strike until end of turn.";
+    const KILLIAN: &str = "Lifelink\nMenace (This creature can't be blocked except by two or more creatures.)\nSpells you cast that target a creature cost {2} less to cast.";
+    for with_reduction in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        if with_reduction {
+            s.add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN);
+        }
+        let rampage = s
+            .add_spell_to_hand_from_oracle(P0, "Rustler Rampage", true, RAMPAGE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards {
+            cards: vec![rampage],
+        })
+        .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), rampage), 4);
+        one_counter_upkeep(&mut r, rampage);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), rampage), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+        if with_reduction {
+            assert!(
+                matches!(
+                    r.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ),
+                "Killian makes the creature-targeting mode payable: {:?}",
+                r.state().waiting_for
+            );
+            r.act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            r.act(GameAction::SelectModes { indices: vec![1] }).unwrap();
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::TargetSelection { player: P0, .. }
+            ));
+            r.act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(jhoira)),
+            })
+            .unwrap();
+            let cast = r.state().stack.back().unwrap();
+            assert_eq!(cast.id, rampage);
+            assert!(matches!(
+                cast.kind,
+                StackEntryKind::Spell {
+                    actual_mana_spent: 0,
+                    ..
+                }
+            ));
+            assert_eq!(r.state().objects[&rampage].zone, Zone::Stack);
+        } else {
+            assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+            assert_eq!(r.state().objects[&rampage].zone, Zone::Exile);
+            assert!(r.state().objects[&rampage].casting_permissions.is_empty());
+            assert!(r.state().stack.is_empty());
+        }
+    }
+}
+
+#[test]
 fn suspend_review_wren_requires_a_payable_branch_and_charges_its_mana() {
     for count in [2, 3] {
         let mut s = GameScenario::new();

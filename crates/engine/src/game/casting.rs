@@ -17064,17 +17064,15 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
         record_resolution_cast_projection_measurement(|measurements| {
             measurements.projected_target_checks += 1;
         });
-        let targets_ok = match &prepared.modal {
-            Some(modal) if !force_normal_cost && !modal.mode_costs.is_empty() => {
-                prepared_has_payable_mode_in_flushed_state(
-                    &projected,
-                    player,
-                    &prepared,
-                    &modal.mode_costs,
-                    None,
-                )
-            }
-            _ => spell_has_legal_targets_in_flushed_state(&projected, object.id, player),
+        let price_modes = !force_normal_cost
+            && prepared
+                .modal
+                .as_ref()
+                .is_some_and(|modal| !modal.mode_costs.is_empty());
+        let targets_ok = if price_modes {
+            announced_mana_payable_in_flushed_state(&projected, player, &prepared, None)
+        } else {
+            spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
         };
         let allowed = targets_ok
             && match &object.additional_cost {
@@ -17093,6 +17091,7 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                     // A normal-cost grant leaves alternative costs open for announcement.
                     // A replacement cost is elected already, including a free suspend cast.
                     force_normal_cost
+                        || price_modes
                         || prepared_face_mana_payable(&projected, player, &prepared, None)
                 }
             };
@@ -23566,40 +23565,6 @@ fn prepared_face_mana_payable(
         })
 }
 
-/// CR 601.2f + CR 702.172a + CR 702.183a: Spree and Tiered spells require at
-/// least one payable mode with legal targets. Reprice the elected spell face
-/// and permission with the mode declared, so the cost floor applies last.
-fn prepared_has_payable_mode_in_flushed_state(
-    state: &GameState,
-    player: PlayerId,
-    prepared: &PreparedSpellCast,
-    mode_costs: &[ManaCost],
-    probe: Option<&PriorityCastProbe>,
-) -> bool {
-    let Some(choosable) = castable_spell_modes_in_flushed_state(state, prepared.object_id, player)
-    else {
-        return false;
-    };
-    let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player);
-    stamp_prepared_cast_context(prepared, &mut ability);
-    let mut pending = pending_cast_from_prepared(prepared, ability);
-    choosable
-        .into_iter()
-        .filter_map(|mode| mode_costs.get(mode))
-        .any(|mode_cost| {
-            pending.declared_mana_additions.clear();
-            pending.declared_mana_additions.push(mode_cost.clone());
-            let total = recompute_pending_mana_total(state, player, &pending, None);
-            can_feasibly_pay_mana_cost_with_probe(
-                state,
-                player,
-                Some(prepared.object_id),
-                &total,
-                probe,
-            )
-        })
-}
-
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23918,15 +23883,13 @@ fn can_cast_prepared_now_with_probe(
         return castable && spell_has_legal_targets_with_probe(state, obj.id, player, probe);
     }
 
-    if let Some(modal) = prepared.modal.as_ref().filter(|m| !m.mode_costs.is_empty()) {
+    if prepared
+        .modal
+        .as_ref()
+        .is_some_and(|m| !m.mode_costs.is_empty())
+    {
         return with_flushed_cast_state(state, player, probe, |flushed| {
-            prepared_has_payable_mode_in_flushed_state(
-                flushed,
-                player,
-                prepared,
-                &modal.mode_costs,
-                probe,
-            )
+            announced_mana_payable_in_flushed_state(flushed, player, prepared, probe)
         });
     }
 
@@ -24016,40 +23979,40 @@ fn can_cast_prepared_now_with_probe(
 }
 
 /// Upper bound on the target assignments priced by
-/// [`target_dependent_reduction_makes_payable`].
+/// [`announced_mana_payable_in_flushed_state`].
 const TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT: usize = 4096;
 
-/// CR 601.2c + CR 601.2f: a cost reduction that reads the chosen targets ("This
-/// spell costs {3} less to cast if it targets a tapped creature") is applied
-/// only once targets are chosen, so the pre-target price of `prepared` is the
-/// unreduced one. The spell is still castable when SOME legal target
-/// assignment brings its total cost within reach, because the caster chooses
-/// the targets before paying.
-///
-/// Each assignment is priced from the announcement-time base through
-/// [`recompute_pending_mana_total_using`] — the authority payment uses — so
-/// target-dependent reductions, an accepted Defiler reduction, and both cost
-/// floors (Trinisphere) apply in CR 601.2f order. An {X} spell is probed at
-/// X = 0, the cheapest announcement (CR 107.3a). Both reductions are priced
-/// together per assignment, so a spell payable only with both is castable.
-///
-/// Only targets of the spell ability are enumerated — for a modal spell, of
-/// each legal mode selection (CR 700.2a, [`target_pricing_chains`]). An Aura (CR 303.4a) or
-/// a mutating spell (CR 702.140a) targets through its keyword, not its spell
-/// ability, so its target-dependent reductions are not priced here.
-///
-/// The scan runs only when a target-dependent reduction can apply to the
-/// spell at all. The target-independent modifiers and floors are collected
-/// once per probe; each assignment re-collects only the target-dependent
-/// halves. Assignments that price identically are payability-checked once.
-/// Before any assignment is built, the best case (every target-gated
-/// reduction, no target-gated raise or floor) is priced; if it is unpayable
-/// the spell is, so the answer is `false` whatever the assignment count.
-/// Otherwise, when the assignments exceed
-/// [`TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT`] the unpriced remainder might
-/// hold a cheaper one, so the answer is conservatively `true`; payment still
-/// enforces the real total once targets are chosen.
+/// CR 601.2c + CR 601.2f: a target-dependent reduction is applied only once
+/// targets are chosen. If the pre-target price is unpayable, look for a
+/// legal target assignment that the caster can pay for.
 fn target_dependent_reduction_makes_payable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    // With clean layers the live state is authoritative, so the common
+    // no-reduction case is decided without the flush clone.
+    let layers_dirty = state.layers_dirty.is_dirty();
+    if !layers_dirty && !target_dependent_cost_reduction_present(state, player, prepared) {
+        return false;
+    }
+    with_flushed_cast_state(state, player, probe, |flushed| {
+        (!layers_dirty || target_dependent_cost_reduction_present(flushed, player, prepared))
+            && announced_mana_payable_in_flushed_state(flushed, player, prepared, probe)
+    })
+}
+
+/// CR 601.2b-c + CR 601.2f: Price the same spell announcement the caster can
+/// make. For Spree and Tiered the chosen modes supply both the target chain
+/// and the additional mana. Payment's recompute applies the reductions to
+/// that total before any floors. Probe X at zero (CR 107.3a).
+///
+/// The target-independent modifiers are collected once. Each announcement's
+/// best-case total rules out unaffordable assignments before enumeration.
+/// If the shared assignment budget runs out, an unpriced assignment might
+/// still be payable; the real cast enforces payment once targets are chosen.
+fn announced_mana_payable_in_flushed_state(
     state: &GameState,
     player: PlayerId,
     prepared: &PreparedSpellCast,
@@ -24058,197 +24021,180 @@ fn target_dependent_reduction_makes_payable(
     let Some(ability_def) = prepared.ability_def.as_ref() else {
         return false;
     };
-    // With clean layers the live state is authoritative, so the common
-    // no-reduction case is decided without the flush clone.
-    let layers_dirty = state.layers_dirty.is_dirty();
-    if !layers_dirty && !target_dependent_cost_reduction_present(state, player, prepared) {
+    let mut resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
+    stamp_prepared_cast_context(prepared, &mut resolved);
+    let chains = target_pricing_chains(state, player, prepared, ability_def, &resolved);
+    if chains.is_empty() {
         return false;
     }
-    with_flushed_cast_state(state, player, probe, |flushed| {
-        if layers_dirty && !target_dependent_cost_reduction_present(flushed, player, prepared) {
-            return false;
+    let defiler =
+        casting_costs::defiler_reduction_entry_if_affordable(state, player, prepared.object_id);
+    // One priced cast per reduction set (with and without the Defiler
+    // payment), its target-independent modifiers collected once.
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        prepared.object_id,
+        Some(prepared.casting_variant),
+    );
+    let collect_cast = |accept_defiler: bool| {
+        let mut pending = pending_cast_from_prepared(prepared, resolved.clone());
+        if accept_defiler {
+            pending
+                .accepted_cost_reductions
+                .extend(defiler.as_ref().map(|(entry, _)| entry.clone()));
         }
-        let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
-        let chains = target_pricing_chains(flushed, player, prepared, ability_def, &resolved);
-        if chains.is_empty() {
-            return false;
-        }
-        let defiler = casting_costs::defiler_reduction_entry_if_affordable(
-            flushed,
-            player,
-            prepared.object_id,
+        let ctx = CostFinalizeContext::from_pending(&pending);
+        let modifiers = CollectedCostModifiers::collect_on_view(
+            &view,
+            None,
+            pending.casting_permission_index,
+            &ctx,
         );
-        // One priced cast per reduction set (with and without the Defiler
-        // payment), its target-independent modifiers collected once.
-        let view = SpellCostView::for_variant(
-            flushed,
-            player,
-            prepared.object_id,
-            Some(prepared.casting_variant),
-        );
-        let collect_cast = |accept_defiler: bool| {
-            let mut pending = PendingCast::new(
-                prepared.object_id,
-                prepared.card_id,
-                resolved.clone(),
-                prepared.mana_cost.clone(),
-            );
-            pending.base_cost = Some(prepared.base_mana_cost.clone());
-            pending.casting_variant = prepared.casting_variant;
-            pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
-            if accept_defiler {
-                pending
-                    .accepted_cost_reductions
-                    .extend(defiler.as_ref().map(|(entry, _)| entry.clone()));
-            }
-            let ctx = CostFinalizeContext::from_pending(&pending);
-            let modifiers = CollectedCostModifiers::collect_on_view(
-                &view,
-                None,
-                pending.casting_permission_index,
-                &ctx,
-            );
-            (pending, ctx, modifiers)
-        };
-        let plain_cast = collect_cast(false);
-        let defiler_cast = defiler.is_some().then(|| collect_cast(true));
-        let floors = CollectedCostFloors::collect_target_independent(&view);
-        let price = |(pending, ctx, modifiers): &(
-            PendingCast,
-            CostFinalizeContext,
-            CollectedCostModifiers,
-        ),
-                     chosen: &ResolvedAbility,
-                     target_dependent: &(Vec<CostModification>, Vec<u32>)| {
+        (pending, ctx, modifiers)
+    };
+    let plain_cast = collect_cast(false);
+    let defiler_cast = defiler.is_some().then(|| collect_cast(true));
+    let floors = CollectedCostFloors::collect_target_independent(&view);
+    let price =
+        |(pending, ctx, modifiers): &(PendingCast, CostFinalizeContext, CollectedCostModifiers),
+         chosen: &ResolvedAbility,
+         mode_cost: Option<&ManaCost>,
+         target_dependent: &(Vec<CostModification>, Vec<u32>)| {
             let mut pending = pending.clone();
             *pending.ability = chosen.clone();
+            pending.declared_mana_additions.extend(mode_cost.cloned());
             let collected = CollectedCastCosts::seeded(
                 modifiers.with_target_dependent(target_dependent.0.clone()),
                 floors.with_target_dependent(target_dependent.1.clone()),
             );
             recompute_pending_mana_total_using(&view, &pending, Some(0), ctx, &collected)
         };
-        let payable_on = |state: &GameState, cost: &ManaCost| {
-            can_feasibly_pay_harmonize_mana_cost_with_probe(
-                state,
-                player,
-                prepared.object_id,
-                prepared.casting_variant,
-                cost,
-                None,
-            )
-        };
-        let payable = |cost: &ManaCost| payable_on(flushed, cost);
-        // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
-        // the Defiler totals are probed with it spoken for.
-        let defiler_scratch = defiler.as_ref().and_then(|(_, life)| {
-            reserved_payment_state(flushed, player, &PaymentReservation::life(*life))
-        });
-        let defiler_payable =
-            |cost: &ManaCost| payable_on(defiler_scratch.as_ref().unwrap_or(flushed), cost);
-        // CR 601.2f + CR 601.2h: the best case any assignment can reach takes
-        // every target-gated reduction and no target-gated raise or floor (a
-        // reduction never raises a total, a raise or floor never lowers one).
-        // If even that is unpayable, every assignment is, however many exist.
-        let best_case = (
-            collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
-                .into_iter()
-                .filter(|modification| !modification.is_raise)
-                .collect(),
-            Vec::new(),
-        );
-        if !payable(&price(&plain_cast, &resolved, &best_case))
-            && !defiler_cast
-                .as_ref()
-                .is_some_and(|cast| defiler_payable(&price(cast, &resolved, &best_case)))
-        {
-            return false;
-        }
-        // CR 700.2a + CR 601.2b-c: every chain's assignments share one budget,
-        // so a modal spell prices no more assignments than a plain one.
-        let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
-        let mut overflowed = false;
-        let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
-        let assignments = chains.iter().flat_map(|(chain, slots, constraints)| {
-            build_target_assignments_for_ability_with_limit(
-                flushed,
-                chain,
-                slots,
-                constraints,
-                Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
-            )
+    let payable_on = |state: &GameState, cost: &ManaCost, probe: Option<&PriorityCastProbe>| {
+        can_feasibly_pay_harmonize_mana_cost_with_probe(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_variant,
+            cost,
+            probe,
+        )
+    };
+    let payable = |cost: &ManaCost| payable_on(state, cost, probe);
+    // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
+    // the Defiler totals are probed with it spoken for.
+    let defiler_scratch = defiler.as_ref().and_then(|(_, life)| {
+        reserved_payment_state(state, player, &PaymentReservation::life(*life))
+    });
+    let defiler_payable =
+        |cost: &ManaCost| payable_on(defiler_scratch.as_ref().unwrap_or(state), cost, None);
+    // CR 601.2f + CR 601.2h: the best case any assignment can reach takes
+    // every target-gated reduction and no target-gated raise or floor (a
+    // reduction never raises a total, a raise or floor never lowers one).
+    // If even that is unpayable, every assignment is, however many exist.
+    let best_case = (
+        collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
             .into_iter()
-            .map(move |assignment| (chain, assignment))
-        });
-        for (chain, assignment) in assignments {
-            if budget == 0 {
-                overflowed = true;
-                break;
-            }
-            budget -= 1;
-            let mut chosen = chain.clone();
-            if assign_selected_slots_in_chain(flushed, &mut chosen, &assignment).is_err() {
-                continue;
-            }
-            // CR 601.2f: the modifiers and floors that read this assignment's
-            // targets, shared by both reduction sets.
-            let target_dependent = (
-                collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(&chosen)),
-                collect_cost_floors(&view, Some(&chosen), true),
-            );
-            let priced = price(&plain_cast, &chosen, &target_dependent);
-            // CR 601.2f: an accepted Defiler reduction stacks with the
-            // target-dependent one, ahead of the floors.
-            let with_defiler = defiler_cast
-                .as_ref()
-                .map(|cast| price(cast, &chosen, &target_dependent));
-            // Payability depends only on the priced pair, so assignments that
-            // price identically are checked once.
-            if checked
-                .iter()
-                .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
-            {
-                continue;
-            }
-            if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
-                return true;
-            }
-            checked.push((priced, with_defiler));
+            .filter(|modification| !modification.is_raise)
+            .collect(),
+        Vec::new(),
+    );
+    let best_case_payable = |chain: &&TargetPricingChain| {
+        let mode_cost = chain.mode_cost.as_ref();
+        payable(&price(&plain_cast, &chain.ability, mode_cost, &best_case))
+            || defiler_cast.as_ref().is_some_and(|cast| {
+                defiler_payable(&price(cast, &chain.ability, mode_cost, &best_case))
+            })
+    };
+    // CR 700.2a + CR 601.2b-c: every chain's assignments share one budget,
+    // so a modal spell prices no more assignments than a plain one.
+    let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
+    let mut overflowed = false;
+    let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
+    let assignments = chains.iter().filter(best_case_payable).flat_map(|chain| {
+        build_target_assignments_for_ability_with_limit(
+            state,
+            &chain.ability,
+            &chain.slots,
+            &chain.constraints,
+            Some(TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT + 1),
+        )
+        .into_iter()
+        .map(move |assignment| (chain, assignment))
+    });
+    for (chain, assignment) in assignments {
+        if budget == 0 {
+            overflowed = true;
+            break;
         }
-        overflowed
-    })
+        budget -= 1;
+        let mut chosen = chain.ability.clone();
+        if assign_selected_slots_in_chain(state, &mut chosen, &assignment).is_err() {
+            continue;
+        }
+        // CR 601.2f: the modifiers and floors that read this assignment's
+        // targets, shared by both reduction sets.
+        let target_dependent = (
+            collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(&chosen)),
+            collect_cost_floors(&view, Some(&chosen), true),
+        );
+        let mode_cost = chain.mode_cost.as_ref();
+        let priced = price(&plain_cast, &chosen, mode_cost, &target_dependent);
+        // CR 601.2f: an accepted Defiler reduction stacks with the
+        // target-dependent one, ahead of the floors.
+        let with_defiler = defiler_cast
+            .as_ref()
+            .map(|cast| price(cast, &chosen, mode_cost, &target_dependent));
+        // Payability depends only on the priced pair, so assignments that
+        // price identically are checked once.
+        if checked
+            .iter()
+            .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
+        {
+            continue;
+        }
+        if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
+            return true;
+        }
+        checked.push((priced, with_defiler));
+    }
+    overflowed
 }
 
-/// CR 700.2a + CR 601.2b-c: the targeted spell-ability chains whose target
-/// assignments [`target_dependent_reduction_makes_payable`] prices, each with
-/// its target slots and selection constraints. A modal spell's modes are
-/// chosen before its targets, so every legal mode selection — judged by the
-/// cast's own [`spell_mode_choice`] prompt — contributes its chained modes;
-/// any other spell contributes its spell ability. Chains with no target are
-/// omitted: their price is the pre-target one, already checked.
+struct TargetPricingChain {
+    ability: ResolvedAbility,
+    slots: Vec<TargetSelectionSlot>,
+    constraints: Vec<crate::types::game_state::TargetSelectionConstraint>,
+    mode_cost: Option<ManaCost>,
+}
+
+/// CR 700.2a + CR 601.2b-c: enumerate the same legal selections the prompt
+/// presents, keeping each chain paired with its own announced mana addition.
+/// A targetless chain needs pricing only if it announces a mode cost.
 fn target_pricing_chains(
     state: &GameState,
     player: PlayerId,
     prepared: &PreparedSpellCast,
     ability_def: &AbilityDefinition,
     resolved: &ResolvedAbility,
-) -> Vec<(
-    ResolvedAbility,
-    Vec<TargetSelectionSlot>,
-    Vec<crate::types::game_state::TargetSelectionConstraint>,
-)> {
-    let with_slots =
-        |chain: ResolvedAbility,
-         constraints: Vec<crate::types::game_state::TargetSelectionConstraint>| {
-            build_target_slots(state, &chain)
-                .ok()
-                .filter(|slots| !slots.is_empty())
-                .map(|slots| (chain, slots, constraints))
-        };
+) -> Vec<TargetPricingChain> {
+    let with_slots = |ability: ResolvedAbility, constraints, mode_cost: Option<ManaCost>| {
+        let slots = build_target_slots(state, &ability).ok()?;
+        (!slots.is_empty() || mode_cost.is_some()).then_some(TargetPricingChain {
+            ability,
+            slots,
+            constraints,
+            mode_cost,
+        })
+    };
     let Some(modal) = prepared.modal.as_ref() else {
-        return with_slots(resolved.clone(), ability_def.target_constraints.clone())
-            .into_iter()
-            .collect();
+        return with_slots(
+            resolved.clone(),
+            ability_def.target_constraints.clone(),
+            None,
+        )
+        .into_iter()
+        .collect();
     };
     let SpellModeChoice {
         modal,
@@ -24265,15 +24211,27 @@ fn target_pricing_chains(
     super::ability_utils::generate_modal_index_sequences(&modal)
         .into_iter()
         .filter(|indices| indices.iter().all(|idx| !unavailable_modes.contains(idx)))
+        .filter(|indices| {
+            modal.mode_costs.is_empty() || indices.iter().all(|&idx| idx < modal.mode_costs.len())
+        })
         .filter_map(|indices| {
-            let chain = super::ability_utils::build_chained_resolved(
+            let mut chain = super::ability_utils::build_chained_resolved(
                 &mode_abilities,
                 &indices,
                 prepared.object_id,
                 player,
             )
             .ok()?;
-            with_slots(chain, constraints.clone())
+            chain.set_context_recursive(resolved.context.clone());
+            chain.start_target_record_recursive();
+            let mode_cost = (!modal.mode_costs.is_empty()).then(|| {
+                super::casting_targets::compute_modal_total_cost(
+                    &ManaCost::zero(),
+                    &modal,
+                    &indices,
+                )
+            });
+            with_slots(chain, constraints.clone(), mode_cost)
         })
         .collect()
 }
