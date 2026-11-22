@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
-use nom::character::complete::{multispace0, space1};
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value, verify};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
@@ -490,7 +490,11 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 ..
             } => last_verb = Some(PrecedingVerb::Discard),
-            AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+            // A committed sacrifice list has its own verb. If it declined,
+            // its complete component must survive as an unpayable cost.
+            AbilityCost::Unimplemented { description }
+                if last_verb.is_some() && after_sacrifice_type_list(description).is_none() =>
+            {
                 if description.trim().is_empty() {
                     continue;
                 }
@@ -2224,13 +2228,9 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
     let (base, rest) = parse_target(&phrase);
     let lower = filter_text.to_ascii_lowercase();
     if let Ok((suffix, _)) = parse_comma_type_list(&lower) {
-        // A type-word prefix ("landlocked") and an unread restriction must
-        // never authorize the unrestricted list, even after a clause opener.
-        alt((eof, space1::<_, OracleError<'_>>))
-            .parse(suffix)
-            .ok()?;
-        let (filter, tail) = fold_attached_to_source_rider(base, rest);
-        return tail.trim().is_empty().then_some(filter);
+        // Only the bare list is modeled here. The target grammar can consume
+        // a selection mode such as "chosen at random" outside its filter.
+        return (suffix.is_empty() && rest.trim().is_empty()).then_some(base);
     }
     // ORDER IS LOAD-BEARING: `another` is applied to the LEFT conjunct and the
     // union is folded AFTER — see `fold_article_led_type_union`'s doc comment for
@@ -2862,13 +2862,59 @@ mod tests {
 
     #[test]
     fn sacrifice_type_list_declines_unread_restrictions() {
+        assert_sacrifice_type_list(
+            &parse_oracle_cost("Sacrifice an artifact, creature, or land"),
+            &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+        );
         for text in [
             "Sacrifice an artifact, creature, or land with a frobnosticator",
             "Sacrifice an artifact, creature, or landlocked",
+            "Sacrifice an artifact, creature, or land with a frobnosticator chosen at random",
+            "Sacrifice an artifact, creature, or land chosen at random",
         ] {
-            assert!(
-                matches!(parse_oracle_cost(text), AbilityCost::Unimplemented { description } if description == text),
+            assert_eq!(
+                parse_oracle_cost(text),
+                AbilityCost::Unimplemented {
+                    description: text.to_string()
+                },
                 "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn sacrifice_type_list_keeps_a_declined_explicit_cost_after_other_costs() {
+        let list = "Sacrifice an artifact, creature, or land";
+        let restricted = format!("{list} with a frobnosticator");
+        for first in [
+            "{1}",
+            "Sacrifice a creature",
+            "Exile a card from your hand",
+            "Tap two untapped creatures you control",
+        ] {
+            let first_cost = parse_oracle_cost(first);
+            assert!(!first_cost.contains_unimplemented(), "{first}");
+            let AbilityCost::Composite { costs } = parse_oracle_cost(&format!("{first}, {list}"))
+            else {
+                panic!("expected two independent costs after {first}");
+            };
+            assert_eq!(costs.len(), 2);
+            assert_eq!(costs[0], first_cost);
+            assert_sacrifice_type_list(
+                &costs[1],
+                &[TypeFilter::Artifact, TypeFilter::Creature, TypeFilter::Land],
+            );
+            assert_eq!(
+                parse_oracle_cost(&format!("{first}, {restricted}")),
+                AbilityCost::Composite {
+                    costs: vec![
+                        first_cost,
+                        AbilityCost::Unimplemented {
+                            description: restricted.clone()
+                        }
+                    ]
+                },
+                "{first}"
             );
         }
     }
