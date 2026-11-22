@@ -1133,6 +1133,67 @@ fn gargadon_at_last_counter(setup: impl FnOnce(&mut GameScenario)) -> (GameRunne
 }
 
 #[test]
+fn suspend_last_counter_requires_and_charges_the_casting_tax() {
+    for can_pay in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_artifact_from_oracle(P1, "Sphere of Resistance", "Spells cost {1} more to cast.");
+        let mountain = s.add_basic_land(P0, ManaColor::Red);
+        let plains = can_pay.then(|| s.add_basic_land(P0, ManaColor::White));
+        let card = gargadon_in_hand(&mut s);
+        let mut r = s.build();
+        r.act(hand_action(
+            card,
+            suspend_ability_index(r.state(), card),
+            CastPaymentMode::Auto,
+        ))
+        .unwrap();
+        r.state_mut()
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .counters
+            .insert(CounterType::Time, 1);
+        let action = legal_actions(r.state()).into_iter().find(|a| {
+            matches!(a, GameAction::ActivateAbility { source_id, .. } if *source_id == card)
+        }).expect("suspended Gargadon's sacrifice");
+        r.act(action).unwrap();
+        r.act(GameAction::SelectCards {
+            cards: vec![mountain],
+        })
+        .unwrap();
+        assert_eq!(r.state().objects[&mountain].zone, Zone::Graveyard);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), card), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+        if let Some(plains) = plains {
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert!(!r.state().objects[&plains].tapped);
+            r.act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert_eq!(r.state().stack.back().unwrap().id, card);
+            assert_eq!(r.state().objects[&card].zone, Zone::Stack);
+            assert!(r.state().objects[&plains].tapped);
+            assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        } else {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "unpayable cast was offered: {:?}",
+                r.state().waiting_for
+            );
+            assert!(r.state().stack.is_empty());
+            assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+            assert!(r.state().objects[&card].casting_permissions.is_empty());
+        }
+    }
+}
+
+#[test]
 fn suspend_last_counter_requires_the_same_exiled_card() {
     let (pending, card) = gargadon_at_last_counter(|_| {});
     for reenter in [false, true] {

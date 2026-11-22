@@ -16989,6 +16989,9 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
             measurements.face_clones += 1;
         });
         let mut projected = state.clone();
+        // CR 601.2b: mana-spending concessions belong to this elected grant.
+        // The real payment has a pending cast; this face probe has its index.
+        projected.active_casting_permission_index = Some(permission_index);
         let zone = {
             let Some(object) = projected.objects.get_mut(&object_id) else {
                 return ResolutionSpellFaceLegality {
@@ -17069,7 +17072,11 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 Some(AdditionalCost::Choice(choices)) => {
                     prepared_declaration_offerable(&projected, player, &prepared, choices)
                 }
-                Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => true,
+                Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => {
+                    // A normal-cost grant leaves alternative costs open for announcement.
+                    // A replacement cost is elected already, including a free suspend cast.
+                    force_normal_cost || prepared_face_mana_payable(&projected, player, &prepared, None)
+                }
             });
         if back_face {
             legality.back = allowed;
@@ -23497,6 +23504,50 @@ fn prepared_declaration_offerable(
     })
 }
 
+/// CR 601.2f + CR 601.2h: test the total for this prepared face and casting
+/// permission, allowing its payment methods and pre-announcement reductions.
+fn prepared_face_mana_payable(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+    probe: Option<&PriorityCastProbe>,
+) -> bool {
+    can_feasibly_pay_harmonize_mana_cost_with_probe(
+        state,
+        player,
+        prepared.object_id,
+        prepared.casting_variant,
+        &prepared.mana_cost,
+        probe,
+    ) || target_dependent_reduction_makes_payable(state, player, prepared, probe)
+        || cast_mana_totals(
+            state,
+            player,
+            prepared.object_id,
+            CastBase::Announced(&prepared.base_mana_cost),
+            &CastPricing {
+                variant: Some(prepared.casting_variant),
+                permission: prepared.casting_permission_index,
+                ..CastPricing::OFFER
+            },
+        )
+        .with_defiler
+        .is_some_and(|reduced| {
+            // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
+            // a life-for-mana budget can't count it again.
+            let scratch =
+                reserved_payment_state(state, player, &PaymentReservation::life(reduced.life));
+            can_feasibly_pay_harmonize_mana_cost_with_probe(
+                scratch.as_ref().unwrap_or(state),
+                player,
+                prepared.object_id,
+                prepared.casting_variant,
+                &reduced.cost,
+                probe,
+            )
+        })
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23851,41 +23902,7 @@ fn can_cast_prepared_now_with_probe(
     // requires — for a modal spell, a legal mode selection (see
     // `spell_has_legal_targets_in_flushed_state`).
     let targets_ok = spell_has_legal_targets_with_probe(state, obj.id, player, probe);
-    let mana_payable = can_feasibly_pay_harmonize_mana_cost_with_probe(
-        state,
-        player,
-        prepared.object_id,
-        prepared.casting_variant,
-        &prepared.mana_cost,
-        probe,
-    ) || target_dependent_reduction_makes_payable(
-        state, player, prepared, probe,
-    ) || cast_mana_totals(
-        state,
-        player,
-        prepared.object_id,
-        CastBase::Announced(&prepared.base_mana_cost),
-        &CastPricing {
-            variant: Some(prepared.casting_variant),
-            permission: prepared.casting_permission_index,
-            ..CastPricing::OFFER
-        },
-    )
-    .with_defiler
-    .is_some_and(|reduced| {
-        // CR 119.4 + CR 601.2h: the Defiler's life is paid before the mana, so
-        // a life-for-mana budget can't count it again.
-        let scratch =
-            reserved_payment_state(state, player, &PaymentReservation::life(reduced.life));
-        can_feasibly_pay_harmonize_mana_cost_with_probe(
-            scratch.as_ref().unwrap_or(state),
-            player,
-            prepared.object_id,
-            prepared.casting_variant,
-            &reduced.cost,
-            probe,
-        )
-    });
+    let mana_payable = prepared_face_mana_payable(state, player, prepared, probe);
     let creature_face_ok = targets_ok && mana_payable;
 
     if creature_face_ok {
