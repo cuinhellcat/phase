@@ -6164,10 +6164,11 @@ fn submit_ordinary_phyrexian_choices(
     state: &mut GameState,
     player: PlayerId,
     spell_object: ObjectId,
-    expected_len: usize,
+    published: &[crate::types::game_state::PhyrexianShard],
     choices: &[crate::types::game_state::ShardChoice],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let expected_len = published.len();
     if choices.len() != expected_len {
         return Err(EngineError::InvalidAction(format!(
             "Phyrexian choice count mismatch: expected {expected_len}, got {}",
@@ -6189,6 +6190,10 @@ fn submit_ordinary_phyrexian_choices(
             .map(|p| p.mana_pool.clone())
             .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
         let activation_ability_index = pending_ref.activation_ability_index;
+        let suspend = matches!(
+            pending_ref.activation_residual,
+            crate::types::game_state::ActivationResidual::Suspend { .. }
+        );
         let current_shards = if let Some(ability_index) = activation_ability_index {
             let activation_context =
                 casting::activation_payment_context(state, spell_object, Some(ability_index));
@@ -6238,12 +6243,29 @@ fn submit_ordinary_phyrexian_choices(
                 "Phyrexian shard count changed during pause".to_string(),
             ));
         }
-        for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-            if let (
-                crate::types::game_state::ShardChoice::PayLife,
-                crate::types::game_state::ShardOptions::ManaOnly,
-            ) = (choice, shard.options)
-            {
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+        for ((choice, shard), offered) in choices.iter().zip(&current_shards).zip(published) {
+            if suspend {
+                // The player confirmed a funded pool. Both the offered symbol and its
+                // live options must still admit the selected payment.
+                let allows = |options| {
+                    !matches!(
+                        (choice, options),
+                        (ShardChoice::PayMana, ShardOptions::LifeOnly)
+                            | (ShardChoice::PayLife, ShardOptions::ManaOnly)
+                    )
+                };
+                if offered.shard_index != shard.shard_index
+                    || offered.color != shard.color
+                    || !allows(offered.options)
+                    || !allows(shard.options)
+                {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Invalid suspend payment choice".into(),
+                    ));
+                }
+            }
+            if let (ShardChoice::PayLife, ShardOptions::ManaOnly) = (choice, shard.options) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot pay life for shard — only mana available".to_string(),
                 ));
@@ -14859,7 +14881,7 @@ fn apply_non_priority_pass_action(
                     state,
                     player,
                     spell_object,
-                    shards.len(),
+                    shards,
                     &choices,
                     &mut events,
                 )?,
@@ -15046,16 +15068,7 @@ fn apply_non_priority_pass_action(
                 object_id,
                 mana_type,
             },
-        ) if state.is_delve_selectable(*player, object_id)
-            && state.pending_cast.as_ref().is_some_and(|pending| {
-                super::casting::spell_has_delve_payment_for(
-                    state,
-                    *player,
-                    pending.object_id,
-                    pending.casting_variant == CastingVariant::Fuse,
-                )
-            }) =>
-        {
+        ) if state.is_delve_selectable(*player, object_id) => {
             let player = *player;
             if mana_type != crate::types::mana::ManaType::Colorless {
                 return Err(EngineError::ActionNotAllowed(

@@ -21,7 +21,7 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CastOfferKind, CastPaymentMode, CastingVariant, CompanionDeclaration, ConvokeMode, CostResume,
+    CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CostResume,
     CounterCostChoice, CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase,
     PayCostKind, PayableResource, PendingMulliganAction, RetargetScope, RetargetSlotAddress,
     TargetSelectionSlot, WaitingFor,
@@ -6171,23 +6171,16 @@ fn mana_payment_actions(
     convoke_mode: Option<ConvokeMode>,
 ) -> Vec<CandidateAction> {
     let mut actions = mana_tap_actions(state, player);
-    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
-        crate::game::casting::spell_has_delve_payment_for(
-            state,
-            player,
-            pending.object_id,
-            pending.casting_variant == CastingVariant::Fuse,
-        )
-    });
+    let delve_spell = state.pending_delve_spell(player);
     // Always include PassPriority to finalize payment
     actions.push(candidate(
         GameAction::PassPriority,
         TacticalClass::Pass,
         Some(player),
     ));
-    if has_delve {
+    if let Some(pending) = delve_spell {
         for &obj_id in state.objects.keys() {
-            if state.is_delve_selectable(player, obj_id) {
+            if state.is_unselected_delve_fuel(player, pending, obj_id) {
                 actions.push(candidate(
                     GameAction::TapForConvoke {
                         object_id: obj_id,

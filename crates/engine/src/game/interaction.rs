@@ -2207,14 +2207,7 @@ fn mana_payment_direct_actions(
     player: PlayerId,
     convoke_mode: Option<ConvokeMode>,
 ) -> Result<Vec<GameAction>, InteractionReasonCode> {
-    let has_delve = state.pending_cast.as_ref().is_some_and(|pending| {
-        super::casting::spell_has_delve_payment_for(
-            state,
-            player,
-            pending.object_id,
-            pending.casting_variant == CastingVariant::Fuse,
-        )
-    });
+    let delve_spell = state.pending_delve_spell(player);
     let activation_upper_bound = state
         .battlefield
         .iter()
@@ -2286,7 +2279,7 @@ fn mana_payment_direct_actions(
             .try_fold(0usize, |count, choices| count.checked_add(choices))
             .ok_or(InteractionReasonCode::PayloadTooLarge)?,
     };
-    let delve_upper_bound = if has_delve {
+    let delve_upper_bound = if delve_spell.is_some() {
         state
             .objects
             .values()
@@ -2317,10 +2310,10 @@ fn mana_payment_direct_actions(
             .map(|object_id| GameAction::UntapLandForMana { object_id }),
     );
     actions.extend(pool_pin_actions(&pool.mana_pool, pinned));
-    if has_delve {
+    if let Some(pending) = delve_spell {
         actions.extend(state.objects.values().filter_map(|object| {
             state
-                .is_delve_selectable(player, object.id)
+                .is_unselected_delve_fuel(player, pending, object.id)
                 .then_some(GameAction::TapForConvoke {
                     object_id: object.id,
                     mana_type: ManaType::Colorless,

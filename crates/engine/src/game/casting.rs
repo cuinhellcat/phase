@@ -2659,13 +2659,7 @@ pub(super) fn finalize_suspend_payment(
     let prepaid = pending.prepaid_actual_mana_spent.is_some();
     let pins = pending.pinned_pool_units.clone();
     if !prepaid {
-        let permission =
-            player_mana_spend_permission_for_optional_spell(state, action.player, None);
-        let permissions = super::static_abilities::build_cost_permission_context(
-            state,
-            action.player,
-            permission,
-        );
+        let permissions = board_wide_payment_permissions(state, action.player);
         let result = spend_non_cast_pool(
             state,
             action.player,
@@ -4219,6 +4213,24 @@ pub(crate) fn pending_phyrexian_route_is_payable_for(
             > permissions.max_life as usize
     {
         return false;
+    }
+
+    if let ActivationResidual::Suspend { action } = pending.activation_residual {
+        return action.player == player
+            && action.source.reference.object_id == spell_object
+            && Some(action.ability_index) == pending.activation_ability_index
+            && mana_payment::select_mana_payment_with_life_budget(
+                &player_data.mana_pool,
+                cost,
+                None,
+                payment_context.as_ref(),
+                permissions.mana_spend_permission,
+                Some(choices),
+                permissions.life_colors,
+                &pending.pinned_pool_units,
+                Some(permissions.max_life as usize),
+            )
+            .is_ok();
     }
 
     // CR 601.2h: Preview only the mana actually required by this route.
@@ -5979,7 +5991,7 @@ pub(super) fn player_mana_spend_permission_for_payment(
     // re-derive activation-source filters against the activating permanent, and
     // spell costs fall through to spell-class and exile-cast permission checks.
     match ctx {
-        Some(PaymentContext::Effect) => {
+        Some(PaymentContext::Effect | PaymentContext::SpecialAction(SpecialAction::Suspend)) => {
             super::static_abilities::player_board_wide_mana_spend_permission(state, player)
         }
         Some(PaymentContext::Activation { .. }) => match source_id {
@@ -26209,9 +26221,8 @@ fn run_effect_auto_tap_pass(
     false
 }
 
-/// CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution mana
-/// payments share the same payment-permission bundle as cast/activation.
-fn effect_payment_permissions(
+/// CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Payment permissions independent of any spell or activation source.
+pub(super) fn board_wide_payment_permissions(
     simulated: &GameState,
     player: PlayerId,
 ) -> crate::types::mana::CostPermissionContext {
@@ -26447,7 +26458,7 @@ pub(super) fn effect_payment_simulated_ceiling(
     ) {
         return None;
     }
-    let permissions = effect_payment_permissions(&simulated, payer);
+    let permissions = board_wide_payment_permissions(&simulated, payer);
     // CR 605.4a + CR 608.2d: settle choice-free delayed bonuses into the pool
     // exactly as the exact check's preview does.
     let settlement = super::triggers::settle_echo_bonuses_for_preview(&mut simulated, &tap_events);
@@ -26510,7 +26521,7 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
             PausedManaPayment::Unresumable => false,
         };
     }
-    let permissions = effect_payment_permissions(&simulated, player);
+    let permissions = board_wide_payment_permissions(&simulated, player);
     // CR 605.4a + CR 608.2d: effect-time payments carry a typed resolution
     // root when the live path can suspend for a pre-spend echo choice, so the
     // preview must account for the same bonus the spell/ability preview does.
@@ -32081,7 +32092,12 @@ pub(crate) fn manual_activation_phyrexian_prompt_kind(
     state: &GameState,
 ) -> Option<ManualPhyrexianPrompt> {
     let pending = state.pending_cast.as_deref()?;
-    if pending.activation_ability_index.is_none() || !activation_pays_mana_manually(pending) {
+    if matches!(
+        pending.activation_residual,
+        ActivationResidual::Suspend { .. }
+    ) || pending.activation_ability_index.is_none()
+        || !activation_pays_mana_manually(pending)
+    {
         return None;
     }
     let open = pending

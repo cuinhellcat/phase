@@ -17411,10 +17411,7 @@ pub(super) fn suspend_cost_is_payable_from_pool(
     player: PlayerId,
     cost: &ManaCost,
 ) -> bool {
-    let permission =
-        super::casting::player_mana_spend_permission_for_optional_spell(state, player, None);
-    let permissions =
-        super::static_abilities::build_cost_permission_context(state, player, permission);
+    let permissions = super::casting::board_wide_payment_permissions(state, player);
     let context = PaymentContext::SpecialAction(crate::types::mana::SpecialAction::Suspend);
     state
         .players
@@ -20624,20 +20621,31 @@ fn finalize_mana_payment_with_resume(
     mana_resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if let Some(ActivationResidual::Suspend { action }) =
-        state.pending_cast.as_deref().map(|p| p.activation_residual)
-    {
-        if action.player != player {
-            return Err(EngineError::NotYourPriority);
-        }
-        return super::casting::finalize_suspend_payment(state, action, None, events);
-    }
-
     // CR 107.4f + CR 601.2f: Pause for per-shard Phyrexian choice if the cost contains
     // Phyrexian mana AND at least one shard has both mana and life options available.
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
     // in `engine.rs` calls `finalize_mana_payment_with_phyrexian_choices`.
     if let Some(pending) = state.pending_cast.as_ref() {
+        if let ActivationResidual::Suspend { action } = pending.activation_residual {
+            if action.player != player {
+                return Err(EngineError::NotYourPriority);
+            }
+            if pending.prepaid_actual_mana_spent.is_none() {
+                let context =
+                    PaymentContext::SpecialAction(crate::types::mana::SpecialAction::Suspend);
+                if let Some(prompt) = phyrexian_payment_prompt_from_pool(
+                    state,
+                    player,
+                    pending.object_id,
+                    &pending.cost,
+                    Some(&context),
+                    super::casting::board_wide_payment_permissions(state, player),
+                ) {
+                    return Ok(prompt);
+                }
+            }
+            return super::casting::finalize_suspend_payment(state, action, None, events);
+        }
         if let Err(error) = ensure_pending_spell_announcement_is_live(state, pending) {
             state.pending_cast = None;
             return Err(error);
@@ -21680,8 +21688,26 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
         mana_spend_permission,
     );
 
+    phyrexian_payment_prompt_from_pool(
+        &preview,
+        player,
+        source_id,
+        cost,
+        effective_payment_context,
+        permissions,
+    )
+}
+
+fn phyrexian_payment_prompt_from_pool(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+    effective_payment_context: Option<&PaymentContext<'_>>,
+    permissions: crate::types::mana::CostPermissionContext,
+) -> Option<WaitingFor> {
     let (shards, payable) = {
-        let player_data = preview.players.iter().find(|p| p.id == player)?;
+        let player_data = state.players.iter().find(|p| p.id == player)?;
         let shards = mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,

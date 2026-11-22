@@ -786,3 +786,211 @@ fn suspend_safe_auto_tap_resolves_the_lands_mana_choice_before_spending() {
     );
     assert!(r.state().stack.is_empty() && r.state().pending_cast.is_none());
 }
+
+#[test]
+fn suspend_manual_payment_krrik_offers_black_mana_or_two_life() {
+    use engine::types::game_state::{PhyrexianShard, ShardChoice, ShardOptions};
+    let confirm = |with_krrik: bool, float_mana: bool| {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+        if with_krrik {
+            s.add_creature_from_oracle(P0, "K'rrik, Son of Yawgmoth", 2, 2,
+        "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.");
+        }
+        let corpse = s.add_creature_to_hand_from_oracle(P0, "Corpulent Corpse", 3, 3,
+        "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nSuspend 5—{B} (Rather than cast this card from your hand, you may pay {B} and exile it with five time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost. It has haste.)")
+        .with_mana_cost(ManaCost::Cost {generic: 5, shards: vec![ManaCostShard::Black]}).id();
+        let swamp = s.add_basic_land(P0, ManaColor::Black);
+        let mut r = s.build();
+        if float_mana {
+            r.act(mana_source(&r, swamp, ManaType::Black)).unwrap();
+        }
+        let ix = suspend_ability_index(r.state(), corpse);
+        r.act(hand_action(corpse, ix, CastPaymentMode::Manual))
+            .unwrap();
+        r.act(GameAction::PassPriority).unwrap();
+        (r, corpse, swamp)
+    };
+    let (ordinary, corpse, _) = confirm(false, true);
+    assert_eq!(ordinary.state().objects[&corpse].zone, Zone::Exile);
+    assert_eq!(time_counters(ordinary.state(), corpse), 5);
+    assert_eq!(ordinary.state().players[0].life, 20);
+    assert_eq!(ordinary.state().players[0].mana_pool.total(), 0);
+
+    let (mut unfunded, corpse, swamp) = confirm(true, false);
+    assert!(
+        matches!(&unfunded.state().waiting_for, WaitingFor::PhyrexianPayment { shards, .. }
+        if shards.len() == 1 && shards[0].options == ShardOptions::LifeOnly)
+    );
+    let before = serde_json::to_value(unfunded.state()).unwrap();
+    assert!(unfunded
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayMana]
+        })
+        .is_err());
+    assert_eq!(serde_json::to_value(unfunded.state()).unwrap(), before);
+    unfunded
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        })
+        .unwrap();
+    assert_eq!(unfunded.state().players[0].life, 18);
+    assert!(!unfunded.state().objects[&swamp].tapped);
+    assert_eq!(time_counters(unfunded.state(), corpse), 5);
+
+    let (r, corpse, _) = confirm(true, true);
+    let WaitingFor::PhyrexianPayment {
+        player: P0,
+        spell_object,
+        shards,
+    } = &r.state().waiting_for
+    else {
+        panic!("K'rrik must offer a choice before Corpulent Corpse is suspended")
+    };
+    assert_eq!(*spell_object, corpse);
+    assert_eq!(
+        shards.as_slice(),
+        &[PhyrexianShard {
+            shard_index: 0,
+            color: ManaColor::Black,
+            options: ShardOptions::ManaOrLife
+        }]
+    );
+    assert_eq!(r.state().objects[&corpse].zone, Zone::Hand);
+    assert_eq!(r.state().players[0].life, 20);
+    assert_eq!(
+        r.state().players[0].mana_pool.count_color(ManaType::Black),
+        1
+    );
+    for (choice, life, black) in [(ShardChoice::PayLife, 18, 1), (ShardChoice::PayMana, 20, 0)] {
+        let mut branch = GameRunner::from_state(r.state().clone());
+        let result = branch
+            .act(GameAction::SubmitPhyrexianChoices {
+                choices: vec![choice],
+            })
+            .unwrap();
+        let state = branch.state();
+        assert!(!result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::SpellCast { .. } | GameEvent::AbilityActivated { .. }
+        )));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert_eq!(state.players[0].life, life);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Black),
+            black
+        );
+        assert_eq!(state.objects[&corpse].zone, Zone::Exile);
+        assert!(!state.objects[&corpse].face_down);
+        assert_eq!(time_counters(state, corpse), 5);
+        assert!(state.stack.is_empty() && state.pending_cast.is_none());
+    }
+}
+
+#[test]
+fn suspend_manual_payment_teval_only_offers_delve_for_a_spell() {
+    use engine::game::interaction::{
+        bind_interaction_authority, derive_viewer_interaction, interaction_action_id,
+    };
+    use engine::game::visibility::filter_state_for_viewer;
+    use engine::types::interaction::{
+        InteractionOpportunityResponse, InteractionPresentationSurface, InteractionSessionId,
+    };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_creature_from_oracle(P0, "Teval, Arbiter of Virtue", 6, 6,
+        "Flying, lifelink\nSpells you cast have delve. (Each card you exile from your graveyard while casting those spells pays for {1}.)\nWhenever you cast a spell, you lose life equal to its mana value.");
+    let talisman = s.add_artifact_to_hand_from_oracle(P0, "Sol Talisman",
+        "Suspend 3—{1} (Rather than cast this card from your hand, pay {1} and exile it with three time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)\n{T}: Add {C}{C}.")
+        .with_mana_cost(ManaCost::NoCost).id();
+    let ring = s
+        .add_artifact_to_hand_from_oracle(P0, "Sol Ring", "{T}: Add {C}{C}.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    let swamp = s.add_basic_land(P0, ManaColor::Black);
+    let fuel = s.add_land_to_graveyard(P0, "Island").id();
+    let mut r = s.build();
+    bind_interaction_authority(r.state_mut(), InteractionSessionId("suspend-teval".into()))
+        .unwrap();
+    let delve = GameAction::TapForConvoke {
+        object_id: fuel,
+        mana_type: ManaType::Colorless,
+    };
+    let published = |r: &GameRunner| {
+        let view =
+            derive_viewer_interaction(r.state(), &filter_state_for_viewer(r.state(), P0), P0);
+        let InteractionOpportunityResponse::ExactChoices { choices } =
+            &view.opportunities[0].response
+        else {
+            panic!("expected manual mana payment choices")
+        };
+        choices.iter().any(|c| c.surfaces.iter().any(|s| matches!(s, InteractionPresentationSurface::Action {action_id: Some(id),..} if *id == interaction_action_id(&delve))))
+    };
+    let candidate_offered = |r: &GameRunner| {
+        engine::ai_support::candidate_actions(r.state())
+            .iter()
+            .any(|candidate| candidate.action == delve)
+    };
+    let mut spell = GameRunner::from_state(r.state().clone());
+    spell
+        .act(GameAction::CastSpell {
+            object_id: ring,
+            card_id: spell.state().objects[&ring].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .unwrap();
+    assert!(published(&spell));
+    assert!(candidate_offered(&spell));
+    assert!(legal_actions(spell.state()).contains(&delve));
+    spell.act(delve.clone()).unwrap();
+    assert_eq!(spell.state().objects[&fuel].zone, Zone::Graveyard);
+    spell.act(GameAction::PassPriority).unwrap();
+    assert_eq!(spell.state().objects[&fuel].zone, Zone::Exile);
+    assert_eq!(spell.state().objects[&ring].zone, Zone::Stack);
+    assert!(!spell.state().objects[&swamp].tapped);
+    assert_eq!(spell.state().players[0].mana_pool.total(), 0);
+    assert_eq!(spell.state().stack.len(), 2);
+    let life_before = spell.state().players[0].life;
+    spell.resolve_top();
+    assert_eq!(spell.state().players[0].life, life_before - 1);
+    spell.resolve_top();
+    assert_eq!(spell.state().objects[&ring].zone, Zone::Battlefield);
+
+    let ix = suspend_ability_index(r.state(), talisman);
+    r.act(hand_action(talisman, ix, CastPaymentMode::Manual))
+        .unwrap();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    let viewer_offers_delve = published(&r);
+    let legal_offers_delve = legal_actions(r.state()).contains(&delve);
+    assert!(!candidate_offered(&r));
+    let before = serde_json::to_value(r.state()).unwrap();
+    let accepted_delve = r.act(delve).is_ok();
+    let state_changed = serde_json::to_value(r.state()).unwrap() != before;
+    r.act(mana_source(&r, swamp, ManaType::Black)).unwrap();
+    r.act(GameAction::PassPriority).unwrap();
+    assert_eq!(r.state().objects[&fuel].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&talisman].zone, Zone::Exile);
+    assert_eq!(time_counters(r.state(), talisman), 3);
+    assert!(!r.state().objects[&talisman].face_down);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert!(r.state().objects[&swamp].tapped);
+    assert_eq!(
+        (viewer_offers_delve, legal_offers_delve, accepted_delve, state_changed, r.state().players[0].mana_pool.total()),
+        (false, false, false, false, 0),
+        "suspending must neither offer nor accept delve, and spending real mana must leave no payment marker",
+    );
+    assert!(r.state().stack.is_empty() && r.state().pending_cast.is_none());
+}

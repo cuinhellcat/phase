@@ -39685,19 +39685,35 @@ impl GameState {
                 .is_some_and(|object| object.is_delve_eligible(self, player))
     }
 
-    /// CR 702.66a: A graveyard card the caster may still select to pay generic
-    /// mana: fuel for the pending spell and not already selected.
+    /// CR 702.66a: Delve pays for a spell the player is casting.
+    pub(crate) fn pending_delve_spell(&self, player: PlayerId) -> Option<&PendingCast> {
+        self.pending_cast.as_deref().filter(|pending| {
+            pending.ability.controller == player
+                && pending.activation_ability_index.is_none()
+                && pending.activation_residual.is_none()
+                && crate::game::casting::spell_has_delve_payment_for(
+                    self,
+                    player,
+                    pending.object_id,
+                    pending.casting_variant == CastingVariant::Fuse,
+                )
+        })
+    }
+
+    pub(crate) fn is_unselected_delve_fuel(
+        &self,
+        player: PlayerId,
+        pending: &PendingCast,
+        object_id: ObjectId,
+    ) -> bool {
+        self.is_delve_fuel_for(player, pending.object_id, object_id)
+            && !pending.delved_cards.contains(&object_id)
+    }
+
+    /// CR 702.66a: A graveyard card the caster may still select for this spell.
     pub fn is_delve_selectable(&self, player: PlayerId, object_id: ObjectId) -> bool {
-        match self.pending_cast.as_ref() {
-            Some(pending) => {
-                self.is_delve_fuel_for(player, pending.object_id, object_id)
-                    && !pending.delved_cards.contains(&object_id)
-            }
-            None => self
-                .objects
-                .get(&object_id)
-                .is_some_and(|object| object.is_delve_eligible(self, player)),
-        }
+        self.pending_delve_spell(player)
+            .is_some_and(|pending| self.is_unselected_delve_fuel(player, pending, object_id))
     }
 
     /// CR 106.4 + CR 118.3a: Resolve and apply one real-pool mana insertion.
