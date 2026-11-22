@@ -226,6 +226,16 @@ pub(crate) fn open_flash_timing_routes(
     object_id: ObjectId,
     casting_variant: CastingVariant,
 ) -> Vec<CastTimingRoute> {
+    flash_timing_routes(state, player, object_id, casting_variant, false)
+}
+
+fn flash_timing_routes(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+    beginning_only: bool,
+) -> Vec<CastTimingRoute> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
@@ -241,19 +251,71 @@ pub(crate) fn open_flash_timing_routes(
         ),
         (
             CastTimingRoute::AlternativeCost,
-            super::casting_costs::payable_spell_alternative_cost_for_timing(
-                state,
-                player,
-                object_id,
-                casting_variant,
-                CastTimingPermission::AsThoughHadFlash,
-            )
-            .is_some(),
+            if beginning_only {
+                super::casting_costs::has_alternative_cost_timing(
+                    state,
+                    player,
+                    object_id,
+                    casting_variant,
+                )
+            } else {
+                super::casting_costs::payable_spell_alternative_cost_for_timing(
+                    state,
+                    player,
+                    object_id,
+                    casting_variant,
+                    CastTimingPermission::AsThoughHadFlash,
+                )
+                .is_some()
+            },
         ),
     ]
     .into_iter()
     .filter_map(|(route, open)| open.then_some(route))
     .collect()
+}
+
+fn hand_cast_has_instant_timing(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    obj.card_types.core_types.contains(&CoreType::Instant)
+        || !flash_timing_routes(state, player, object_id, CastingVariant::Normal, true).is_empty()
+        || super::casting_costs::can_pay_offering_additional_cost(state, player, object_id)
+        || (state.phase == Phase::DeclareBlockers
+            && state.active_player == player
+            && super::keywords::effective_sneak_cost(state, object_id).is_some()
+            && super::combat::unblocked_attackers(state)
+                .into_iter()
+                .any(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .is_some_and(|o| o.controller == player)
+                }))
+}
+
+pub(super) fn may_begin_hand_cast_at_priority(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+) -> bool {
+    matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
+        && state.pending_cast.is_none()
+        && (is_sorcery_speed_window(state, player)
+            || check_spell_timing(
+                state,
+                player,
+                obj,
+                None,
+                hand_cast_has_instant_timing(state, player, obj.id),
+                CastingVariant::Normal,
+            )
+            .is_ok())
 }
 
 /// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`
@@ -262,9 +324,8 @@ pub(crate) fn open_flash_timing_routes(
 /// the classification legality uses). Loyalty abilities carry CR 606.3's
 /// timing as `AsSorcery`, the restriction the loyalty authority reads. The
 /// ability is resolved through the activation authority's own lookup, so
-/// runtime-granted abilities are covered. A `MatchesCardCastTiming` ability is
-/// read by the source's card type only, as legality reads it; a flash route
-/// for the card is not consulted. The sorcery window is not tested. A missing
+/// runtime-granted abilities are covered. A `MatchesCardCastTiming` ability
+/// reads the card's instant-speed routes in the current state. A missing
 /// object or ability makes no claim.
 pub fn ability_confined_to_sorcery_timing(
     state: &crate::types::game_state::GameState,
@@ -1409,14 +1470,10 @@ fn restriction_confines_to_sorcery_timing(
             };
             !permitted
         }
-        // CR 702.62a: "If you could begin to cast this card": a noninstant
-        // card is confined to its sorcery timing. A missing source makes no
-        // claim; legality refuses it separately. Only the card type is read,
-        // as legality has always read it.
-        ActivationRestriction::MatchesCardCastTiming => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| !obj.card_types.core_types.contains(&CoreType::Instant)),
+        ActivationRestriction::MatchesCardCastTiming => {
+            state.objects.contains_key(&source_id)
+                && !hand_cast_has_instant_timing(state, player, source_id)
+        }
         // Not sorcery timing: other windows, activation counts, conditions
         // and source states.
         ActivationRestriction::AsInstant
@@ -1469,24 +1526,10 @@ fn activation_restriction_applies(
             matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
                 && state.pending_cast.is_none()
         }
-        // CR 702.62a: "If you could begin to cast this card by putting it onto the
-        // stack from your hand" — defer to the underlying card type's natural
-        // cast timing. Instants activate any time priority is held; sorceries
-        // (and other non-instant card types) require the sorcery-speed window.
-        // Used by Suspend's hand-activated ability so future
-        // cast-timing-mirroring activations (Foretell, etc.) reuse this primitive.
-        // A missing source can't be activated.
-        ActivationRestriction::MatchesCardCastTiming => {
-            state.objects.contains_key(&source_id)
-                && (!restriction_confines_to_sorcery_timing(
-                    state,
-                    player,
-                    source_id,
-                    ability_index,
-                    restriction,
-                    Some(gates),
-                ) || is_sorcery_speed_window(state, player))
-        }
+        ActivationRestriction::MatchesCardCastTiming => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| may_begin_hand_cast_at_priority(state, player, obj)),
         ActivationRestriction::DuringYourTurn => state.active_player == player,
         ActivationRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep

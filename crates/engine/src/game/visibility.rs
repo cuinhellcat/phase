@@ -1325,6 +1325,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+            | PendingCostMoveResume::Suspend { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -4812,6 +4813,14 @@ fn redact_mana_ability_resume_payment(
         // CR 400.2 + CR 702.143a: a foretell card in hand is in a hidden zone,
         // and its effective foretell cast cost is not public information. Zero
         // it for viewers who cannot see the card; the {2} payment cost is public.
+        ManaAbilityResume::Suspend {
+            action,
+            payment_cost,
+        } if hidden_ids.contains(&action.source.reference.object_id) => {
+            action.count = 0;
+            action.ability_index = 0;
+            *payment_cost = crate::types::mana::ManaCost::NoCost;
+        }
         ManaAbilityResume::Foretell {
             object_id, cost, ..
         } if hidden_ids.contains(object_id) => {
@@ -4825,6 +4834,7 @@ fn redact_mana_ability_resume_payment(
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Suspend { .. }
         | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
@@ -4977,6 +4987,11 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 /// members' mana values zeroed, except that a `replacement_continuations` entry no shield
 /// names any more is blanked whole once it names a hidden object.
 fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
+    if state.pending_cast.as_deref().is_some_and(|pending|
+        matches!(pending.activation_residual, crate::types::game_state::ActivationResidual::Suspend {action}
+            if hidden_ids.contains(&action.source.reference.object_id))) {
+        state.pending_cast = None;
+    }
     if let Some(pending) = state.pending_cast.as_deref_mut() {
         redact_pending_cast_payment(pending, hidden_ids);
     }

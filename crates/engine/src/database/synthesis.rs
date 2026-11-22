@@ -9204,21 +9204,57 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
+/// A granted bare "suspend" has no hand action. Its keyword codec stores
+/// zero counters and the default (empty) cost. A printed positive count may
+/// still have an explicit zero price, as on Lotus Bloom.
+pub(crate) fn fixed_suspend_instance(keyword: &Keyword) -> Option<(u32, &ManaCost)> {
+    match keyword {
+        Keyword::Suspend {
+            count,
+            cost: cost @ ManaCost::Cost { .. },
+        } if *count != 0 || !cost.is_without_paying_mana() => Some((*count, cost)),
+        _ => None,
+    }
+}
+
+/// The canonical indexed descriptor, including the shape stored in older games.
+pub(crate) fn suspend_hand_descriptor(count: u32, cost: &ManaCost) -> AbilityDefinition {
+    use crate::types::ability::ActivationRestriction;
+    let composite_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana { cost: cost.clone() },
+            // CR 702.62a: "exile it" — self-targeted exile from hand.
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(TargetFilter::SelfRef),
+            },
+        ],
+    };
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::PutCounter {
+            counter_type: CounterType::Time,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .cost(composite_cost)
+    .activation_restrictions(vec![ActivationRestriction::MatchesCardCastTiming]);
+    def.activation_zone = Some(Zone::Hand);
+    def
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
-///      you may pay [cost] and exile it with N time counters on it. This action
-///      doesn't use the stack."). Modeled as an activated ability with
-///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
-///      (CR 702.62a "if you could begin to cast this card by putting it onto the
-///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///   1. The indexed hand special action binds the printed cost and time-counter
+///      count. The engine performs the payment and exile with counters before
+///      returning priority. A granted bare keyword has no hand action.
 ///
-///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
+//////   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
 ///      the Exile zone (CR 702.62b: "suspended" = in exile + has time counters)
 ///      via `trigger_zones = [Exile]`, gated by `TriggerConstraint::OnlyDuringYourTurn`
@@ -9243,59 +9279,29 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
 /// single synthesizer regardless of card type — the haste install branches by
 /// `CoreType::Creature` at runtime, not here.
 pub fn synthesize_suspend(face: &mut CardFace) {
-    use crate::types::ability::ActivationRestriction;
-
-    // Find the first Suspend keyword. Cards do not print multiple Suspends.
-    let Some((time_counters, suspend_cost)) = face.keywords.iter().find_map(|k| match k {
-        Keyword::Suspend { count, cost } => Some((*count, cost.clone())),
-        _ => None,
-    }) else {
+    if !face
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Suspend { .. }))
+    {
         return;
-    };
-
-    // CR 702.62a: Activated ability — pay [cost], exile self from hand, then
-    // place N time counters on it. Composite cost mirrors `synthesize_cycling`.
-    let already_has_activation = face.abilities.iter().any(|a| {
-        a.activation_zone == Some(Zone::Hand)
-            && a.activation_restrictions
-                .contains(&ActivationRestriction::MatchesCardCastTiming)
-            && matches!(
-                &*a.effect,
-                Effect::PutCounter { counter_type, target: TargetFilter::SelfRef, .. }
-                    if *counter_type == CounterType::Time
-            )
-    });
-    if !already_has_activation {
-        let composite_cost = AbilityCost::Composite {
-            costs: vec![
-                AbilityCost::Mana {
-                    cost: suspend_cost.clone(),
-                },
-                // CR 702.62a: "exile it" — self-targeted exile from hand.
-                AbilityCost::Exile {
-                    count: 1,
-                    zone: Some(Zone::Hand),
-                    filter: Some(TargetFilter::SelfRef),
-                },
-            ],
+    }
+    for keyword in &face.keywords {
+        let Some((count, cost)) = fixed_suspend_instance(keyword) else {
+            continue;
         };
-        let mut def = AbilityDefinition::new(
-            AbilityKind::Activated,
-            // CR 702.62a: "...with N time counters on it." Time counter is a
-            // typed CounterType variant; the legacy String API for PutCounter
-            // takes the canonical `as_str()` value ("time").
-            Effect::PutCounter {
-                counter_type: CounterType::Time,
-                count: QuantityExpr::Fixed {
-                    value: time_counters as i32,
-                },
-                target: TargetFilter::SelfRef,
-            },
-        )
-        .cost(composite_cost)
-        .activation_restrictions(vec![ActivationRestriction::MatchesCardCastTiming]);
-        def.activation_zone = Some(Zone::Hand);
-        face.abilities.push(def);
+        let legacy = suspend_hand_descriptor(count, cost);
+        let mut tagged = legacy.clone();
+        tagged.ability_tag = Some(AbilityTag::Suspend);
+        if let Some(existing) = face
+            .abilities
+            .iter_mut()
+            .find(|a| **a == legacy || **a == tagged)
+        {
+            existing.ability_tag = Some(AbilityTag::Suspend);
+        } else {
+            face.abilities.push(tagged);
+        }
     }
 
     // CR 702.62a + CR 702.62b: Upkeep state trigger — at the beginning of the

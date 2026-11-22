@@ -488,6 +488,7 @@ fn ability_tag_rank(value: AbilityTag) -> u8 {
         AbilityTag::PowerUp => 6,
         AbilityTag::Equip => 7,
         AbilityTag::Augment => 8,
+        AbilityTag::Suspend => 9,
     }
 }
 
@@ -507,6 +508,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::RollPlanarDie => 4,
         SpecialAction::EndContinuousEffect => 5,
         SpecialAction::Foretell => 6,
+        SpecialAction::Suspend => 7,
     }
 }
 

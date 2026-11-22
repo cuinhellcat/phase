@@ -8739,6 +8739,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                    | PendingCostMoveResume::Suspend { .. }
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -8815,9 +8816,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         super::costs::resume_replacement_may_cost_after_inner_choice(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::Foretell { .. })
+        Some(PendingCostMoveResume::Foretell { .. } | PendingCostMoveResume::Suspend { .. })
     ) {
-        super::casting::resume_foretell_cost_move(state, events)
+        super::casting::complete_hand_exile_cost_move(state, events)
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::CollectEvidencePayment { .. })

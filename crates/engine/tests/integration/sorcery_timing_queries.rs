@@ -687,3 +687,288 @@ fn queries_reach_no_static_scan_for_instants_and_untimed_abilities() {
         "reach: an AsSorcery restriction computes the gates once"
     );
 }
+
+const RIFTMARKED_KNIGHT: &str = "Protection from black; flanking (Whenever a creature without flanking blocks this creature, the blocking creature gets -1/-1 until end of turn.)\nSuspend 3—{1}{W}{W}\nWhen the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.";
+const FIST_OF_SUNS: &str =
+    "You may pay {W}{U}{B}{R}{G} rather than pay the mana cost for spells you cast.";
+const GREATER_GARGADON: &str = "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.";
+const STEEL_GOLEM: &str = "You can't cast creature spells.";
+const RULE_OF_LAW: &str = "Each player can't cast more than one spell each turn.";
+const MEDDLING_MAGE: &str = "As this creature enters, choose a nonland card name.\nSpells with the chosen name can't be cast.";
+const PITHING_NEEDLE: &str = "As this artifact enters, choose a card name.\nActivated abilities of sources with the chosen name can't be activated unless they're mana abilities.";
+const SUDDEN_SHOCK: &str = "Split second (As long as this spell is on the stack, players can't cast spells or activate abilities that aren't mana abilities.)\nSudden Shock deals 2 damage to any target.";
+
+fn suspend_index(r: &GameRunner, card: ObjectId) -> usize {
+    r.state().objects[&card]
+        .abilities
+        .iter()
+        .position(|a| a.activation_zone == Some(Zone::Hand))
+        .unwrap()
+}
+
+fn take_suspend(r: &mut GameRunner, card: ObjectId, count: u32, allowed: bool) {
+    let index = suspend_index(r, card);
+    assert_eq!(offered(r, card, index), allowed, "public hand offer");
+    let result = r.act(GameAction::ActivateAbility {
+        source_id: card,
+        ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    if allowed {
+        result.unwrap();
+        let obj = &r.state().objects[&card];
+        assert_eq!(obj.zone, Zone::Exile);
+        assert!(!obj.face_down);
+        assert_eq!(
+            obj.counters.get(&engine::types::counter::CounterType::Time),
+            Some(&count)
+        );
+        assert!(r.state().pending_cast.is_none());
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    } else {
+        assert!(result.is_err());
+        assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+        assert!(r.state().pending_cast.is_none());
+    }
+}
+
+fn add_gargadon(s: &mut GameScenario) -> ObjectId {
+    s.add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7, GREATER_GARGADON)
+        .with_mana_cost(mana(9, vec![Red]))
+        .id()
+}
+
+#[test]
+fn suspend_uses_its_own_cost_with_each_order_of_alternative_flash_grants() {
+    for (prayers_first, with_prayers) in [(false, true), (true, true), (false, false)] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::Upkeep);
+        if prayers_first {
+            s.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+        }
+        s.add_artifact_from_oracle(P0, "Fist of Suns", FIST_OF_SUNS);
+        if !prayers_first && with_prayers {
+            s.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+        }
+        let lands =
+            [ManaColor::White, ManaColor::White, ManaColor::Green].map(|c| s.add_basic_land(P0, c));
+        let knight = s
+            .add_creature_to_hand_from_oracle(P0, "Riftmarked Knight", 2, 2, RIFTMARKED_KNIGHT)
+            .with_mana_cost(mana(1, vec![White, White]))
+            .id();
+        let mut r = s.build();
+        assert_eq!(r.state().players[0].energy, 0);
+        take_suspend(&mut r, knight, 3, with_prayers);
+        for land in lands {
+            assert_eq!(r.state().objects[&land].tapped, with_prayers);
+        }
+        assert_eq!(r.state().players[0].energy, 0);
+        assert!(r.state().stack.is_empty());
+    }
+    for energy in [0, 1] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::Upkeep);
+        s.add_enchantment_from_oracle(P0, "Primal Prayers", PRIMAL_PRAYERS);
+        let knight = s
+            .add_creature_to_hand_from_oracle(P0, "Riftmarked Knight", 2, 2, RIFTMARKED_KNIGHT)
+            .with_mana_cost(mana(1, vec![White, White]))
+            .id();
+        let mut r = s.build();
+        r.state_mut().players[0].energy = energy;
+        let cast = GameAction::CastSpell {
+            object_id: knight,
+            card_id: r.state().objects[&knight].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        };
+        let result = r.act(cast);
+        if energy == 0 {
+            assert!(result.is_err());
+            assert_eq!(r.state().objects[&knight].zone, Zone::Hand);
+        } else {
+            result.unwrap();
+            assert_eq!(r.state().objects[&knight].zone, Zone::Stack);
+            assert_eq!(r.state().players[0].energy, 0);
+        }
+    }
+}
+
+#[test]
+fn suspend_checks_real_flash_cast_prohibitions_and_the_priority_holder() {
+    for (phase, flash, golem, allowed) in [
+        (Phase::PreCombatMain, false, false, true),
+        (Phase::Upkeep, false, false, false),
+        (Phase::Upkeep, true, false, true),
+        (Phase::PreCombatMain, false, true, false),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(phase);
+        if flash {
+            add_leyline(&mut s, P0);
+        }
+        if golem {
+            s.add_creature_from_oracle(P0, "Steel Golem", 3, 4, STEEL_GOLEM)
+                .as_artifact_creature();
+        }
+        let mountain = s.add_basic_land(P0, ManaColor::Red);
+        let card = add_gargadon(&mut s);
+        let mut r = s.build();
+        take_suspend(&mut r, card, 10, allowed);
+        assert_eq!(r.state().objects[&mountain].tapped, allowed);
+    }
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::Upkeep);
+    s.add_basic_land(P0, ManaColor::Red);
+    add_leyline(&mut s, P0);
+    let card = add_gargadon(&mut s);
+    let mut r = s.build();
+    r.state_mut().active_player = P1;
+    r.state_mut().priority_player = P1;
+    r.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let index = suspend_index(&r, card);
+    let action = GameAction::ActivateAbility {
+        source_id: card,
+        ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(engine::game::engine::apply(r.state_mut(), P1, action.clone()).is_err());
+    r.act(GameAction::PassPriority).unwrap();
+    assert!(engine::game::engine::apply(r.state_mut(), P1, action).is_err());
+    take_suspend(&mut r, card, 10, true);
+    assert_eq!(r.state().priority_player, P0);
+    assert!(r.state().priority_passes.is_empty());
+}
+
+#[test]
+fn suspend_can_begin_after_attackers_even_without_a_required_spell_target() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::BeginCombat);
+    s.add_basic_land(P0, ManaColor::Black);
+    s.add_basic_land(P0, ManaColor::White);
+    let attacker = s.add_creature(P0, "Grizzly Bears", 2, 2).haste().id();
+    let sentence = s
+        .add_spell_to_hand_from_oracle(P0, "Suspended Sentence", true, SUSPENDED_SENTENCE)
+        .with_mana_cost(mana(3, vec![Black]))
+        .id();
+    let mut r = s.build();
+    r.pass_both_players();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ));
+    take_suspend(&mut r, sentence, 3, false);
+    r.declare_attackers(&[(attacker, engine::game::combat::AttackTarget::Player(P1))])
+        .unwrap();
+    assert_eq!(r.state().phase, Phase::DeclareAttackers);
+    take_suspend(&mut r, sentence, 3, true);
+    assert!(r.state().stack.is_empty());
+}
+
+#[test]
+fn suspend_obeys_a_chosen_cast_name_and_a_spent_cast_limit_but_ignores_needle() {
+    use engine::types::ability::ChosenAttribute;
+    for name in ["Greater Gargadon", "Grizzly Bears"] {
+        let mut s = scenario();
+        let mage = s
+            .add_creature_from_oracle(P1, "Meddling Mage", 2, 2, MEDDLING_MAGE)
+            .id();
+        let card = add_gargadon(&mut s);
+        let mut r = s.build();
+        r.state_mut()
+            .objects
+            .get_mut(&mage)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName(name.into()));
+        take_suspend(&mut r, card, 10, name != "Greater Gargadon");
+    }
+    for spend_limit in [true, false] {
+        let mut s = scenario();
+        s.add_enchantment_from_oracle(P0, "Rule of Law", RULE_OF_LAW);
+        let bears = s
+            .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+            .with_mana_cost(mana(1, vec![Green]))
+            .id();
+        let card = add_gargadon(&mut s);
+        let mut r = s.build();
+        if spend_limit {
+            r.cast(bears).resolve();
+            assert_eq!(r.state().objects[&bears].zone, Zone::Battlefield);
+        }
+        take_suspend(&mut r, card, 10, !spend_limit);
+    }
+    let mut s = scenario();
+    let needle = s
+        .add_artifact_from_oracle(P1, "Pithing Needle", PITHING_NEEDLE)
+        .id();
+    let dragon = s
+        .add_creature_from_oracle(P0, "Shivan Dragon", 5, 5, SHIVAN_DRAGON)
+        .id();
+    let card = add_gargadon(&mut s);
+    let mut r = s.build();
+    r.state_mut()
+        .objects
+        .get_mut(&needle)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CardName("Shivan Dragon".into()));
+    let ix = only_activated_index(&r, dragon);
+    assert!(!offered(&r, dragon, ix));
+    r.state_mut()
+        .objects
+        .get_mut(&needle)
+        .unwrap()
+        .chosen_attributes
+        .clear();
+    r.state_mut()
+        .objects
+        .get_mut(&needle)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::CardName("Greater Gargadon".into()));
+    assert!(offered(&r, dragon, ix));
+    take_suspend(&mut r, card, 10, true);
+}
+
+#[test]
+fn suspend_under_flash_checks_split_second_on_the_actual_stack() {
+    for split in [true, false] {
+        let mut s = scenario();
+        add_leyline(&mut s, P0);
+        let card = add_gargadon(&mut s);
+        let spell = if split {
+            s.add_spell_to_hand_from_oracle(P0, "Sudden Shock", true, SUDDEN_SHOCK)
+                .with_keyword(Keyword::SplitSecond)
+                .with_mana_cost(mana(1, vec![Red]))
+                .id()
+        } else {
+            s.add_bolt_to_hand(P0)
+        };
+        let target = s.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let mut r = s.build();
+        let card_id = r.state().objects[&spell].card_id;
+        r.act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![target],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+        if matches!(r.state().waiting_for, WaitingFor::TargetSelection { .. }) {
+            r.act(GameAction::SelectTargets {
+                targets: vec![engine::types::ability::TargetRef::Object(target)],
+            })
+            .unwrap();
+        }
+        assert_eq!(r.state().objects[&spell].zone, Zone::Stack);
+        assert_eq!(
+            engine::game::keywords::stack_has_split_second(r.state()),
+            split
+        );
+        take_suspend(&mut r, card, 10, !split);
+        assert_eq!(r.state().stack.len(), 1);
+    }
+}

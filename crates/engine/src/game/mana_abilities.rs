@@ -4858,6 +4858,10 @@ fn resume_mana_ability_root_payment(
         // CR 116.2h + CR 605.3b: NOT compiler-forced — the `resume =>`
         // catch-all below would silently route a paused foretell payment into
         // `resume_waiting_for`, which `unreachable!()`s for this family.
+        ManaAbilityResume::Suspend {
+            action,
+            payment_cost,
+        } => super::casting::resume_suspend_payment(state, action, &payment_cost, events),
         ManaAbilityResume::Foretell {
             player,
             object_id,
@@ -5021,6 +5025,8 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         )),
         // CR 116.2h + CR 118.3b: the deferred life component finished, so the
         // paid foretell action exiles and stamps the card once.
+        ManaAbilityResume::Suspend { action, .. } =>
+            super::casting::begin_suspend_cost_move(state, action, events),
         ManaAbilityResume::Foretell {
             player,
             object_id,
@@ -6887,6 +6893,7 @@ pub(crate) fn resume_waiting_for(
         // `resume_mana_ability_root`'s named arms, never here.
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Suspend { .. }
         | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. } => {

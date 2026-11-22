@@ -31,9 +31,11 @@ use crate::types::game_state::{
     EmergeSacrificeQuality, GameState, ManaAbilityCostParent, ManaAbilityResume, ManaChoice,
     ManaChoiceContext, ManaChoicePrompt, NextSpellModifier, PayCostKind, PendingCast,
     PendingCostMoveResume, SneakPlacement, SpellCostSource, StackEntry, StackEntryKind,
-    TargetEffectDetail, TargetSelectionSlot, WaitingFor,
+    SuspendHandAction, TargetEffectDetail, TargetSelectionSlot, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
@@ -66,7 +68,7 @@ use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{apply_for_seat_with_mode, PublicFinalizeMode};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
-use super::game_object::{GameObject, PreparedState, PrototypeFormState};
+use super::game_object::{GameObject, ObjectIdentityBindingExt, PreparedState, PrototypeFormState};
 use super::layers::remove_core_type;
 use super::mana_payment;
 use super::priority;
@@ -2432,6 +2434,332 @@ pub(in crate::game) fn priority_web_slinging_announcements(
         .collect()
 }
 
+/// CR 702.62a: the selected index must describe this exact keyword instance.
+/// Older saves carry the same descriptor without its provenance tag.
+pub(super) fn selected_suspend(
+    state: &GameState,
+    id: ObjectId,
+    def: &AbilityDefinition,
+) -> Option<(u32, ManaCost)> {
+    if def.activation_zone != Some(Zone::Hand)
+        || def
+            .ability_tag
+            .is_some_and(|tag| tag != AbilityTag::Suspend)
+        || !def
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::MatchesCardCastTiming)
+    {
+        return None;
+    }
+    super::keywords::effective_keyword_instances(state, id, KeywordKind::Suspend)
+        .into_iter()
+        .find_map(|keyword| {
+            let (count, cost) = crate::database::synthesis::fixed_suspend_instance(&keyword)?;
+            let mut canonical = crate::database::synthesis::suspend_hand_descriptor(count, cost);
+            canonical.ability_tag = def.ability_tag;
+            (canonical == *def).then(|| (count, cost.clone()))
+        })
+}
+
+fn payable_suspend_cost(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    cost: ManaCost,
+) -> Result<ManaCost, ActivationVerdict> {
+    if obj.zone != Zone::Hand
+        || obj.owner != player
+        || !super::engine::priority_principal_for_preflight(state)
+            .is_ok_and(|p| p.semantic_holder() == player)
+        || super::keywords::stack_has_split_second(state)
+        || !castable_from_current_zone(state, obj, player, None)
+        || check_cast_prohibitions(state, player, obj, false, CastingMode::Actual).is_err()
+        || restrictions::check_casting_restrictions(
+            state,
+            player,
+            obj.id,
+            &obj.casting_restrictions,
+        )
+        .is_err()
+        || !restrictions::may_begin_hand_cast_at_priority(state, player, obj)
+    {
+        return Err(ActivationVerdict::Illegal);
+    }
+    let cost = apply_special_action_cost_reduction(state, player, SpecialAction::Suspend, cost);
+    if can_pay_special_action_mana_cost_after_auto_tap(
+        state,
+        player,
+        Some(obj.id),
+        &cost,
+        SpecialAction::Suspend,
+        PausedManaPayment::Resumable,
+    ) {
+        Ok(cost)
+    } else {
+        Err(ActivationVerdict::CostNotPayableNow)
+    }
+}
+
+fn start_suspend_payment(
+    state: &mut GameState,
+    action: SuspendHandAction,
+    cost: &ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if cost.is_without_paying_mana() {
+        return begin_suspend_cost_move(state, action, events);
+    }
+    if action.payment_mode == CastPaymentMode::Auto {
+        return resume_suspend_payment(state, action, cost, events);
+    }
+    let id = action.source.reference.object_id;
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], id, action.player);
+    let mut pending = PendingCast::for_activation(
+        id,
+        ability,
+        cost.clone(),
+        action.ability_index,
+        None,
+        action.payment_mode,
+    );
+    pending.activation_residual = ActivationResidual::Suspend { action };
+    state.pending_cast = Some(Box::new(pending));
+    if action.payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
+        return resume_suspend_payment(state, action, cost, events);
+    }
+    casting_costs::enter_payment_step(state, action.player, None, events)
+}
+
+pub(crate) fn recover_legacy_suspend_payment(state: &mut GameState) {
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return;
+    };
+    let Some(index) = pending.activation_ability_index else {
+        return;
+    };
+    let Some(record) = pending.ability.activation_record.as_ref() else {
+        return;
+    };
+    let Some(snapshot) = pending.activation_cost_snapshot.as_deref() else {
+        return;
+    };
+    let Some(obj) = state.objects.get(&pending.object_id) else {
+        return;
+    };
+    let Some(def) = obj.abilities.get(index) else {
+        return;
+    };
+    let Some((count, _)) = selected_suspend(state, obj.id, def) else {
+        return;
+    };
+    let Some(cost) = def.cost.as_ref() else {
+        return;
+    };
+    if pending.payment_mode != CastPaymentMode::Manual
+        || pending.activation_residual != ActivationResidual::ManaLeg
+        || !matches!(state.waiting_for, WaitingFor::ManaPayment { player, .. } if player == record.activator)
+        || pending.origin_zone != Zone::Hand
+        || record.source_zone != Zone::Hand
+        || obj.zone != Zone::Hand
+        || record.source != obj.id
+        || pending.ability.source_id != obj.id
+        || pending.ability.ability_index != Some(index)
+        || pending.ability.controller != record.activator
+        || obj.owner != record.activator
+        || pending.ability.announced_source_incarnation != Some(obj.incarnation)
+        || !matches!(
+            snapshot.lock,
+            crate::types::casting_costs::ActivationCostLock::Locked { .. }
+        )
+        || snapshot.base_cost != *cost
+        || !matches!(&record.activation_cost, crate::types::events::BoundActivationCost::Cost(c) if **c == *cost)
+        || pending.ability.effect != *def.effect
+        || !matches!(
+            &pending.activation_cost,
+            Some(AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(TargetFilter::SelfRef)
+            })
+        )
+    {
+        return;
+    }
+    let action = SuspendHandAction {
+        player: record.activator,
+        source: ObjectIdentityBinding::from_object(obj),
+        ability_index: index,
+        count,
+        payment_mode: pending.payment_mode,
+    };
+    state.pending_cast.as_mut().unwrap().activation_residual =
+        ActivationResidual::Suspend { action };
+}
+
+pub(super) fn resume_suspend_payment(
+    state: &mut GameState,
+    action: SuspendHandAction,
+    payment_cost: &ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !action.source.is_current(state) {
+        return Err(EngineError::ActionNotAllowed(
+            "Suspended card changed zones".into(),
+        ));
+    }
+    if action.payment_mode == CastPaymentMode::Manual {
+        return casting_costs::enter_payment_step(state, action.player, None, events);
+    }
+    if action.payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
+        if let Some(waiting) =
+            casting_costs::tap_safe_suspend_sources(state, action, payment_cost, events)?
+        {
+            return Ok(waiting);
+        }
+        if casting_costs::suspend_cost_is_payable_from_pool(state, action.player, payment_cost) {
+            return finalize_suspend_payment(state, action, None, events);
+        }
+        return casting_costs::enter_payment_step(state, action.player, None, events);
+    }
+    let resume = ManaAbilityResume::Suspend {
+        action,
+        payment_cost: payment_cost.clone(),
+    };
+    match pay_special_action_mana_cost_with_resume(
+        state,
+        action.player,
+        Some(action.source.reference.object_id),
+        payment_cost,
+        SpecialAction::Suspend,
+        Some(&resume),
+        events,
+    )? {
+        SpecialActionManaPayment::Paid => begin_suspend_cost_move(state, action, events),
+        SpecialActionManaPayment::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+pub(super) fn finalize_suspend_payment(
+    state: &mut GameState,
+    action: SuspendHandAction,
+    choices: Option<&[ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !action.source.is_current(state) {
+        return Err(EngineError::ActionNotAllowed(
+            "Suspended card changed zones".into(),
+        ));
+    }
+    let pending = state
+        .pending_cast
+        .as_ref()
+        .filter(|p| p.activation_residual == (ActivationResidual::Suspend { action }))
+        .ok_or_else(|| EngineError::InvalidAction("Missing suspend payment".into()))?;
+    let cost = pending.cost.clone();
+    let prepaid = pending.prepaid_actual_mana_spent.is_some();
+    let pins = pending.pinned_pool_units.clone();
+    if !prepaid {
+        let permission =
+            player_mana_spend_permission_for_optional_spell(state, action.player, None);
+        let permissions = super::static_abilities::build_cost_permission_context(
+            state,
+            action.player,
+            permission,
+        );
+        let result = spend_non_cast_pool(
+            state,
+            action.player,
+            Some(action.source.reference.object_id),
+            &cost,
+            PaymentContext::SpecialAction(SpecialAction::Suspend),
+            permissions,
+            choices,
+            &pins,
+            events,
+        )?;
+        if let ManaCostPayment::Paused {
+            remaining_life_payments,
+            ..
+        } = result
+        {
+            state.pending_cast = None;
+            state.pending_deferred_life_cost_resume =
+                Some(crate::types::game_state::DeferredLifeCostResume::ManaRoot {
+                    player: action.player,
+                    resume: Box::new(ManaAbilityResume::Suspend {
+                        action,
+                        payment_cost: cost,
+                    }),
+                    remaining_life_payments,
+                    resume_at_resolution_depth: state.resolution_stack.len(),
+                });
+            return Ok(state.waiting_for.clone());
+        }
+    }
+    state.pending_cast = None;
+    begin_suspend_cost_move(state, action, events)
+}
+
+pub(super) fn begin_suspend_cost_move(
+    state: &mut GameState,
+    action: SuspendHandAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !action.source.is_current(state) {
+        return Err(EngineError::ActionNotAllowed(
+            "Suspended card changed zones".into(),
+        ));
+    }
+    let id = action.source.reference.object_id;
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::Suspend { action });
+    begin_hand_exile_cost_move(state, id, events)
+}
+
+pub(super) fn complete_suspend_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    let Some(PendingCostMoveResume::Suspend { action }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("paid suspend move is pending")
+    };
+    let source = action.source;
+    let id = source.reference.object_id;
+    let delivered = state.objects.get(&id).is_some_and(|obj| {
+        obj.zone == Zone::Exile
+            && Some(obj.incarnation) == source.reference.incarnation.checked_add(1)
+    }) && state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|row| row.object_id == id)
+        .is_some_and(|row| {
+            row.from_zone == Some(Zone::Hand)
+                && row.to_zone == Zone::Exile
+                && row
+                    .trigger_source_context
+                    .as_ref()
+                    .is_some_and(|context| context.identity == source)
+        });
+    super::priority::clear_priority_passes(state);
+    if delivered
+        && !super::effects::counters::add_counter_with_replacement(
+            state,
+            action.player,
+            id,
+            crate::types::counter::CounterType::Time,
+            action.count,
+            crate::types::proposed_event::CounterCause::Other,
+            events,
+        )
+    {
+        return state.waiting_for.clone();
+    }
+    WaitingFor::Priority {
+        player: action.player,
+    }
+}
+
 /// CR 702.143a-b: Pay {2}, then begin the foretell special-action move through
 /// the replacement-aware zone pipeline.
 pub fn handle_foretell(
@@ -2543,13 +2871,21 @@ fn begin_foretell_cost_move(
         turn_foretold,
     });
 
+    begin_hand_exile_cost_move(state, object_id, events)
+}
+
+fn begin_hand_exile_cost_move(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     let move_event_start = events.len();
     match zone_pipeline::move_object(
         state,
         ZoneMoveRequest::cost(object_id, Zone::Exile, object_id),
         events,
     ) {
-        ZoneMoveResult::Done => Ok(resume_foretell_cost_move(state, events)),
+        ZoneMoveResult::Done => Ok(complete_hand_exile_cost_move(state, events)),
         ZoneMoveResult::NeedsChoice(_) => {
             // `NeedsChoice` is overloaded by the zone pipeline: it can be the
             // pre-delivery CR 616.1 ordering prompt, or a post-delivery prompt
@@ -2559,13 +2895,28 @@ fn begin_foretell_cost_move(
             if events[move_event_start..].iter().any(|event| {
                 matches!(event, GameEvent::ZoneChanged { object_id: moved, .. } if *moved == object_id)
             }) {
-                complete_foretell_cost_move(state, events);
+                let waiting = complete_hand_exile_cost_move(state, events);
+                if !matches!(waiting, WaitingFor::Priority {..}) { return Ok(waiting); }
             }
             Ok(state.waiting_for.clone())
         }
         ZoneMoveResult::NeedsAuraAttachmentChoice => {
             unreachable!("foretell moves a hand card to exile, never an aura to the battlefield")
         }
+    }
+}
+
+pub(super) fn complete_hand_exile_cost_move(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Suspend { .. })
+    ) {
+        complete_suspend_cost_move(state, events)
+    } else {
+        resume_foretell_cost_move(state, events)
     }
 }
 
@@ -3250,8 +3601,8 @@ fn transient_granted_spell_keywords_for(
 /// multiple simultaneous grants needs a multi-alternative choice surface and is
 /// a known limitation tracked for follow-up, not implemented here.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GrantedSpellAlternativeCost {
-    pub(super) cost: AbilityCost,
+pub(super) struct GrantedSpellAlternativeCost<C = AbilityCost> {
+    pub(super) cost: C,
     pub(super) timing_permission: Option<CastTimingPermission>,
     /// CR 118.9 + CR 601.2b: `Some(source_id)` when the grant is `OncePerTurn`
     /// (As Foretold), so the caller records the per-turn slot at `finalize_cast`.
@@ -3277,6 +3628,22 @@ pub(super) fn granted_spell_alternative_cost_for(
     object_id: ObjectId,
     fused: bool,
 ) -> Option<GrantedSpellAlternativeCost> {
+    let grant = granted_spell_alternative_cost_matching(state, caster, object_id, fused, |_| true)?;
+    Some(GrantedSpellAlternativeCost {
+        // CR 107.3c + CR 118.9: Kentaro binds X to the spell's mana value.
+        cost: super::keywords::resolve_self_mana_in_ability_cost(state, object_id, grant.cost),
+        timing_permission: grant.timing_permission,
+        once_per_turn_source: grant.once_per_turn_source,
+    })
+}
+
+pub(super) fn granted_spell_alternative_cost_matching(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    fused: bool,
+    accepts: impl Fn(Option<CastTimingPermission>) -> bool,
+) -> Option<GrantedSpellAlternativeCost<&AbilityCost>> {
     let spell_obj = state.objects.get(&object_id)?;
     // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
     // after finalize (cast_from_zone stamped, pending cleared) still sees the
@@ -3337,14 +3704,9 @@ pub(super) fn granted_spell_alternative_cost_for(
                 )
             })
         };
-        if matches {
+        if matches && accepts(*timing_permission) {
             return Some(GrantedSpellAlternativeCost {
-                // CR 107.3c + CR 118.9: A static's alternative cost can bind X
-                // to the affected spell's mana value (Kentaro). Concretize the
-                // typed placeholder before affordability or payment; the mana
-                // payment layer otherwise treats unresolved placeholders as a
-                // zero mana component.
-                cost: super::keywords::resolve_self_mana_in_ability_cost(state, object_id, cost),
+                cost,
                 timing_permission: *timing_permission,
                 once_per_turn_source: (*frequency == CastFrequency::OncePerTurn)
                     .then_some(source_obj.id),
@@ -10028,6 +10390,81 @@ fn prepare_spell_cast_with_variant_override_inner(
     )
 }
 
+/// Restrictions shared by a spell proposal and a hand action conditioned on beginning that cast.
+fn check_cast_prohibitions(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    is_fuse_variant: bool,
+    mode: CastingMode,
+) -> Result<(), EngineError> {
+    // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
+    // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
+    // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
+    // than their hands." This overrides graveyard/library/exile/command casting
+    // permissions (Escape, Lurrus, flashback, foretell, commander, etc.).
+    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A static ability prevents casting from this zone".to_string(),
+        ));
+    }
+
+    // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
+    // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A static ability prevents casting during this phase/turn".to_string(),
+        ));
+    }
+
+    // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
+    // E.g., Silence: "Your opponents can't cast spells this turn."
+    if mode == CastingMode::Actual
+        && is_blocked_by_cant_cast_spells_for(state, player, Some(obj), is_fuse_variant)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents you from casting spells this turn".to_string(),
+        ));
+    }
+
+    // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
+    // E.g., Steel Golem: "You can't cast creature spells."
+    if mode == CastingMode::Actual
+        && is_blocked_by_cant_be_cast_for(state, player, obj, is_fuse_variant)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A static ability prevents you from casting this spell".to_string(),
+        ));
+    }
+
+    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents casting from this zone".to_string(),
+        ));
+    }
+
+    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
+    // spell from the named zone (Memory Vessel: "can't play cards from their
+    // hand" — the cast half of "play").
+    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents playing cards from this zone".to_string(),
+        ));
+    }
+
+    // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
+    // E.g., Rule of Law, High Noon, Deafening Silence.
+    if mode == CastingMode::Actual
+        && is_blocked_by_per_turn_cast_limit_for(state, player, obj, is_fuse_variant)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A static ability limits the number of spells you can cast this turn".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// `prepare_spell_cast_with_variant_override_inner` for a cast announced under
 /// a specific graveyard permission (CR 601.2a + CR 601.2b; see
 /// `resolve_graveyard_authority`). `None` announces none: a sole usable
@@ -10215,69 +10652,7 @@ fn prepare_spell_cast_announced(
             _ => None,
         };
 
-    // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
-    // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
-    // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
-    // than their hands." This overrides graveyard/library/exile/command casting
-    // permissions (Escape, Lurrus, flashback, foretell, commander, etc.).
-    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
-    // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting during this phase/turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
-    // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_cast_spells_for(state, player, Some(obj), is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents you from casting spells this turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
-    // E.g., Steel Golem: "You can't cast creature spells."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_be_cast_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents you from casting this spell".to_string(),
-        ));
-    }
-
-    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
-    // spell from the named zone (Memory Vessel: "can't play cards from their
-    // hand" — the cast half of "play").
-    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents playing cards from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
-    // E.g., Rule of Law, High Noon, Deafening Silence.
-    if mode == CastingMode::Actual
-        && is_blocked_by_per_turn_cast_limit_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability limits the number of spells you can cast this turn".to_string(),
-        ));
-    }
+    check_cast_prohibitions(state, player, obj, is_fuse_variant, mode)?;
 
     // Only Spell-kind abilities define the spell's on-cast effect and targets.
     // Activated abilities are irrelevant when casting the permanent spell.
@@ -27142,6 +27517,31 @@ fn pay_non_cast_mana_cost(
         ));
     }
 
+    spend_non_cast_pool(
+        state,
+        player,
+        source_id,
+        cost,
+        ctx,
+        permissions,
+        None,
+        &[],
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spend_non_cast_pool(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cost: &ManaCost,
+    ctx: PaymentContext<'_>,
+    permissions: crate::types::mana::CostPermissionContext,
+    choices: Option<&[ShardChoice]>,
+    pins: &[crate::types::mana::ManaPipId],
+    events: &mut Vec<GameEvent>,
+) -> Result<ManaCostPayment<()>, EngineError> {
     state.restamp_pool_pip_ids(player);
     let player_data = state
         .players
@@ -27154,10 +27554,9 @@ fn pay_non_cast_mana_cost(
         None,
         Some(&ctx),
         permissions.mana_spend_permission,
-        None,
+        choices,
         permissions.life_colors,
-        // CR 118.3a: non-cast mana costs (effects/special actions) are not pinnable.
-        &[],
+        pins,
         Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
@@ -27433,20 +27832,31 @@ pub(super) fn mana_ability_cost_payment_is_paused(state: &GameState) -> bool {
 /// Owned backing for one exact activated-ability payment context. All payment
 /// routes construct this through [`activation_payment_context`] so they use the
 /// live source, actual ability index, tag, and color-payment rider together.
-pub(super) struct ActivationPaymentContext {
-    source_types: Vec<String>,
-    source_subtypes: Vec<String>,
-    ability_tag: Option<AbilityTag>,
-    mana_color_constraint: ActivationManaColorConstraint,
+pub(super) enum ActivationPaymentContext {
+    Suspend,
+    Activation {
+        source_types: Vec<String>,
+        source_subtypes: Vec<String>,
+        ability_tag: Option<AbilityTag>,
+        mana_color_constraint: ActivationManaColorConstraint,
+    },
 }
 
 impl ActivationPaymentContext {
     pub(super) fn as_payment_context(&self) -> PaymentContext<'_> {
-        PaymentContext::Activation {
-            source_types: &self.source_types,
-            source_subtypes: &self.source_subtypes,
-            ability_tag: self.ability_tag,
-            mana_color_constraint: self.mana_color_constraint,
+        match self {
+            Self::Suspend => PaymentContext::SpecialAction(SpecialAction::Suspend),
+            Self::Activation {
+                source_types,
+                source_subtypes,
+                ability_tag,
+                mana_color_constraint,
+            } => PaymentContext::Activation {
+                source_types,
+                source_subtypes,
+                ability_tag: *ability_tag,
+                mana_color_constraint: *mana_color_constraint,
+            },
         }
     }
 }
@@ -27462,8 +27872,15 @@ pub(super) fn activation_payment_context(
     source_id: ObjectId,
     ability_index: Option<usize>,
 ) -> ActivationPaymentContext {
+    if state.pending_cast.as_deref().is_some_and(|pending| {
+        matches!(pending.activation_residual,
+        ActivationResidual::Suspend { action } if action.source.reference.object_id == source_id
+        && Some(action.ability_index) == ability_index)
+    }) {
+        return ActivationPaymentContext::Suspend;
+    }
     let Some(source) = state.objects.get(&source_id) else {
-        return ActivationPaymentContext {
+        return ActivationPaymentContext::Activation {
             source_types: Vec::new(),
             source_subtypes: Vec::new(),
             ability_tag: None,
@@ -27478,7 +27895,7 @@ pub(super) fn activation_payment_context(
     let Some(ability) =
         ability_index.and_then(|index| activation_ability_definition(state, source_id, index))
     else {
-        return ActivationPaymentContext {
+        return ActivationPaymentContext::Activation {
             source_types,
             source_subtypes,
             ability_tag: None,
@@ -27492,7 +27909,7 @@ pub(super) fn activation_payment_context(
             .map(ActivationManaColorConstraint::Only)
             .unwrap_or(ActivationManaColorConstraint::Impossible),
     };
-    ActivationPaymentContext {
+    ActivationPaymentContext::Activation {
         source_types,
         source_subtypes,
         ability_tag: ability.ability_tag,
@@ -28616,6 +29033,7 @@ fn alternative_keyword_kind(tag: AbilityTag) -> Option<KeywordKind> {
         | AbilityTag::Outlast
         | AbilityTag::Backup
         | AbilityTag::PowerUp
+        | AbilityTag::Suspend
         | AbilityTag::Augment => None,
     }
 }
@@ -30748,6 +31166,13 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
+    if let Some((_, cost)) = selected_suspend(state, source_id, &ability_def) {
+        return match (payable_suspend_cost(state, player, obj, cost), query) {
+            (Ok(_), _) => ActivationVerdict::Legal,
+            (Err(_), ActivationQuery::Legality) => ActivationVerdict::Illegal,
+            (Err(reason), ActivationQuery::BlockReason) => reason,
+        };
+    }
     if let Some(base_cost) = ability_def.cost.take() {
         ability_def.cost = Some(activation_cost_with_alternative_keyword_costs(
             state,
@@ -32270,10 +32695,6 @@ fn activate_with_cost_carrier(
     if !state.objects.contains_key(&source_id) {
         return Err(EngineError::InvalidAction("Object not found".to_string()));
     }
-    // CR 602.2a + CR 603.2: the activation's announcement owns this action's
-    // events from here on.
-    super::announcement_triggers::begin_announcement(state, events.len());
-
     // CR 602.2: Only players permitted by `activator_filter` may begin activation.
     let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
     else {
@@ -32281,6 +32702,23 @@ fn activate_with_cost_carrier(
             "Invalid ability index".to_string(),
         ));
     };
+    if let Some((count, cost)) = selected_suspend(state, source_id, &ability_def) {
+        let obj = &state.objects[&source_id];
+        let cost = payable_suspend_cost(state, player, obj, cost)
+            .map_err(|_| EngineError::ActionNotAllowed("Cannot suspend this card now".into()))?;
+        let action = SuspendHandAction {
+            player,
+            source: ObjectIdentityBinding::from_object(obj),
+            ability_index,
+            count,
+            payment_mode,
+        };
+        return start_suspend_payment(state, action, &cost, events);
+    }
+    // CR 602.2a + CR 603.2: the activation's announcement owns this action's
+    // events from here on.
+    super::announcement_triggers::begin_announcement(state, events.len());
+
     match activation_structural_eligibility(state, player, source_id, &ability_def) {
         ActivationStructuralEligibility::Eligible => {}
         ActivationStructuralEligibility::WrongActivator => {

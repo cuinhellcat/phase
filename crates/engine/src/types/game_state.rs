@@ -12063,6 +12063,22 @@ pub enum ActivationResidual {
     None,
     XMana,
     ManaLeg,
+    /// A hand special action using the indexed payment window. Its paid
+    /// continuation exiles the bound card with its time counters.
+    Suspend {
+        action: SuspendHandAction,
+    },
+}
+
+/// CR 702.62a: The exact hand object, payment choice and keyword instance
+/// selected when this special action was announced.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SuspendHandAction {
+    pub player: PlayerId,
+    pub source: ObjectIdentityBinding,
+    pub ability_index: usize,
+    pub count: u32,
+    pub payment_mode: CastPaymentMode,
 }
 
 /// CR 601.2c + CR 602.2b: Tracks whether an activation's target-declaration
@@ -13105,6 +13121,9 @@ pub enum PendingCostMoveResume {
         cost: ManaCost,
         turn_foretold: u32,
     },
+    Suspend {
+        action: SuspendHandAction,
+    },
     /// CR 701.59a + CR 614.1 + CR 616.1: The selected evidence cards are
     /// exiled one at a time as a cost. A replacement choice settles the card
     /// at `paused_at_index`; resumption continues with the unpaid suffix and
@@ -13307,6 +13326,7 @@ impl PendingCostMoveResume {
             | Self::WardSacrificePayment { .. }
             | Self::ReplacementMayCost { .. }
             | Self::ReplacementMayCostInnerChoice { .. }
+            | Self::Suspend { .. }
             | Self::Foretell { .. }
             | Self::CollectEvidencePayment { .. }
             | Self::UnlessBouncePayment { .. }
@@ -13335,7 +13355,7 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::TurnFaceUpCostMove { .. } => true,
             // CR 116.2h: foretelling is a special action; its {2} is paid before
             // its exile move, which can then pause on a replacement.
-            PendingCostMoveResume::Foretell { .. } => true,
+            PendingCostMoveResume::Suspend { .. } | PendingCostMoveResume::Foretell { .. } => true,
             // Cast and activation payments keep their announcement; an
             // optional payment made during a resolution does not.
             PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
@@ -13386,6 +13406,7 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+            | PendingCostMoveResume::Suspend { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::CollectEvidencePayment { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -14158,6 +14179,7 @@ impl GameState {
                 PendingCostMoveResume::WardSacrificePayment { .. }
                 | PendingCostMoveResume::ReplacementMayCost { .. }
                 | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                | PendingCostMoveResume::Suspend { .. }
                 | PendingCostMoveResume::Foretell { .. }
                 | PendingCostMoveResume::UnlessBouncePayment { .. }
                 | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -14208,6 +14230,7 @@ impl GameState {
                 PendingCostMoveResume::WardSacrificePayment { .. }
                 | PendingCostMoveResume::ReplacementMayCost { .. }
                 | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                | PendingCostMoveResume::Suspend { .. }
                 | PendingCostMoveResume::Foretell { .. }
                 | PendingCostMoveResume::UnlessBouncePayment { .. }
                 | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -14488,6 +14511,10 @@ pub enum ManaAbilityResume {
         payment_cost: ManaCost,
         turn_foretold: u32,
     },
+    Suspend {
+        action: SuspendHandAction,
+        payment_cost: ManaCost,
+    },
     ManaPayment {
         /// The payer of the outer spell/ability cost. This is intentionally
         /// independent from `PendingManaAbility::player`: Assist can activate
@@ -14639,6 +14666,7 @@ fn visit_cost_move_resume_events(
         PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+        | PendingCostMoveResume::Suspend { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::ActivationMillPayment { .. }
@@ -14690,6 +14718,7 @@ fn visit_mana_ability_resume_events(
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Suspend { .. }
         | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
@@ -14799,6 +14828,7 @@ impl ManaAbilityResume {
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
             | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::UnlessPayment { .. }
             | ManaAbilityResume::CombatTaxPayment { .. }
@@ -14820,6 +14850,7 @@ impl ManaAbilityResume {
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
             | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::EffectPayCost { .. }
             | ManaAbilityResume::CombatTaxPayment { .. }
@@ -14856,6 +14887,7 @@ impl ManaAbilityResume {
             // CR 116.2m: paying a Room's unlock cost.
             | ManaAbilityResume::RoomUnlock { .. }
             // CR 116.2h: paying {2} to foretell a card from hand.
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. } => true,
             ManaAbilityResume::Priority
             | ManaAbilityResume::ManaPayment { .. }
@@ -14917,6 +14949,7 @@ impl ManaAbilityResume {
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
             | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. } => true,
             // CR 118.12 / CR 608.2: payments made while an ability resolves.
             ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
@@ -15242,6 +15275,7 @@ impl PendingManaAbility {
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
             | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::ManaPayment { .. }
             | ManaAbilityResume::ManaSourceSelection { .. }
@@ -21841,6 +21875,7 @@ impl PersistedGameState {
         // rehydration and the finalizing layer flush, and is a no-op on
         // current-format state.
         crate::game::effects::deal_damage::recover_legacy_dealt_damage_kinds(&mut state)?;
+        crate::game::casting::recover_legacy_suspend_payment(&mut state);
         // CR 702.16p: an older save's slot-keyed start snapshots move to their
         // occurrence keys before anything can flush layers. Otherwise a
         // flush's refresh would take a fresh snapshot under the new key, and
@@ -33476,6 +33511,7 @@ fn visit_mana_ability_resume_chains<'a>(
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Suspend { .. }
         | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
@@ -33701,6 +33737,7 @@ fn visit_cost_move_resume_chains<'a>(
         }
         PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+        | PendingCostMoveResume::Suspend { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::TurnFaceUpCostMove { .. } => Ok(()),
     }
@@ -36888,6 +36925,7 @@ impl GameState {
                 | PendingCostMoveResume::WardSacrificePayment { .. }
                 | PendingCostMoveResume::ReplacementMayCost { .. }
                 | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+                | PendingCostMoveResume::Suspend { .. }
                 | PendingCostMoveResume::Foretell { .. }
                 | PendingCostMoveResume::UnlessBouncePayment { .. }
                 | PendingCostMoveResume::LoyaltyActivation { .. }

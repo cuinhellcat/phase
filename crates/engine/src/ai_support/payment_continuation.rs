@@ -1076,6 +1076,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
+        | PendingCostMoveResume::Suspend { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
@@ -1148,6 +1149,7 @@ fn classify_deferred_life_root(
             | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
             | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::UnlessPayment { .. }
@@ -1255,6 +1257,7 @@ fn record_root_from_resume(
         | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
         | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Suspend { .. }
         | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::UnlessPayment { .. }
@@ -1374,6 +1377,7 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
         | Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
+        | Some(PendingCostMoveResume::Suspend { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })

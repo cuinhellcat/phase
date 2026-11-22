@@ -63337,3 +63337,80 @@ fn grant_digest_covers_the_enters_tapped_rider() {
         grant_digest(&grant(EtbTapState::Unspecified))
     );
 }
+
+#[test]
+fn suspend_synthesis_upgrades_legacy_slots_and_keeps_distinct_costs_bound() {
+    use crate::database::synthesis::{suspend_hand_descriptor, synthesize_suspend};
+    use crate::types::card::CardFace;
+    let red = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Red],
+    };
+    let green = ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Green],
+    };
+    let mut face = CardFace::default();
+    face.keywords.extend([
+        Keyword::Suspend {
+            count: 10,
+            cost: red.clone(),
+        },
+        Keyword::Suspend {
+            count: 2,
+            cost: green.clone(),
+        },
+    ]);
+    // An adjacent, similarly shaped ordinary hand ability and the old untagged
+    // indexed descriptor already exist in this face.
+    face.abilities.extend([
+        suspend_hand_descriptor(2, &red),
+        suspend_hand_descriptor(10, &red),
+    ]);
+    synthesize_suspend(&mut face);
+    synthesize_suspend(&mut face);
+    assert_eq!(face.abilities.len(), 3);
+    assert_eq!(face.abilities[0].ability_tag, None);
+    assert_eq!(face.abilities[1].ability_tag, Some(AbilityTag::Suspend));
+    assert_eq!(face.abilities[2].ability_tag, Some(AbilityTag::Suspend));
+    assert_eq!(face.triggers.len(), 2);
+
+    // The two keyword instances are the real prices/counts of Greater Gargadon
+    // and Search for Tomorrow; combining them exercises an otherwise unprinted
+    // multiple-instance selection and the pre-tag persisted slot layout.
+    for (index, color, count) in [(1, ManaColor::Red, 10), (2, ManaColor::Green, 2)] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_basic_land(P0, color);
+        let mut builder = s.add_creature_to_hand(P0, "Multiple suspend instances", 9, 7);
+        for keyword in &face.keywords {
+            builder.with_keyword(keyword.clone());
+        }
+        for ability in &face.abilities {
+            builder.with_ability_definition(ability.clone());
+        }
+        let id = builder.id();
+        let mut r = s.build();
+        let action = GameAction::ActivateAbility {
+            source_id: id,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(crate::ai_support::legal_actions(r.state()).contains(&action));
+        r.act(action).unwrap();
+        assert_eq!(
+            r.state().objects[&id].counters.get(&CounterType::Time),
+            Some(&count)
+        );
+        assert_eq!(r.state().objects[&id].zone, Zone::Exile);
+        assert!(r.state().stack.is_empty());
+    }
+    let mut granted = CardFace::default();
+    granted.keywords.push(Keyword::Suspend {
+        count: 0,
+        cost: ManaCost::default(),
+    });
+    synthesize_suspend(&mut granted);
+    assert!(granted.abilities.is_empty());
+    assert_eq!(granted.triggers.len(), 2);
+}

@@ -1089,15 +1089,20 @@ fn finish_replacement_execute_epilogue(
     // before preserving that non-priority prompt, so the card cannot be
     // left face up or with a stranded cost continuation.
     if zone_change_object_id.is_some_and(|object_id| {
-        matches!(
-            state.pending_cost_move_resume.as_ref(),
-            Some(PendingCostMoveResume::Foretell {
-                object_id: pending_object_id,
-                ..
-            }) if *pending_object_id == object_id
-        )
+        match state.pending_cost_move_resume.as_ref() {
+            Some(PendingCostMoveResume::Foretell { object_id: id, .. }) => *id == object_id,
+            Some(PendingCostMoveResume::Suspend { action }) => {
+                action.source.reference.object_id == object_id
+            }
+            _ => false,
+        }
     }) {
-        super::casting::complete_foretell_cost_move(state, events);
+        let completed = super::casting::complete_hand_exile_cost_move(state, events);
+        if matches!(waiting_for, WaitingFor::Priority { .. })
+            || !matches!(completed, WaitingFor::Priority { .. })
+        {
+            waiting_for = completed;
+        }
     }
 
     // CR 805.4b: a draw-step draw that paused on the choice just

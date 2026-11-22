@@ -1912,17 +1912,42 @@ pub(super) fn spell_alternative_cost_for_timing(
     casting_variant: CastingVariant,
     timing_permission: CastTimingPermission,
 ) -> Option<super::casting::GrantedSpellAlternativeCost> {
-    // CR 118.9a + CR 601.3c: the timing comes only with the granted alternative cost, which a
-    // method that is itself an alternative cost can't add.
-    if casting_variant.uses_alternative_cost() {
-        return None;
-    }
-    let obj = state.objects.get(&object_id)?;
-    if obj.zone != Zone::Hand || obj.controller != player {
+    if !alternative_cost_timing_applies_to_hand(state, player, object_id, casting_variant) {
         return None;
     }
     super::casting::granted_spell_alternative_cost(state, player, object_id)
         .filter(|granted| granted.timing_permission == Some(timing_permission))
+}
+
+fn alternative_cost_timing_applies_to_hand(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+) -> bool {
+    !variant.uses_alternative_cost()
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.zone == Zone::Hand && obj.controller == player)
+}
+
+/// CR 601.3c: a possible alternative-cost choice may grant timing before payment.
+pub(super) fn has_alternative_cost_timing(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+) -> bool {
+    alternative_cost_timing_applies_to_hand(state, player, object_id, variant)
+        && super::casting::granted_spell_alternative_cost_matching(
+            state,
+            player,
+            object_id,
+            false,
+            |permission| permission == Some(CastTimingPermission::AsThoughHadFlash),
+        )
+        .is_some()
 }
 
 /// CR 118.9 + CR 601.2f + CR 601.2h: whether an Oracle alternative cost can be
@@ -17341,6 +17366,29 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources(
 ) {
     let spell_meta = super::casting::build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    tap_non_sacrificial_rows(
+        state,
+        player,
+        source_id,
+        cost,
+        events,
+        excluded,
+        spell_ctx.as_ref(),
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tap_non_sacrificial_rows(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+    events: &mut Vec<GameEvent>,
+    excluded: &HashSet<ObjectId>,
+    context: Option<&PaymentContext<'_>>,
+    resume: Option<&ManaAbilityResume>,
+) {
     auto_tap_mana_sources_inner(
         state,
         player,
@@ -17349,13 +17397,97 @@ pub(super) fn auto_tap_non_sacrificial_mana_sources(
         Some(source_id),
         excluded,
         Some(mana_sources::ManaSourcePenalty::Sacrifices),
-        spell_ctx.as_ref(),
+        context,
         None,
         None,
-        None,
+        resume,
         None,
         AutoTapRowPolicy::Choose,
     );
+}
+
+pub(super) fn suspend_cost_is_payable_from_pool(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+) -> bool {
+    let permission =
+        super::casting::player_mana_spend_permission_for_optional_spell(state, player, None);
+    let permissions =
+        super::static_abilities::build_cost_permission_context(state, player, permission);
+    let context = PaymentContext::SpecialAction(crate::types::mana::SpecialAction::Suspend);
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| {
+            mana_payment::can_pay_for_spell(&p.mana_pool, cost, Some(&context), permissions)
+        })
+}
+
+pub(super) fn tap_safe_suspend_sources(
+    state: &mut GameState,
+    action: crate::types::game_state::SuspendHandAction,
+    cost: &ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let resume = ManaAbilityResume::Suspend {
+        action,
+        payment_cost: cost.clone(),
+    };
+    let id = action.source.reference.object_id;
+    let ctx = PaymentContext::SpecialAction(crate::types::mana::SpecialAction::Suspend);
+    let tap = |state: &mut GameState, events: &mut Vec<GameEvent>, keep: &HashSet<ObjectId>| {
+        tap_non_sacrificial_rows(
+            state,
+            action.player,
+            id,
+            cost,
+            events,
+            keep,
+            Some(&ctx),
+            Some(&resume),
+        );
+    };
+    let mut simulated = state.clone();
+    let mut preview_events = Vec::new();
+    tap(&mut simulated, &mut preview_events, &HashSet::new());
+    super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut preview_events, 0);
+    let keep = if super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+        &simulated,
+        action.player,
+        Some(id),
+        cost,
+        crate::types::mana::SpecialAction::Suspend,
+        super::casting::PausedManaPayment::Resumable,
+    ) {
+        HashSet::new()
+    } else {
+        sacrificial_sources_requiring_tap(state, action.player)
+    };
+    let start = events.len();
+    tap(state, events, &keep);
+    if super::casting::mana_ability_cost_payment_is_paused(state) {
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, start);
+    match super::casting::settle_pre_spend_echoes(
+        state,
+        action.player,
+        events,
+        start,
+        Some(&resume),
+        None,
+    ) {
+        Ok(()) => Ok(None),
+        Err(_)
+            if state.pending_triggered_mana_resume.is_some()
+                || super::casting::mana_ability_cost_payment_is_paused(state) =>
+        {
+            Ok(Some(state.waiting_for.clone()))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// CR 601.2g-h + CR 605.3b: Test the production first leg of
@@ -17404,6 +17536,10 @@ fn sacrificial_tap_sources_to_keep(
     if super::casting::can_feasibly_pay_mana_cost(&simulated, player, Some(source_id), cost) {
         return HashSet::new();
     }
+    sacrificial_sources_requiring_tap(state, player)
+}
+
+fn sacrificial_sources_requiring_tap(state: &GameState, player: PlayerId) -> HashSet<ObjectId> {
     mana_sources::activatable_mana_source_selections(state, player)
         .into_iter()
         .filter(|selection| selection.penalty == mana_sources::ManaSourcePenalty::Sacrifices)
@@ -20488,6 +20624,15 @@ fn finalize_mana_payment_with_resume(
     mana_resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let Some(ActivationResidual::Suspend { action }) =
+        state.pending_cast.as_deref().map(|p| p.activation_residual)
+    {
+        if action.player != player {
+            return Err(EngineError::NotYourPriority);
+        }
+        return super::casting::finalize_suspend_payment(state, action, None, events);
+    }
+
     // CR 107.4f + CR 601.2f: Pause for per-shard Phyrexian choice if the cost contains
     // Phyrexian mana AND at least one shard has both mana and life options available.
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
@@ -20976,6 +21121,20 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     phyrexian_choices: &[crate::types::game_state::ShardChoice],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let Some(ActivationResidual::Suspend { action }) =
+        state.pending_cast.as_deref().map(|p| p.activation_residual)
+    {
+        if action.player != player {
+            return Err(EngineError::NotYourPriority);
+        }
+        return super::casting::finalize_suspend_payment(
+            state,
+            action,
+            Some(phyrexian_choices),
+            events,
+        );
+    }
+
     let mut pending = state
         .pending_cast
         .take()

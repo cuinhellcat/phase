@@ -362,6 +362,8 @@ pub enum SpecialAction {
     /// activation, so mana restricted to spells or activated abilities MUST be
     /// rejected here, while special-action-restricted mana is eligible.
     Foretell,
+    /// CR 702.62a: pay the selected suspend cost to exile a card from hand.
+    Suspend,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or

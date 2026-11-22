@@ -1053,6 +1053,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
         SpecialAction::RollPlanarDie => "RollPlanarDie",
         SpecialAction::EndContinuousEffect => "EndContinuousEffect",
         SpecialAction::Foretell => "Foretell",
+        SpecialAction::Suspend => "Suspend",
     }
 }
 
@@ -1069,6 +1070,7 @@ fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
         "EndContinuousEffect" => Some(SpecialAction::EndContinuousEffect),
         // CR 116.2h: same non-compiler-forced registry round-trip obligation.
         "Foretell" => Some(SpecialAction::Foretell),
+        "Suspend" => Some(SpecialAction::Suspend),
         _ => None,
     }
 }

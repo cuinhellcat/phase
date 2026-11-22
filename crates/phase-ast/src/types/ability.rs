@@ -37214,6 +37214,8 @@ pub enum AbilityTag {
     PowerUp,
     /// CR 702.6a: This ability originated from an Equip keyword definition.
     Equip,
+    /// CR 702.62a: Indexed hand special action.
+    Suspend,
     /// Unstable Augment hand-activated combine ability.
     Augment,
 }
@@ -37234,6 +37236,7 @@ impl AbilityTag {
             AbilityTag::PowerUp => "power-up",
             AbilityTag::Equip => "equip",
             AbilityTag::Augment => "augment",
+            AbilityTag::Suspend => "suspend",
         }
     }
 
@@ -37250,6 +37253,7 @@ impl AbilityTag {
             "power-up" => Some(AbilityTag::PowerUp),
             "equip" => Some(AbilityTag::Equip),
             "augment" => Some(AbilityTag::Augment),
+            "suspend" => Some(AbilityTag::Suspend),
             _ => None,
         }
     }
@@ -37308,13 +37312,8 @@ pub enum ActivationRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
-    /// CR 702.62a: "If you could begin to cast this card by putting it onto the
-    /// stack from your hand" — the activation is legal whenever the underlying
-    /// card type's natural cast timing is legal. For a sorcery / permanent card,
-    /// this is sorcery-speed; for an instant, it's instant-speed. Used by the
-    /// synthesized Suspend hand-activated ability so future "cast-timing-mirroring"
-    /// activations (Foretell, etc.) can reuse this primitive instead of
-    /// special-casing card type at synthesis time.
+    /// CR 702.62a: the indexed hand action uses this card's current casting
+    /// window, including its own or granted instant-speed permissions.
     MatchesCardCastTiming,
 }
 

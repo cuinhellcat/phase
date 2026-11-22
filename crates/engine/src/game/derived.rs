@@ -214,7 +214,9 @@ pub fn derive_display_state(state: &mut GameState) {
                 // off-battlefield today; guard kept for exact parity with the
                 // enforcement gates (which skip the activation-prohibition checks
                 // for plot).
-                if casting::is_plot_special_action(&def) {
+                if casting::is_plot_special_action(&def)
+                    || casting::selected_suspend(state, obj_id, &def).is_some()
+                {
                     continue;
                 }
                 if let Some(reason) =
