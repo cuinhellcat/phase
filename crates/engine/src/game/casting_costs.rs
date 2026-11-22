@@ -20631,16 +20631,7 @@ fn finalize_mana_payment_with_resume(
                 return Err(EngineError::NotYourPriority);
             }
             if pending.prepaid_actual_mana_spent.is_none() {
-                let context =
-                    PaymentContext::SpecialAction(crate::types::mana::SpecialAction::Suspend);
-                if let Some(prompt) = phyrexian_payment_prompt_from_pool(
-                    state,
-                    player,
-                    pending.object_id,
-                    &pending.cost,
-                    Some(&context),
-                    super::casting::board_wide_payment_permissions(state, player),
-                ) {
+                if let Some(prompt) = suspend_payment_choice(state, action, &pending.cost, false) {
                     return Ok(prompt);
                 }
             }
@@ -21695,6 +21686,26 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
         cost,
         effective_payment_context,
         permissions,
+        false,
+    )
+}
+
+pub(super) fn suspend_payment_choice(
+    state: &GameState,
+    action: crate::types::game_state::SuspendHandAction,
+    cost: &ManaCost,
+    allow_funding: bool,
+) -> Option<WaitingFor> {
+    phyrexian_payment_prompt_from_pool(
+        state,
+        action.player,
+        action.source.reference.object_id,
+        cost,
+        Some(&PaymentContext::SpecialAction(
+            crate::types::mana::SpecialAction::Suspend,
+        )),
+        super::casting::board_wide_payment_permissions(state, action.player),
+        allow_funding,
     )
 }
 
@@ -21705,32 +21716,11 @@ fn phyrexian_payment_prompt_from_pool(
     cost: &ManaCost,
     effective_payment_context: Option<&PaymentContext<'_>>,
     permissions: crate::types::mana::CostPermissionContext,
+    allow_funding: bool,
 ) -> Option<WaitingFor> {
-    let (shards, payable) = {
-        let player_data = state.players.iter().find(|p| p.id == player)?;
-        let shards = mana_payment::compute_phyrexian_shards(
-            &player_data.mana_pool,
-            cost,
-            effective_payment_context,
-            permissions,
-        );
-        // CR 601.2h: Only pause when the cost is actually payable in aggregate.
-        // Phyrexian shards may surface as `LifeOnly` even when the non-Phyrexian
-        // portion (e.g., a {1} generic shard) is unpayable; in that case the
-        // downstream finalizer must reject with "Cannot pay mana cost" rather
-        // than pausing on an unpayable cast.
-        let payable = mana_payment::can_pay_for_spell(
-            &player_data.mana_pool,
-            cost,
-            effective_payment_context,
-            permissions,
-        );
-        (shards, payable)
-    };
-    if !payable {
-        return None;
-    }
-
+    let pool = &state.players.iter().find(|p| p.id == player)?.mana_pool;
+    let shards =
+        mana_payment::compute_phyrexian_shards(pool, cost, effective_payment_context, permissions);
     // CR 107.4f + CR 601.2h: Pause whenever any shard would deduct life — either
     // because the player explicitly chooses (`ManaOrLife`) or because life is the
     // only remaining payment route (`LifeOnly`). The player retains the CR 601.2h
@@ -21748,6 +21738,25 @@ fn phyrexian_payment_prompt_from_pool(
         return None;
     }
 
+    if allow_funding
+        && !mana_payment::can_pay_for_spell(
+            pool,
+            cost,
+            effective_payment_context,
+            crate::types::mana::CostPermissionContext {
+                max_life: 0,
+                ..permissions
+            },
+        )
+    {
+        return Some(WaitingFor::ManaPayment {
+            player,
+            convoke_mode: None,
+        });
+    }
+    if !mana_payment::can_pay_for_spell(pool, cost, effective_payment_context, permissions) {
+        return None;
+    }
     Some(WaitingFor::PhyrexianPayment {
         player,
         spell_object: source_id,

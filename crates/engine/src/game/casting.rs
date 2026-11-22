@@ -2509,25 +2509,7 @@ fn start_suspend_payment(
     if cost.is_without_paying_mana() {
         return begin_suspend_cost_move(state, action, events);
     }
-    if action.payment_mode == CastPaymentMode::Auto {
-        return resume_suspend_payment(state, action, cost, events);
-    }
-    let id = action.source.reference.object_id;
-    let ability = ResolvedAbility::new(Effect::NoOp, vec![], id, action.player);
-    let mut pending = PendingCast::for_activation(
-        id,
-        ability,
-        cost.clone(),
-        action.ability_index,
-        None,
-        action.payment_mode,
-    );
-    pending.activation_residual = ActivationResidual::Suspend { action };
-    state.pending_cast = Some(Box::new(pending));
-    if action.payment_mode == CastPaymentMode::AutoExceptSacrificialMana {
-        return resume_suspend_payment(state, action, cost, events);
-    }
-    casting_costs::enter_payment_step(state, action.player, None, events)
+    resume_suspend_payment(state, action, cost, events)
 }
 
 pub(crate) fn recover_legacy_suspend_payment(state: &mut GameState) {
@@ -2606,6 +2588,32 @@ pub(super) fn resume_suspend_payment(
         return Err(EngineError::ActionNotAllowed(
             "Suspended card changed zones".into(),
         ));
+    }
+    // K'rrik makes paying black mana a decision even when the player
+    // normally delegates mana payment. Preserve the opportunity to tap
+    // sources before choosing life if the pool cannot cover the mana route.
+    let choice = (action.payment_mode != CastPaymentMode::Manual)
+        .then(|| casting_costs::suspend_payment_choice(state, action, payment_cost, true))
+        .flatten();
+    if state.pending_cast.is_none()
+        && (action.payment_mode != CastPaymentMode::Auto || choice.is_some())
+    {
+        let id = action.source.reference.object_id;
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], id, action.player);
+        let mut pending = PendingCast::for_activation(
+            id,
+            ability,
+            payment_cost.clone(),
+            action.ability_index,
+            None,
+            action.payment_mode,
+        );
+        pending.activation_residual = ActivationResidual::Suspend { action };
+        state.pending_cast = Some(Box::new(pending));
+    }
+    if let Some(waiting) = choice {
+        state.restamp_pool_pip_ids(action.player);
+        return Ok(waiting);
     }
     if action.payment_mode == CastPaymentMode::Manual {
         return casting_costs::enter_payment_step(state, action.player, None, events);

@@ -787,24 +787,29 @@ fn suspend_safe_auto_tap_resolves_the_lands_mana_choice_before_spending() {
     assert!(r.state().stack.is_empty() && r.state().pending_cast.is_none());
 }
 
+fn corpse_payment_board(with_krrik: bool, float_mana: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    if with_krrik {
+        s.add_creature_from_oracle(P0, "K'rrik, Son of Yawgmoth", 2, 2,
+    "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.");
+    }
+    let corpse = s.add_creature_to_hand_from_oracle(P0, "Corpulent Corpse", 3, 3,
+    "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nSuspend 5—{B} (Rather than cast this card from your hand, you may pay {B} and exile it with five time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost. It has haste.)")
+    .with_mana_cost(ManaCost::Cost {generic: 5, shards: vec![ManaCostShard::Black]}).id();
+    let swamp = s.add_basic_land(P0, ManaColor::Black);
+    let mut r = s.build();
+    if float_mana {
+        r.act(mana_source(&r, swamp, ManaType::Black)).unwrap();
+    }
+    (r, corpse, swamp)
+}
+
 #[test]
 fn suspend_manual_payment_krrik_offers_black_mana_or_two_life() {
     use engine::types::game_state::{PhyrexianShard, ShardChoice, ShardOptions};
     let confirm = |with_krrik: bool, float_mana: bool| {
-        let mut s = GameScenario::new();
-        s.at_phase(Phase::PreCombatMain).with_life(P0, 20);
-        if with_krrik {
-            s.add_creature_from_oracle(P0, "K'rrik, Son of Yawgmoth", 2, 2,
-        "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.");
-        }
-        let corpse = s.add_creature_to_hand_from_oracle(P0, "Corpulent Corpse", 3, 3,
-        "Fear (This creature can't be blocked except by artifact creatures and/or black creatures.)\nSuspend 5—{B} (Rather than cast this card from your hand, you may pay {B} and exile it with five time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost. It has haste.)")
-        .with_mana_cost(ManaCost::Cost {generic: 5, shards: vec![ManaCostShard::Black]}).id();
-        let swamp = s.add_basic_land(P0, ManaColor::Black);
-        let mut r = s.build();
-        if float_mana {
-            r.act(mana_source(&r, swamp, ManaType::Black)).unwrap();
-        }
+        let (mut r, corpse, swamp) = corpse_payment_board(with_krrik, float_mana);
         let ix = suspend_ability_index(r.state(), corpse);
         r.act(hand_action(corpse, ix, CastPaymentMode::Manual))
             .unwrap();
@@ -888,6 +893,86 @@ fn suspend_manual_payment_krrik_offers_black_mana_or_two_life() {
         assert_eq!(time_counters(state, corpse), 5);
         assert!(state.stack.is_empty() && state.pending_cast.is_none());
     }
+}
+
+fn automatic_corpse_payment(mode: CastPaymentMode) {
+    use engine::types::game_state::{ShardChoice, ShardOptions};
+    for (float, tapped, fund_now, options) in [
+        (true, true, false, ShardOptions::ManaOrLife),
+        (false, false, true, ShardOptions::ManaOrLife),
+        (false, false, false, ShardOptions::LifeOnly),
+        (false, true, false, ShardOptions::LifeOnly),
+    ] {
+        let (mut r, corpse, swamp) = corpse_payment_board(true, float);
+        r.state_mut().objects.get_mut(&swamp).unwrap().tapped = tapped;
+        let ix = suspend_ability_index(r.state(), corpse);
+        r.act(hand_action(corpse, ix, mode)).unwrap();
+        if !float {
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::ManaPayment { player: P0, .. }
+            ));
+            assert_eq!(r.state().objects[&swamp].tapped, tapped);
+            if fund_now {
+                r.act(mana_source(&r, swamp, ManaType::Black)).unwrap();
+            }
+            r.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(
+            matches!(&r.state().waiting_for, WaitingFor::PhyrexianPayment { player: P0, spell_object, shards }
+            if *spell_object == corpse && shards.len() == 1 && shards[0].options == options),
+            "{mode:?} must present K'rrik's {options:?} election before payment: {:?}",
+            r.state().waiting_for
+        );
+        assert_eq!(r.state().objects[&corpse].zone, Zone::Hand);
+        assert_eq!(r.state().objects[&swamp].tapped, tapped || fund_now);
+        assert_eq!(r.state().players[0].life, 20);
+        assert_eq!(
+            r.state().players[0].mana_pool.total(),
+            usize::from(float || fund_now)
+        );
+        let mut cancelled = GameRunner::from_state(r.state().clone());
+        cancelled.act(GameAction::CancelCast).unwrap();
+        assert_eq!(cancelled.state().objects[&corpse].zone, Zone::Hand);
+        assert_eq!(cancelled.state().players[0].life, 20);
+        assert!(cancelled.state().pending_cast.is_none());
+        for choice in [ShardChoice::PayLife, ShardChoice::PayMana] {
+            let mut branch = GameRunner::from_state(r.state().clone());
+            let result = branch.act(GameAction::SubmitPhyrexianChoices {
+                choices: vec![choice],
+            });
+            let life = choice == ShardChoice::PayLife;
+            if !life && options == ShardOptions::LifeOnly {
+                assert!(result.is_err());
+                continue;
+            }
+            result.unwrap();
+            let state = branch.state();
+            assert_eq!(state.objects[&swamp].tapped, tapped || fund_now);
+            assert_eq!(state.objects[&corpse].zone, Zone::Exile);
+            assert_eq!(time_counters(state, corpse), 5);
+            assert_eq!(state.players[0].life, if life { 18 } else { 20 });
+            assert_eq!(
+                state.players[0].mana_pool.total(),
+                usize::from((float || fund_now) && life)
+            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+            assert!(state.pending_cast.is_none() && state.stack.is_empty());
+        }
+    }
+}
+
+#[test]
+fn suspend_auto_krrik_preserves_the_payment_choice() {
+    automatic_corpse_payment(CastPaymentMode::Auto);
+}
+
+#[test]
+fn suspend_auto_except_sacrificial_krrik_preserves_the_payment_choice() {
+    automatic_corpse_payment(CastPaymentMode::AutoExceptSacrificialMana);
 }
 
 #[test]
