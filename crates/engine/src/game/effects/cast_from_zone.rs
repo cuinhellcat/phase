@@ -1234,7 +1234,7 @@ pub fn resolve(
     let play_route = single_card
         .filter(|_| mode.is_play())
         .and_then(|id| state.objects.get(&id))
-        .map(resolution_play_route);
+        .map(|object| resolution_play_route_for_ability(ability, object));
     let driver_free_cast = driver.is_during_resolution()
         && without_paying
         && alt_ability_cost.is_none()
@@ -1674,6 +1674,23 @@ pub(crate) fn resolution_play_route(
         ResolutionPlayRoute::ElectFace
     } else {
         ResolutionPlayRoute::CastSpell
+    }
+}
+
+/// CR 702.62a + CR 712.12: a suspended modal land is played during this
+/// trigger's resolution, including the choice of which land face to play.
+pub(super) fn resolution_play_route_for_ability(
+    ability: &ResolvedAbility,
+    object: &crate::game::game_object::GameObject,
+) -> ResolutionPlayRoute {
+    match resolution_play_route(object) {
+        ResolutionPlayRoute::LingeringFaceElection
+            if ability.context.ability_tag
+                == Some(crate::types::ability::AbilityTag::SuspendLastCounter) =>
+        {
+            ResolutionPlayRoute::ElectFace
+        }
+        other => other,
     }
 }
 

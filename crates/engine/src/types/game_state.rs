@@ -21876,6 +21876,7 @@ impl PersistedGameState {
         // current-format state.
         crate::game::effects::deal_damage::recover_legacy_dealt_damage_kinds(&mut state)?;
         crate::game::casting::recover_legacy_suspend_payment(&mut state);
+        state.recover_legacy_suspend_triggers();
         // CR 702.16p: an older save's slot-keyed start snapshots move to their
         // occurrence keys before anything can flush layers. Otherwise a
         // flush's refresh would take a fresh snapshot under the new key, and
@@ -29082,6 +29083,24 @@ macro_rules! declare_game_state {
         }
 
         impl GameState {
+    fn recover_legacy_suspend_triggers(&mut self) {
+        use crate::database::synthesis::recover_legacy_suspend_trigger;
+        for entry in self.stack.iter_mut() {
+            if let StackEntryKind::TriggeredAbility { ability, condition, .. } = &mut entry.kind {
+                recover_legacy_suspend_trigger(ability, Some(condition));
+            }
+        }
+        let held = self.deferred_triggers.iter_mut().chain(
+            self.pending_trigger_order.iter_mut().flat_map(|order| &mut order.groups).flat_map(|group| &mut group.triggers)
+        ).map(|ctx| &mut ctx.pending);
+        for pending in self.pending_trigger.as_deref_mut().into_iter().chain(held) {
+            recover_legacy_suspend_trigger(&mut pending.ability, Some(&mut pending.condition));
+        }
+        if let Some(optional) = self.resolution_stack.active_optional_effect_mut() {
+            recover_legacy_suspend_trigger(&mut optional.ability, None);
+        }
+    }
+
             /// CR 614.12: share the resident object projection, but refresh all
             /// resolution context and history before re-evaluating its layers.
             /// New fields participate automatically; only the explicit board

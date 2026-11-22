@@ -1268,6 +1268,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::Equip => " activates equip: ",
                 AbilityTag::Augment => " activates augment: ",
                 AbilityTag::Suspend => " suspends: ",
+                AbilityTag::SuspendLastCounter => ": ",
             };
             vec![
                 player_seg(state, *player_id),

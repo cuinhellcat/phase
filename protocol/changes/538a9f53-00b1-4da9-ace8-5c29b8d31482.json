@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Suspend from hand uses a typed special-action payment and replacement-aware exile continuation. Suspended-source restrictions on ability definitions carry the live card filter."
+  "reason": "Suspend from hand uses a typed special-action payment and replacement-aware exile continuation. Suspended-source restrictions on ability definitions carry the live card filter. The last-time-counter trigger identifies its optional play."
 }

@@ -17038,7 +17038,18 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
             .objects
             .get(&object_id)
             .expect("projected object persists");
-        let allowed = matches
+        // CR 118.9d + CR 601.2h: a free cast still requires the additional
+        // costs of the chosen face (Bone Splinters still sacrifices a creature).
+        let additional_cost_payable = match &object.additional_cost {
+            Some(AdditionalCost::Required(cost)) => {
+                cost.is_payable_for_spell(&projected, player, object_id)
+            }
+            Some(AdditionalCost::Choice(choices)) => choices
+                .iter()
+                .any(|cost| cost.is_payable_for_spell(&projected, player, object_id)),
+            Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => true,
+        };
+        let allowed = matches && additional_cost_payable
             && cast_permission_constraint_allows_cast(
                 &projected,
                 object,
@@ -29067,6 +29078,7 @@ fn alternative_keyword_kind(tag: AbilityTag) -> Option<KeywordKind> {
         | AbilityTag::Backup
         | AbilityTag::PowerUp
         | AbilityTag::Suspend
+        | AbilityTag::SuspendLastCounter
         | AbilityTag::Augment => None,
     }
 }

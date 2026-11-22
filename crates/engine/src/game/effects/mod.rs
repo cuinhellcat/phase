@@ -20741,6 +20741,19 @@ fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             // CR 712.12). A lingering `Play` grant is always grantable and stays
             // unprobed.
             let resolves_play_now = mode.is_play() && driver.is_during_resolution();
+            if resolves_play_now
+                && ability.context.ability_tag
+                    == Some(crate::types::ability::AbilityTag::SuspendLastCounter)
+            {
+                return !ability.self_ref_is_current(state)
+                    || cast_from_zone::resolution_play_face_legality(
+                        state,
+                        ability,
+                        ability.source_id,
+                    )
+                    .count()
+                        == 0;
+            }
             if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
                 // CR 608.2d: an untargeted free graveyard pick with nothing
                 // castable is impossible whatever follows it, so an "If you do"

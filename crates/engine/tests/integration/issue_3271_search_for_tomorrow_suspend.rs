@@ -1079,3 +1079,713 @@ fn suspend_manual_payment_teval_only_offers_delve_for_a_spell() {
     );
     assert!(r.state().stack.is_empty() && r.state().pending_cast.is_none());
 }
+
+fn printed_card(
+    scenario: &mut GameScenario,
+    player: engine::types::player::PlayerId,
+    name: &str,
+    zone: Zone,
+) -> ObjectId {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = crate::support::shared_card_db().expect("committed integration card fixture");
+    scenario.add_real_card(player, name, zone, db)
+}
+
+fn pass_pair(runner: &mut GameRunner) {
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+}
+
+fn one_counter_upkeep(runner: &mut GameRunner, card: ObjectId) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&card)
+        .unwrap()
+        .counters
+        .insert(CounterType::Time, 1);
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().phase = Phase::Untap;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    pass_pair(runner);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(time_counters(runner.state(), card), 1);
+}
+
+fn gargadon_at_last_counter(setup: impl FnOnce(&mut GameScenario)) -> (GameRunner, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Red);
+    let card = gargadon_in_hand(&mut s);
+    setup(&mut s);
+    let mut r = s.build();
+    let index = suspend_ability_index(r.state(), card);
+    r.act(hand_action(card, index, CastPaymentMode::Auto))
+        .unwrap();
+    one_counter_upkeep(&mut r, card);
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), card), 0);
+    assert_eq!(r.state().stack.len(), 1);
+    (r, card)
+}
+
+#[test]
+fn suspend_last_counter_requires_the_same_exiled_card() {
+    let (pending, card) = gargadon_at_last_counter(|_| {});
+    for reenter in [false, true] {
+        let mut r = GameRunner::from_state(pending.state().clone());
+        engine::game::zones::move_to_zone(r.state_mut(), card, Zone::Graveyard, &mut vec![]);
+        if reenter {
+            engine::game::zones::move_to_zone(r.state_mut(), card, Zone::Exile, &mut vec![]);
+        }
+        pass_pair(&mut r);
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+            "a departed incarnation cannot offer its play: {:?}",
+            r.state().waiting_for
+        );
+        assert!(r.state().stack.is_empty());
+        assert!(r.state().objects[&card].casting_permissions.is_empty());
+    }
+    let mut r = pending;
+    r.state_mut()
+        .objects
+        .get_mut(&card)
+        .unwrap()
+        .counters
+        .insert(CounterType::Time, 1);
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(r.state().objects[&card].zone, Zone::Stack);
+}
+
+#[test]
+fn suspend_last_counter_can_play_a_granted_dryad_arbor() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Blue);
+    let arbor = printed_card(&mut s, P0, "Dryad Arbor", Zone::Battlefield);
+    let spell = printed_card(&mut s, P0, "Suspend", Zone::Hand);
+    let mut r = s.build();
+    r.cast(spell).target_object(arbor).resolve();
+    assert_eq!(r.state().objects[&arbor].zone, Zone::Exile);
+    assert_eq!(time_counters(r.state(), arbor), 2);
+    one_counter_upkeep(&mut r, arbor);
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), arbor), 0);
+    assert_eq!(r.state().stack.len(), 1);
+    for other_turn in [false, true] {
+        let mut blocked = GameRunner::from_state(r.state().clone());
+        if other_turn {
+            blocked.state_mut().active_player = P1;
+        } else {
+            blocked.state_mut().lands_played_this_turn = 1;
+        }
+        pass_pair(&mut blocked);
+        assert!(matches!(
+            blocked.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(blocked.state().objects[&arbor].zone, Zone::Exile);
+        assert!(blocked.state().objects[&arbor]
+            .casting_permissions
+            .is_empty());
+    }
+    pass_pair(&mut r);
+    assert!(
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "legal land play must be offered: {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(r.state().objects[&arbor].zone, Zone::Battlefield);
+    assert!(r.state().stack.is_empty());
+    assert_eq!(r.state().lands_played_this_turn, 1);
+}
+
+#[test]
+fn suspend_last_counter_copy_plays_for_its_controller() {
+    use engine::types::ability::AbilityTag;
+    use engine::types::game_state::StackEntryKind;
+
+    let mut copy_spell = None;
+    let (mut r, card) = gargadon_at_last_counter(|s| {
+        copy_spell = Some(printed_card(s, P1, "Return the Favor", Zone::Hand));
+        for _ in 0..3 {
+            s.add_basic_land(P1, ManaColor::Red);
+        }
+    });
+    let original = r.state().stack.back().unwrap().id;
+    r.act(GameAction::PassPriority).unwrap();
+    r.cast(copy_spell.unwrap())
+        .modes(&[0])
+        .target_object(original)
+        .commit();
+    assert_eq!(r.state().stack.len(), 2);
+    pass_pair(&mut r);
+    assert_eq!(r.state().stack.len(), 2);
+    for (entry, player) in r.state().stack.iter().zip([P0, P1]) {
+        assert_eq!(entry.controller, player);
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("expected triggered ability: {:?}", entry.kind)
+        };
+        assert_eq!(ability.controller, player);
+        assert_eq!(
+            ability.context.ability_tag,
+            Some(AbilityTag::SuspendLastCounter)
+        );
+        assert_eq!(ability.source_id, card);
+    }
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P1, .. }
+    ));
+    let mut declined = GameRunner::from_state(r.state().clone());
+    declined
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    pass_pair(&mut declined);
+    assert!(matches!(
+        declined.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(r.state().stack.back().unwrap().id, card);
+    assert_eq!(r.state().stack.back().unwrap().controller, P1);
+    assert_eq!(r.state().objects[&card].owner, P0);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&card].zone, Zone::Battlefield);
+    pass_pair(&mut r);
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+}
+
+#[test]
+fn suspend_last_counter_rejects_a_prohibited_creature_spell() {
+    let mut golem = None;
+    let (mut r, card) = gargadon_at_last_counter(|s| {
+        golem = Some(printed_card(s, P0, "Steel Golem", Zone::Hand));
+    });
+    // Install the printed prohibition after the legal hand action, before the trigger resolves.
+    engine::game::zones::move_to_zone(
+        r.state_mut(),
+        golem.unwrap(),
+        Zone::Battlefield,
+        &mut vec![],
+    );
+    pass_pair(&mut r);
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+    assert!(r.state().objects[&card].casting_permissions.is_empty());
+}
+
+#[test]
+fn suspend_last_counter_restores_the_keyword_origin_on_the_stack_or_at_the_choice() {
+    use engine::types::ability::AbilityTag;
+    use engine::types::game_state::StackEntryKind;
+    let card = ObjectId(2);
+    let mut old = restore(include_str!(
+        "../fixtures/activation_cost/greater_gargadon_pre_special_action_manual.json"
+    ));
+    let mountain = old.state().battlefield[0];
+    old.act(mana_source(&old, mountain, ManaType::Red)).unwrap();
+    old.act(GameAction::PassPriority).unwrap();
+    one_counter_upkeep(&mut old, card);
+    pass_pair(&mut old);
+    assert_eq!(old.state().stack.len(), 1);
+    let StackEntryKind::TriggeredAbility { ability, .. } = &old.state().stack.back().unwrap().kind
+    else {
+        panic!("old trigger")
+    };
+    assert_eq!(
+        ability.context.ability_tag, None,
+        "the historical card data really lacks the tag"
+    );
+    let mut restored =
+        restore(&serde_json::to_string(&PersistedGameState::capture(old.state().clone())).unwrap());
+    let StackEntryKind::TriggeredAbility { ability, .. } =
+        &restored.state().stack.back().unwrap().kind
+    else {
+        panic!("restored trigger")
+    };
+    assert_eq!(
+        ability.context.ability_tag,
+        Some(AbilityTag::SuspendLastCounter)
+    );
+    engine::game::zones::move_to_zone(restored.state_mut(), card, Zone::Graveyard, &mut vec![]);
+    pass_pair(&mut restored);
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    pass_pair(&mut old);
+    let mut restored =
+        restore(&serde_json::to_string(&PersistedGameState::capture(old.state().clone())).unwrap());
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    assert_eq!(
+        restored
+            .state()
+            .resolution_stack
+            .active_optional_effect()
+            .unwrap()
+            .ability
+            .context
+            .ability_tag,
+        Some(AbilityTag::SuspendLastCounter)
+    );
+    restored
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(restored.state().objects[&card].zone, Zone::Stack);
+}
+
+#[test]
+fn suspend_last_counter_plays_the_elected_modal_face_immediately() {
+    use engine::types::card_type::CoreType;
+    // Both real Pathway faces and the Mammoth's land back are in the standard fixture.
+    for name in ["Branchloft Pathway", "Kazandu Mammoth"] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_basic_land(P0, ManaColor::Blue);
+        s.add_enchantment_from_oracle(
+            P0,
+            "Living Plane",
+            "All lands are 1/1 creatures that are still lands.",
+        );
+        let modal = printed_card(&mut s, P0, name, Zone::Battlefield);
+        let spell = printed_card(&mut s, P0, "Suspend", Zone::Hand);
+        let mut r = s.build();
+        engine::game::layers::mark_layers_full(r.state_mut());
+        engine::game::layers::flush_layers(r.state_mut());
+        assert!(r.state().objects[&modal]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        let back_name = r.state().objects[&modal]
+            .back_face
+            .as_ref()
+            .unwrap()
+            .name
+            .clone();
+        r.cast(spell).target_object(modal).resolve();
+        assert_eq!(r.state().objects[&modal].zone, Zone::Exile);
+        one_counter_upkeep(&mut r, modal);
+        pass_pair(&mut r);
+        let mut no_land = GameRunner::from_state(r.state().clone());
+        no_land.state_mut().lands_played_this_turn = 1;
+        pass_pair(&mut no_land);
+        if name == "Kazandu Mammoth" {
+            assert!(matches!(
+                no_land.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ));
+            no_land
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert_eq!(no_land.state().objects[&modal].zone, Zone::Stack);
+        } else {
+            assert!(matches!(
+                no_land.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+        pass_pair(&mut r);
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::ModalFaceChoice { .. }),
+            "both faces must be elected now: {:?}",
+            r.state().waiting_for
+        );
+        for back_face in [false, true] {
+            let mut face = GameRunner::from_state(r.state().clone());
+            face.act(GameAction::ChooseModalFace { back_face }).unwrap();
+            let played_land = name == "Branchloft Pathway" || back_face;
+            assert_eq!(
+                face.state().objects[&modal].zone,
+                if played_land {
+                    Zone::Battlefield
+                } else {
+                    Zone::Stack
+                }
+            );
+            assert_eq!(face.state().lands_played_this_turn, u8::from(played_land));
+            assert_eq!(
+                face.state().objects[&modal].name,
+                if back_face { back_name.as_str() } else { name }
+            );
+        }
+    }
+}
+
+#[test]
+fn suspend_last_counter_two_paid_sacrifices_trigger_only_once() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mountain = s.add_basic_land(P0, ManaColor::Red);
+    let bear = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let card = gargadon_in_hand(&mut s);
+    let mut r = s.build();
+    r.act(hand_action(
+        card,
+        suspend_ability_index(r.state(), card),
+        CastPaymentMode::Auto,
+    ))
+    .unwrap();
+    r.state_mut()
+        .objects
+        .get_mut(&card)
+        .unwrap()
+        .counters
+        .insert(CounterType::Time, 1);
+    for permanent in [mountain, bear] {
+        let action = legal_actions(r.state())
+            .into_iter()
+            .find(|a| matches!(a,GameAction::ActivateAbility{source_id,..} if *source_id==card))
+            .expect("Gargadon's published sacrifice");
+        r.act(action).unwrap();
+        r.act(GameAction::SelectCards {
+            cards: vec![permanent],
+        })
+        .unwrap();
+        assert_eq!(r.state().objects[&permanent].zone, Zone::Graveyard);
+        assert_eq!(time_counters(r.state(), card), 1);
+    }
+    assert_eq!(r.state().stack.len(), 2);
+    pass_pair(&mut r);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "new last-counter trigger above the older sacrifice"
+    );
+    assert_eq!(time_counters(r.state(), card), 0);
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    let mut accepted = GameRunner::from_state(r.state().clone());
+    accepted
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert_eq!(accepted.state().stack.len(), 2);
+    assert_eq!(accepted.state().stack.back().unwrap().id, card);
+    r.act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    assert_eq!(r.state().stack.len(), 1);
+    pass_pair(&mut r);
+    assert!(r.state().stack.is_empty());
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+    assert!(r.state().objects[&card].casting_permissions.is_empty());
+}
+
+#[test]
+fn suspend_last_counter_additional_cost_and_target_are_paid_during_the_spell_cast() {
+    use engine::types::ability::TargetRef;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Red);
+    s.add_basic_land(P0, ManaColor::Blue);
+    let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+    let bone = printed_card(&mut s, P0, "Bone Splinters", Zone::Hand);
+    let target = s.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut r = s.build();
+    r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+        .unwrap();
+    r.act(GameAction::SelectCards { cards: vec![bone] })
+        .unwrap();
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), bone), 4);
+    one_counter_upkeep(&mut r, bone);
+    pass_pair(&mut r);
+    let mut unpaid = GameRunner::from_state(r.state().clone());
+    engine::game::zones::move_to_zone(unpaid.state_mut(), jhoira, Zone::Graveyard, &mut vec![]);
+    pass_pair(&mut unpaid);
+    assert!(
+        matches!(unpaid.state().waiting_for, WaitingFor::Priority { .. }),
+        "no creature to sacrifice: {:?}",
+        unpaid.state().waiting_for
+    );
+    assert_eq!(unpaid.state().objects[&bone].zone, Zone::Exile);
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    let mut paid = false;
+    let mut targeted = false;
+    for _ in 0..3 {
+        match r.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => {
+                r.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .unwrap();
+                targeted = true;
+            }
+            WaitingFor::PayCost { .. } => {
+                r.act(GameAction::SelectCards {
+                    cards: vec![jhoira],
+                })
+                .unwrap();
+                paid = true;
+            }
+            WaitingFor::Priority { .. } => break,
+            ref other => panic!("unexpected Bone Splinters prompt {other:?}"),
+        }
+    }
+    assert!(paid && targeted);
+    assert_eq!(r.state().objects[&jhoira].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&target].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&bone].zone, Zone::Stack);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&target].zone, Zone::Graveyard);
+}
+
+#[test]
+fn suspend_upkeep_rechecks_exile_incarnation_and_effective_suspend() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Red);
+    let card = gargadon_in_hand(&mut s);
+    let mut r = s.build();
+    r.act(hand_action(
+        card,
+        suspend_ability_index(r.state(), card),
+        CastPaymentMode::Auto,
+    ))
+    .unwrap();
+    one_counter_upkeep(&mut r, card);
+    for moved in [false, true] {
+        let mut stale = GameRunner::from_state(r.state().clone());
+        if moved {
+            for zone in [Zone::Graveyard, Zone::Exile] {
+                engine::game::zones::move_to_zone(stale.state_mut(), card, zone, &mut vec![]);
+            }
+            stale
+                .state_mut()
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 1);
+        } else {
+            // Isolate the effective-keyword axis while leaving the captured upkeep ability in flight.
+            let obj = stale.state_mut().objects.get_mut(&card).unwrap();
+            obj.keywords
+                .retain(|kw| !matches!(kw, engine::types::keywords::Keyword::Suspend { .. }));
+            obj.base_keywords
+                .retain(|kw| !matches!(kw, engine::types::keywords::Keyword::Suspend { .. }));
+        }
+        pass_pair(&mut stale);
+        assert_eq!(time_counters(stale.state(), card), 1);
+        assert!(stale.state().stack.is_empty());
+    }
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), card), 0);
+    assert_eq!(r.state().stack.len(), 1);
+}
+
+#[test]
+fn stifling_each_suspend_trigger_preserves_the_corresponding_counter_total() {
+    for counter_upkeep in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        s.add_basic_land(P0, ManaColor::Red);
+        s.add_basic_land(P0, ManaColor::Blue);
+        let card = gargadon_in_hand(&mut s);
+        let stifle = printed_card(&mut s, P0, "Stifle", Zone::Hand);
+        let mut r = s.build();
+        r.act(hand_action(
+            card,
+            suspend_ability_index(r.state(), card),
+            CastPaymentMode::Auto,
+        ))
+        .unwrap();
+        one_counter_upkeep(&mut r, card);
+        if !counter_upkeep {
+            pass_pair(&mut r);
+        }
+        let trigger = r.state().stack.back().unwrap().id;
+        r.cast(stifle).target_object(trigger).resolve();
+        assert!(r.state().stack.is_empty());
+        assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+        assert_eq!(time_counters(r.state(), card), u32::from(counter_upkeep));
+        assert!(r.state().objects[&card].casting_permissions.is_empty());
+        if counter_upkeep {
+            one_counter_upkeep(&mut r, card);
+            pass_pair(&mut r);
+            assert_eq!(time_counters(r.state(), card), 0);
+        }
+    }
+}
+
+#[test]
+fn rift_bolt_last_counter_cast_elects_and_damages_its_target() {
+    use engine::types::ability::TargetRef;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Red);
+    let bolt=s.add_spell_to_hand_from_oracle(P0,"Rift Bolt",false,"Rift Bolt deals 3 damage to any target.\nSuspend 1—{R} (Rather than cast this card from your hand, you may pay {R} and exile it with a time counter on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)").with_mana_cost(ManaCost::Cost{generic:2,shards:vec![ManaCostShard::Red]}).id();
+    let mut r = s.build();
+    r.act(hand_action(
+        bolt,
+        suspend_ability_index(r.state(), bolt),
+        CastPaymentMode::Auto,
+    ))
+    .unwrap();
+    one_counter_upkeep(&mut r, bolt);
+    pass_pair(&mut r);
+    pass_pair(&mut r);
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    r.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Player(P1)),
+    })
+    .unwrap();
+    assert_eq!(r.state().objects[&bolt].zone, Zone::Stack);
+    let before = r.state().players[1].life;
+    pass_pair(&mut r);
+    assert_eq!(r.state().players[1].life, before - 3);
+}
+
+#[test]
+fn riftmarked_knight_keeps_its_independent_printed_last_counter_trigger() {
+    use engine::types::ability::AbilityTag;
+    use engine::types::game_state::StackEntryKind;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        s.add_basic_land(P0, ManaColor::White);
+    }
+    let knight=s.add_creature_to_hand_from_oracle(P0,"Riftmarked Knight",2,2,"Protection from black; flanking (Whenever a creature without flanking blocks this creature, the blocking creature gets -1/-1 until end of turn.)\nSuspend 3—{1}{W}{W}\nWhen the last time counter is removed from this card while it's exiled, create a 2/2 black Knight creature token with flanking, protection from white, and haste.").id();
+    let mut r = s.build();
+    r.act(hand_action(
+        knight,
+        suspend_ability_index(r.state(), knight),
+        CastPaymentMode::Auto,
+    ))
+    .unwrap();
+    one_counter_upkeep(&mut r, knight);
+    pass_pair(&mut r);
+    if matches!(r.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        r.act(GameAction::OrderTriggers { order: vec![0, 1] })
+            .unwrap();
+    }
+    assert_eq!(r.state().stack.len(), 2);
+    let tags: Vec<_> = r
+        .state()
+        .stack
+        .iter()
+        .map(|entry| {
+            let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+                panic!("expected trigger")
+            };
+            assert_eq!(ability.source_id, knight);
+            ability.context.ability_tag
+        })
+        .collect();
+    assert!(tags.contains(&Some(AbilityTag::SuspendLastCounter)) && tags.contains(&None));
+    for _ in 0..2 {
+        pass_pair(&mut r);
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            r.act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+        }
+    }
+    assert_eq!(r.state().objects[&knight].zone, Zone::Exile);
+    assert!(r
+        .state()
+        .battlefield
+        .iter()
+        .any(|id| r.state().objects[id].is_token && r.state().objects[id].name == "Knight"));
+}
+
+#[test]
+fn suspend_upkeep_uses_each_cards_owner_after_a_grant_to_a_stolen_creature() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    for color in [ManaColor::Red, ManaColor::Red, ManaColor::Blue] {
+        s.add_basic_land(P0, color);
+    }
+    let first = gargadon_in_hand(&mut s);
+    let second = gargadon_in_hand(&mut s);
+    let foreign = s
+        .add_creature(P1, "Grizzly Bears", 2, 2)
+        .controlled_by(P0)
+        .id();
+    let suspend = printed_card(&mut s, P0, "Suspend", Zone::Hand);
+    let mut r = s.build();
+    assert_eq!(r.state().objects[&foreign].controller, P0);
+    for card in [first, second] {
+        r.act(hand_action(
+            card,
+            suspend_ability_index(r.state(), card),
+            CastPaymentMode::Auto,
+        ))
+        .unwrap();
+    }
+    r.state_mut()
+        .objects
+        .get_mut(&second)
+        .unwrap()
+        .counters
+        .insert(CounterType::Time, 4);
+    r.cast(suspend).target_object(foreign).resolve();
+    assert_eq!(r.state().objects[&foreign].zone, Zone::Exile);
+    assert_eq!(time_counters(r.state(), foreign), 2);
+    for owner in [P0, P1] {
+        let mut upkeep = GameRunner::from_state(r.state().clone());
+        upkeep.state_mut().turn_number = 2;
+        upkeep.state_mut().phase = Phase::Untap;
+        upkeep.state_mut().active_player = owner;
+        upkeep.state_mut().priority_player = owner;
+        upkeep.state_mut().waiting_for = WaitingFor::Priority { player: owner };
+        pass_pair(&mut upkeep);
+        if matches!(upkeep.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+            upkeep
+                .act(GameAction::OrderTriggers { order: vec![0, 1] })
+                .unwrap();
+        }
+        assert_eq!(upkeep.state().stack.len(), if owner == P0 { 2 } else { 1 });
+        upkeep.advance_until_stack_empty();
+        assert_eq!(
+            time_counters(upkeep.state(), first),
+            if owner == P0 { 9 } else { 10 }
+        );
+        assert_eq!(
+            time_counters(upkeep.state(), second),
+            if owner == P0 { 3 } else { 4 }
+        );
+        assert_eq!(
+            time_counters(upkeep.state(), foreign),
+            if owner == P0 { 2 } else { 1 }
+        );
+    }
+}

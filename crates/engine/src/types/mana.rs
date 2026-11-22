@@ -489,6 +489,7 @@ fn ability_tag_rank(value: AbilityTag) -> u8 {
         AbilityTag::Equip => 7,
         AbilityTag::Augment => 8,
         AbilityTag::Suspend => 9,
+        AbilityTag::SuspendLastCounter => 10,
     }
 }
 

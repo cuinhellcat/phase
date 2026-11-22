@@ -37243,6 +37243,8 @@ pub enum AbilityTag {
     Equip,
     /// CR 702.62a: Indexed hand special action.
     Suspend,
+    /// CR 702.62a: Play granted by the resolving last-time-counter trigger.
+    SuspendLastCounter,
     /// Unstable Augment hand-activated combine ability.
     Augment,
 }
@@ -37264,6 +37266,7 @@ impl AbilityTag {
             AbilityTag::Equip => "equip",
             AbilityTag::Augment => "augment",
             AbilityTag::Suspend => "suspend",
+            AbilityTag::SuspendLastCounter => "suspend-last-counter",
         }
     }
 
@@ -37281,6 +37284,7 @@ impl AbilityTag {
             "equip" => Some(AbilityTag::Equip),
             "augment" => Some(AbilityTag::Augment),
             "suspend" => Some(AbilityTag::Suspend),
+            "suspend-last-counter" => Some(AbilityTag::SuspendLastCounter),
             _ => None,
         }
     }
