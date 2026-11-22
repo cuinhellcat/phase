@@ -23566,9 +23566,9 @@ fn prepared_face_mana_payable(
         })
 }
 
-/// CR 702.172a / CR 702.183a: Spree and Tiered spells require at least one
-/// payable mode with legal targets. Price each choosable mode with the cost
-/// of the elected spell face and its casting permission.
+/// CR 601.2f + CR 702.172a + CR 702.183a: Spree and Tiered spells require at
+/// least one payable mode with legal targets. Reprice the elected spell face
+/// and permission with the mode declared, so the cost floor applies last.
 fn prepared_has_payable_mode_in_flushed_state(
     state: &GameState,
     player: PlayerId,
@@ -23580,19 +23580,24 @@ fn prepared_has_payable_mode_in_flushed_state(
     else {
         return false;
     };
-    choosable.into_iter().any(|mode| {
-        let Some(mode_cost) = mode_costs.get(mode) else {
-            return false;
-        };
-        let total = restrictions::add_mana_cost(&prepared.mana_cost, mode_cost);
-        can_feasibly_pay_mana_cost_with_probe(
-            state,
-            player,
-            Some(prepared.object_id),
-            &total,
-            probe,
-        )
-    })
+    let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player);
+    stamp_prepared_cast_context(prepared, &mut ability);
+    let mut pending = pending_cast_from_prepared(prepared, ability);
+    choosable
+        .into_iter()
+        .filter_map(|mode| mode_costs.get(mode))
+        .any(|mode_cost| {
+            pending.declared_mana_additions.clear();
+            pending.declared_mana_additions.push(mode_cost.clone());
+            let total = recompute_pending_mana_total(state, player, &pending, None);
+            can_feasibly_pay_mana_cost_with_probe(
+                state,
+                player,
+                Some(prepared.object_id),
+                &total,
+                probe,
+            )
+        })
 }
 
 fn can_cast_prepared_now_with_probe(

@@ -12,7 +12,7 @@ use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, PersistedGameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, PersistedGameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
@@ -1507,9 +1507,18 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
     const DANCE: &str = "Spree (Choose one or more additional costs.)\n\
 + {1} — Search your library for a basic land card or a Desert card, put it onto the battlefield, then shuffle.\n\
 + {3} — Create an X/X green Elemental creature token, where X is the number of lands you control.";
-    for can_pay in [false, true] {
+    const TRINISPHERE: &str = "As long as this artifact is untapped, each spell that would cost less than three mana to cast costs three mana to cast. (Additional mana in the cost may be paid with any color of mana or colorless mana. For example, a spell that would cost {1}{B} to cast costs {2}{B} to cast instead.)";
+    for (with_floor, mana, can_pay) in [
+        (false, 0, false),
+        (false, 1, true),
+        (true, 2, false),
+        (true, 3, true),
+    ] {
         let mut s = GameScenario::new();
         s.at_phase(Phase::PreCombatMain);
+        if with_floor {
+            s.add_artifact_from_oracle(P1, "Trinisphere", TRINISPHERE);
+        }
         let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
         let dance = s
             .add_spell_to_hand_from_oracle(P0, "Dance of the Tumbleweeds", false, DANCE)
@@ -1522,7 +1531,9 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
             P0,
             vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
         );
-        let land = can_pay.then(|| s.add_basic_land(P0, ManaColor::Green));
+        let lands: Vec<_> = (0..mana)
+            .map(|_| s.add_basic_land(P0, ManaColor::Green))
+            .collect();
         let mut r = s.build();
         r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
             .unwrap();
@@ -1536,11 +1547,14 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
         assert_eq!(r.state().stack.len(), 1);
         assert_eq!(r.state().players[0].mana_pool.total(), 0);
         pass_pair(&mut r);
-        if let Some(land) = land {
-            assert!(matches!(
-                r.state().waiting_for,
-                WaitingFor::OptionalEffectChoice { player: P0, .. }
-            ));
+        if can_pay {
+            assert!(
+                matches!(
+                    r.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ),
+                "expected a cast offer with {mana} mana, Trinisphere present: {with_floor}"
+            );
             r.act(GameAction::DecideOptionalEffect { accept: true })
                 .unwrap();
             assert!(matches!(
@@ -1548,8 +1562,13 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
                 WaitingFor::ModeChoice { player: P0, .. }
             ));
             r.act(GameAction::SelectModes { indices: vec![0] }).unwrap();
-            assert_eq!(r.state().stack.back().unwrap().id, dance);
-            assert!(r.state().objects[&land].tapped);
+            let cast = r.state().stack.back().unwrap();
+            assert_eq!(cast.id, dance);
+            assert!(matches!(
+                cast.kind,
+                StackEntryKind::Spell { actual_mana_spent, .. } if actual_mana_spent == mana
+            ));
+            assert!(lands.iter().all(|id| r.state().objects[id].tapped));
             assert_eq!(r.state().players[0].mana_pool.total(), 0);
         } else {
             assert!(
@@ -1560,6 +1579,7 @@ fn suspend_last_counter_requires_and_charges_a_choosable_spree_mode() {
             assert_eq!(r.state().objects[&dance].zone, Zone::Exile);
             assert!(r.state().objects[&dance].casting_permissions.is_empty());
             assert!(r.state().stack.is_empty());
+            assert!(lands.iter().all(|id| !r.state().objects[id].tapped));
         }
     }
 }
