@@ -21,6 +21,7 @@ use engine::types::zones::Zone;
 const SEARCH_FOR_TOMORROW_ORACLE: &str = "Search your library for a basic land card, put it onto the battlefield, then shuffle.\n\
 Suspend 2—{G} (Rather than cast this card from your hand, you may pay {G} and exile it with two time counters on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)";
 const KILLIAN_ORACLE: &str = "Lifelink\nMenace (This creature can't be blocked except by two or more creatures.)\nSpells you cast that target a creature cost {2} less to cast.";
+const GRAFTED_IDENTITY: &str = "As an additional cost to cast this spell, sacrifice a creature.\nEnchant creature\nYou control enchanted creature.\nEnchanted creature gets +1/+1.";
 
 fn suspend_ability_index(state: &engine::types::game_state::GameState, card: ObjectId) -> usize {
     legal_actions(state)
@@ -1931,7 +1932,6 @@ fn suspend_last_counter_prices_a_required_sacrifice_with_its_creature_target() {
     use engine::types::ability::TargetRef;
 
     const YASHARN: &str = "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.";
-    const GRAFTED_IDENTITY: &str = "As an additional cost to cast this spell, sacrifice a creature.\nEnchant creature\nYou control enchanted creature.\nEnchanted creature gets +1/+1.";
     for (is_aura, with_reduction, sacrifice_prohibited) in [
         (false, true, false),
         (false, false, false),
@@ -2151,6 +2151,119 @@ fn suspend_last_counter_prices_optional_exile_before_offering_the_cast() {
             }
         ));
     }
+}
+
+#[test]
+fn normal_cost_conduit_cast_applies_killian_before_paying_grafted_identity() {
+    use engine::types::ability::TargetRef;
+    use engine::types::actions::CastChoice;
+    use engine::types::game_state::CastOfferKind;
+
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let conduit = printed_card(&mut s, P0, "Conduit of Worlds", Zone::Battlefield);
+    let aura = s
+        .add_enchantment_to_hand_from_oracle(P0, "Grafted Identity", "")
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["enchant"], GRAFTED_IDENTITY)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        })
+        .id();
+    let killian = s
+        .add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN_ORACLE)
+        .id();
+    let sacrifice = s.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let target = s.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let islands = [
+        s.add_basic_land(P0, ManaColor::Blue),
+        s.add_basic_land(P0, ManaColor::Blue),
+    ];
+
+    let mut r = s.build();
+    engine::game::zones::move_to_zone(r.state_mut(), aura, Zone::Graveyard, &mut vec![]);
+    r.act(GameAction::ActivateAbility {
+        source_id: conduit,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .unwrap();
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::CastOffer {
+            player: P0,
+            kind: CastOfferKind::GraveyardPaidCast { hit_card, .. },
+            ..
+        } if hit_card == aura
+    ));
+    assert_eq!(r.state().players[0].mana_pool.total(), 0);
+    r.act(GameAction::GraveyardPaidCastChoice {
+        choice: CastChoice::Cast,
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            &r.state().waiting_for,
+            WaitingFor::TargetSelection { player: P0, .. }
+        ),
+        "the paid cast must reach its creature target election, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(target)),
+    })
+    .unwrap();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::PayCost { player: P0, .. }
+    ));
+    r.act(GameAction::SelectCards {
+        cards: vec![sacrifice],
+    })
+    .unwrap();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    for island in islands {
+        r.act(mana_source(&r, island, ManaType::Blue)).unwrap();
+    }
+
+    let paid = r.act(GameAction::PassPriority).unwrap();
+    let sacrifices: Vec<_> = paid
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PermanentSacrificed {
+                object_id,
+                player_id,
+            } => Some((*object_id, *player_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sacrifices, [(sacrifice, P0)]);
+    assert_eq!(r.state().objects[&aura].zone, Zone::Stack);
+    assert_eq!(r.state().objects[&sacrifice].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&killian].zone, Zone::Battlefield);
+    assert_eq!(r.state().players[0].mana_pool.total(), 0);
+    assert_eq!(r.state().stack.len(), 1);
+    let cast = r.state().stack.back().unwrap();
+    assert_eq!(cast.id, aura);
+    assert_eq!(cast.ability().unwrap().targets, [TargetRef::Object(target)]);
+    assert!(matches!(
+        cast.kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 2,
+            ..
+        }
+    ));
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&target].controller, P0);
+    assert!(r.state().stack.is_empty());
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
 }
 
 #[test]

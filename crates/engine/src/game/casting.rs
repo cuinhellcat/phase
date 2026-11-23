@@ -17121,11 +17121,9 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
             Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => None,
         };
         let allowed = if force_normal_cost {
-            // A normal-cost grant leaves alternative costs open for announcement.
+            // A normal-cost grant leaves payment to the cast announcement,
+            // where targets are bound before costs are priced (CR 601.2c + CR 601.2f).
             spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
-                && required_costs.is_none_or(|costs| {
-                    prepared_declaration_offerable(&projected, player, &prepared, costs)
-                })
         } else if let Some(costs) = required_costs {
             announced_declaration_offerable(&projected, player, &prepared, costs)
         } else {
