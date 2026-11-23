@@ -9249,18 +9249,16 @@ pub(crate) fn suspend_hand_descriptor(count: u32, cost: &ManaCost) -> AbilityDef
     def
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Suspend synthesizes two exile triggers. A face with a fixed
+/// Suspend count and cost also receives the hand special action:
 ///
 ///   1. The indexed hand special action binds the printed cost and time-counter
 ///      count. The engine performs the payment and exile with counters before
 ///      returning priority. A granted bare keyword has no hand action.
 ///
-//////   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
-///      if this card is suspended, remove a time counter from it.") fires from
-///      the Exile zone (CR 702.62b: "suspended" = in exile + has time counters)
-///      via `trigger_zones = [Exile]`, gated by `TriggerConstraint::OnlyDuringYourTurn`
-///      so only the suspended card's controller's upkeep triggers it.
+///   2. The upkeep trigger checks that the card has Suspend, is in exile, and
+///      has a time counter (CR 702.62b). It removes one time counter during its
+///      controller's upkeep.
 ///
 ///   3. **Last-counter free-cast trigger** ("When the last time counter is
 ///      removed from this card, if it's exiled, you may play it without paying

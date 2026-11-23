@@ -15973,8 +15973,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
             super::casting::selected_resolution_cast_is_suspend(obj, player, index)
         })
     });
-    // An older pending cast may carry the inferred Suspend method without its
-    // origin. Preserve the completed payment and record the cast as ordinary.
+    // Old saves inferred Suspend for both the last-counter cast and other
+    // free casts from exile. Without an elected permission marker, preserve
+    // the payment and record the completed cast as ordinary.
     let casting_variant = match (is_suspend_cast, casting_variant) {
         (true, _) => CastingVariant::Suspend,
         (false, CastingVariant::Suspend) => CastingVariant::Normal,
@@ -16113,10 +16114,8 @@ fn finalize_cast_with_phyrexian_choices_inner(
             rider_installed = true;
         }
     }
-    // CR 611.2f: the rider applies from the moment the spell is put on the
-    // stack, so settle it onto the spell before the cast-time snapshots below
-    // (`snapshot_cast_spell_keywords`, `record_spell_cast_from_zone`) copy its
-    // characteristics into cast history, which later settlement can't repair.
+    // CR 611.2f: settle the stack-entry riders before taking cast snapshots.
+    // Suspend's haste grant applies when casting completes (CR 601.2i + CR 702.62a).
     if rider_installed {
         super::layers::flush_layers(state);
     }

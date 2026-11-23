@@ -13383,8 +13383,8 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::TurnFaceUpCostMove { .. } => true,
-            // CR 116.2h: foretelling is a special action; its {2} is paid before
-            // its exile move, which can then pause on a replacement.
+            // CR 116.2f + CR 116.2h: Suspend and Foretell pay before the exile
+            // move, which can pause for a replacement.
             PendingCostMoveResume::Suspend { .. } | PendingCostMoveResume::Foretell { .. } => true,
             // Cast and activation payments keep their announcement; an
             // optional payment made during a resolution does not.
@@ -14916,7 +14916,7 @@ impl ManaAbilityResume {
             | ManaAbilityResume::EndContinuousEffect { .. }
             // CR 116.2m: paying a Room's unlock cost.
             | ManaAbilityResume::RoomUnlock { .. }
-            // CR 116.2h: paying {2} to foretell a card from hand.
+            // CR 116.2f + CR 116.2h: paying for Suspend or Foretell from hand.
             | ManaAbilityResume::Suspend { .. }
             | ManaAbilityResume::Foretell { .. } => true,
             ManaAbilityResume::Priority
