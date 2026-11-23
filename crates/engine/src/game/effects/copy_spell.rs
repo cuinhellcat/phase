@@ -131,6 +131,10 @@ pub fn resolve(
         let mut copy_obj = source_obj.clone();
         // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
         crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
+        // CR 707.2: Start the copy's live keywords at its copiable baseline.
+        // A grant applying to the original alone, such as Suspend's haste,
+        // must be absent before SpellCopied observers see this new spell.
+        copy_obj.reset_keywords_to_base();
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;
         // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).

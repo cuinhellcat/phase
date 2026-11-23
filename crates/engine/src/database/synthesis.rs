@@ -9268,13 +9268,9 @@ pub(crate) fn suspend_hand_descriptor(count: u32, cost: &ManaCost) -> AbilityDef
 ///      pattern: `TriggerMode::CounterRemoved` with
 ///      `CounterTriggerFilter { Time, threshold: Some(0) }` and an optional
 ///      `Effect::CastFromZone { without_paying_mana_cost: true }` execute body.
-///      The cast itself is detected as `CastingVariant::Suspend` by
-///      `prepare_spell_cast` (keyword presence on the exile-zone source) and
-///      tagged at stack resolution as `CastVariantPaid::Suspend`. The
-///      "if creature, gains haste until you lose control" rider (CR 702.62a
-///      final sentence) is installed at stack resolution as a transient
-///      continuous effect with
-///      `Duration::ForAsLongAs { SourceControllerEquals { resolution_controller } }`.
+///      Its `SuspendLastCounter` tag identifies the chosen resolution cast.
+///      The cast pipeline gives the completed creature spell haste until its
+///      caster loses control of the spell or the permanent it becomes.
 ///
 /// Idempotent across repeated invocations (parser pipelines may re-run on the
 /// same face). Build-for-the-class: every Suspend card flows through this

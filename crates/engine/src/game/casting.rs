@@ -5315,6 +5315,25 @@ pub(super) fn selected_exile_alt_cost_permission_graveyard_replacement(
     }
 }
 
+/// CR 702.62a: The exact indexed permission issued to this caster is the
+/// authority for Suspend. The cleanup stays in that slot even when the
+/// resulting-mana-value check replaces the permission's payment terms.
+pub(super) fn selected_resolution_cast_is_suspend(
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    index: CastingPermissionIndex,
+) -> bool {
+    matches!(
+        obj.casting_permissions.get(index.0),
+        Some(CastingPermission::ExileWithAltCost {
+            granted_to: Some(grantee),
+            resolution_cleanup: Some(cleanup),
+            ..
+        }) if *grantee == player
+            && cleanup.face_policy.origin == Some(crate::types::ability::AbilityTag::SuspendLastCounter)
+    )
+}
+
 /// CR 603.2h + CR 601.2i: the CR 603.2h limit carried by the resolution cast elected
 /// for THIS cast (the selected permission's cleanup), read before the stack move drops
 /// it. Mirrors `selected_exile_alt_cost_permission_graveyard_replacement`, so a
@@ -5568,14 +5587,15 @@ pub(super) fn selected_object_cast_permission_index(
     }
 
     let selected_alt_cost = match selected_variant {
-        None | Some(CastingVariant::Normal | CastingVariant::Suspend) => obj
-            .casting_permissions
-            .iter()
-            .enumerate()
-            .find_map(|(index, permission)| {
-                exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
-                    .then_some(CastingPermissionIndex(index))
-            }),
+        None | Some(CastingVariant::Normal) => {
+            obj.casting_permissions
+                .iter()
+                .enumerate()
+                .find_map(|(index, permission)| {
+                    exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+                        .then_some(CastingPermissionIndex(index))
+                })
+        }
         // CR 702.168b + CR 118.9a: an alternative-cost-rider cast (face down,
         // Evoke, Bestow, … — and every other non-Normal variant below) never
         // elects an `ExileWithAltCost` slot — even a `NormalCost` grant only
@@ -10080,10 +10100,6 @@ fn casting_candidates(
     }
 
     if obj.zone == Zone::Exile {
-        let has_alt_cost = obj
-            .casting_permissions
-            .iter()
-            .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
         // CR 702.37c / CR 702.168b + CR 708.4: the face-down cast is a
         // candidate from exile exactly when it is a candidate from hand —
         // effective keyword present and the FaceDown prepare admitted
@@ -10095,20 +10111,6 @@ fn casting_candidates(
             && face_down_cast_is_permitted(state, player, object_id)
         {
             candidates.push(CastingVariant::FaceDown);
-        }
-        // CR 702.62a: Suspend candidate selection. Runtime-granted Suspend
-        // (CR 604.1, e.g. Jhoira of the Ghitu / The Tenth Doctor) lives in
-        // the effective off-zone keyword set, not `obj.keywords`, so query
-        // through the off-zone-aware helper to match Flashback/Retrace/
-        // Aftermath/Escape recognition in this file.
-        if has_alt_cost
-            && super::keywords::object_has_effective_keyword_kind(
-                state,
-                object_id,
-                KeywordKind::Suspend,
-            )
-        {
-            candidates.push(CastingVariant::Suspend);
         }
         if obj
             .casting_permissions
@@ -10621,6 +10623,13 @@ fn prepare_spell_cast_announced(
     } else {
         selected_object_cast_permission_index(state, obj, player, variant_override)
     };
+    let is_suspend_cast = casting_permission_index_override
+        .is_some_and(|index| selected_resolution_cast_is_suspend(obj, player, index));
+    if variant_override == Some(CastingVariant::Suspend) && !is_suspend_cast {
+        return Err(EngineError::ActionNotAllowed(
+            "Suspend requires the selected last-counter cast permission".to_string(),
+        ));
+    }
 
     // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast via static permission
     // (Realmwalker, Future Sight, Bolas's Citadel, etc.). The card must be the
@@ -10964,29 +10973,10 @@ fn prepare_spell_cast_announced(
     // permission-aware eligibility (the HasKeywordKind filter on the granting
     // rider) while keeping the default cast path for GY creatures under
     // GraveyardCastPermission unchanged.
-    // CR 702.62a: Suspend free-cast detection — when casting an exile-zone card
-    // that has `Keyword::Suspend` AND an `ExileWithAltCost` permission (granted
-    // by the synthesized last-counter trigger via `Effect::CastFromZone`), the
-    // cast is the suspend "play it without paying its mana cost" path. Mirrors
-    // Warp/Flashback's keyword-presence detection and avoids coupling
-    // `Effect::CastFromZone` to a cast-variant override field.
-    // CR 702.62a: Suspend cast detection. Reads the effective off-zone keyword
-    // set so Suspend granted at runtime by Jhoira of the Ghitu / The Tenth Doctor
-    // (CR 604.1) is recognized alongside printed Suspend.
-    let is_suspend_cast = obj.zone == Zone::Exile
-        && alt_cost_from_exile.is_some()
-        && super::keywords::object_has_effective_keyword_kind(
-            state,
-            object_id,
-            KeywordKind::Suspend,
-        );
-
     // CR 702.170d: Plot free-cast detection — when casting an exile-zone card
     // with a `CastingPermission::Plotted { turn_plotted }` (on a later turn
     // than it was plotted), the cast is the plot "without paying its mana
-    // cost" path. Mirrors `is_suspend_cast` — permission-keyed, no separate
-    // keyword-presence check (Plot is a hand-zone activated ability; once the
-    // card is in exile with the Plotted permission, the keyword's job is done).
+    // cost" path. Plot's hand-zone special action installs that permission.
     let is_plot_cast = obj.zone == Zone::Exile
         && obj
             .casting_permissions
@@ -19749,9 +19739,8 @@ fn install_resolution_cast_permission(
 /// sorcery cast while its trigger is still on the stack is not blocked by the
 /// sorcery-speed / empty-stack / active-player gates. Cascade/Discover carry
 /// the dig misses + an MV-reject disposition that bottoms/hands the hit. Suspend
-/// (CR 702.62a) carries an empty-misses / `RemainExiled` cleanup whose sole
-/// purpose is to arm that timing bypass — it has no dig and no MV gate, so it
-/// never enters the cascade reject path.
+/// (CR 702.62a) carries a `RemainExiled` cleanup with the selected origin and
+/// no dig or resulting-mana-value restriction.
 pub(super) fn initiate_cast_during_resolution(
     state: &mut GameState,
     player: PlayerId,

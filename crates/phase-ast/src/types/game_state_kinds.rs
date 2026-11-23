@@ -251,11 +251,9 @@ pub enum CastingVariant {
     /// spell resolves normally with no resolution riders.
     Spectacle,
     /// CR 702.62a: Cast from exile via Suspend's "play it without paying its
-    /// mana cost" trigger after the last time counter was removed. On resolution
-    /// of the resulting permanent, the stack handler tags
-    /// `CastVariantPaid::Suspend` and — for creature spells — installs a
-    /// transient continuous "has haste" effect that lasts as long as the
-    /// resolution-time controller still controls the permanent.
+    /// mana cost" trigger after the last time counter was removed. The selected
+    /// cast grants a creature spell haste for as long as its caster continuously
+    /// controls the spell and the permanent it becomes.
     Suspend,
     /// CR 702.170d: Cast from exile via the Plot "cast without paying its mana
     /// cost" permission during the owner's main phase on a turn after the card

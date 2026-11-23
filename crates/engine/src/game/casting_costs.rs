@@ -6,10 +6,10 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
-    BeholdCostAction, CastTimingPermission, Comparator, CostMoveOutcome, CostPaidObjectRecord,
-    CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, KickerVariant,
-    NotedManaPayment, ObjectProperty, PlayerRecipientCost, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
+    BeholdCostAction, CastTimingPermission, Comparator, ContinuousModification, CostMoveOutcome,
+    CostPaidObjectRecord, CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect,
+    KickerVariant, NotedManaPayment, ObjectProperty, PlayerRecipientCost, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
     SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
     StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
     TypedFilter, EXILE_COST_X,
@@ -15968,6 +15968,18 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .objects
         .get(&object_id)
         .map(ObjectIncarnationRef::from_object);
+    let is_suspend_cast = casting_permission_index.is_some_and(|index| {
+        state.objects.get(&object_id).is_some_and(|obj| {
+            super::casting::selected_resolution_cast_is_suspend(obj, player, index)
+        })
+    });
+    // An older pending cast may carry the inferred Suspend method without its
+    // origin. Preserve the completed payment and record the cast as ordinary.
+    let casting_variant = match (is_suspend_cast, casting_variant) {
+        (true, _) => CastingVariant::Suspend,
+        (false, CastingVariant::Suspend) => CastingVariant::Normal,
+        (false, variant) => variant,
+    };
     let stack_req =
         crate::game::zone_pipeline::ZoneMoveRequest::casting_to_stack(object_id, object_id, player);
     crate::game::zone_pipeline::move_object(state, stack_req, events);
@@ -16074,6 +16086,28 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 crate::types::ability::Duration::Permanent,
                 crate::types::ability::TargetFilter::SpecificObject { id: object_id },
                 rider.modifications,
+                None,
+            );
+            rider_installed = true;
+        }
+    }
+    if is_suspend_cast {
+        super::layers::flush_layers(state);
+        if state.objects.get(&object_id).is_some_and(|spell| {
+            spell.controller == player && spell.card_types.core_types.contains(&CoreType::Creature)
+        }) {
+            // CR 702.62a + CR 400.7a: This effect follows the creature spell to
+            // the permanent it becomes and expires on the caster's first loss of control.
+            state.add_transient_continuous_effect(
+                object_id,
+                player,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::SourceControllerEquals { player },
+                },
+                TargetFilter::SpecificObject { id: object_id },
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
                 None,
             );
             rider_installed = true;

@@ -5944,7 +5944,7 @@ pub enum CastPermissionConstraint {
 /// `None` case for a route with no additional condition.  None of these four
 /// fields has a serde default.
 ///
-/// `play_mode` is the one defaulted field. It defaults to `Cast` because every
+/// `play_mode` defaults to `Cast` because every
 /// policy serialized before the field existed was a spell-only election
 /// (CR 601.2), so its absence names exactly that route. `Play` (CR 701.18b:
 /// to play a card is to cast it or play it as a land) additionally admits a
@@ -5957,6 +5957,10 @@ pub struct ResolutionCastFacePolicy {
     pub constraint: Option<CastPermissionConstraint>,
     #[serde(default, skip_serializing_if = "CardPlayMode::is_cast")]
     pub play_mode: CardPlayMode,
+    /// CR 702.62a: The keyword trigger authorizing this election, when it grants
+    /// a "cast this way" rider. An older policy carries no cast origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<AbilityTag>,
 }
 
 impl ResolutionCastFacePolicy {
@@ -5972,6 +5976,7 @@ impl ResolutionCastFacePolicy {
             controller,
             constraint,
             play_mode: CardPlayMode::Cast,
+            origin: None,
         }
     }
 
@@ -6205,6 +6210,27 @@ mod resolution_cast_face_policy_serde_tests {
             serde_json::from_value::<Effect>(encoded).unwrap(),
             current_effect,
             "the current effect object must round-trip unchanged"
+        );
+    }
+
+    #[test]
+    fn resolution_cast_face_policy_origin_is_optional_and_round_trips() {
+        let mut face_policy = policy();
+        let legacy = serde_json::to_value(&face_policy).unwrap();
+        assert!(legacy.get("origin").is_none());
+        let decoded: ResolutionCastFacePolicy = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(decoded.origin, None);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+
+        face_policy.origin = Some(AbilityTag::SuspendLastCounter);
+        let marked = serde_json::to_value(&face_policy).unwrap();
+        assert_eq!(
+            marked["origin"],
+            serde_json::json!({ "type": "SuspendLastCounter" })
+        );
+        assert_eq!(
+            serde_json::from_value::<ResolutionCastFacePolicy>(marked).unwrap(),
+            face_policy
         );
     }
 
@@ -19469,11 +19495,8 @@ pub enum CastVariantPaid {
     /// CR 702.74a: Evoke alternative cast cost was paid from hand. Read by the
     /// synthesized intervening-if ETB sacrifice trigger.
     Evoke,
-    /// CR 702.62a: Cast as the suspend "play it without paying its mana cost"
-    /// resolution after the last time counter was removed. Tagged at stack
-    /// resolution; the runtime-installed haste static (creature spells only)
-    /// keys off this marker so a Threaten-style control swap correctly
-    /// terminates haste via `StaticCondition::SourceControllerEquals`.
+    /// CR 702.62a: Historical marker for a cast via Suspend's last-counter
+    /// trigger. Kept readable in saves written before cast-time attribution.
     Suspend,
     /// CR 702.138a + CR 702.138b: The spell that became this permanent was cast
     /// from a graveyard via its escape alternative cost. Read by the "unless it

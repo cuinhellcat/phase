@@ -2654,7 +2654,7 @@ fn resolution_cast_request_for_single_target(
     } else {
         crate::types::ability::ResolutionMvRejectAction::BottomWithMisses
     };
-    let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+    let mut face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
         freeze_resolution_cast_filter(
             state,
             ability,
@@ -2669,6 +2669,11 @@ fn resolution_cast_request_for_single_target(
         freeze_cast_permission_constraint(state, ability, constraint),
     )
     .with_play_mode(play_mode);
+    // CR 702.62a: Only the exact last-counter trigger grants the "cast this way" rider.
+    face_policy.origin = ability
+        .context
+        .ability_tag
+        .filter(|tag| *tag == crate::types::ability::AbilityTag::SuspendLastCounter);
     let cleanup = crate::types::ability::ResolutionCastCleanup {
         source_id: ability.source_id,
         offer_id: None,

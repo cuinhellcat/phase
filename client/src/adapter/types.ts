@@ -1742,6 +1742,8 @@ export interface ResolutionCastFacePolicy {
   constraint: Record<string, unknown> | null;
   /** Instruction authority; absent means "Cast". "Play" also admits a land face. */
   play_mode?: "Cast" | "Play";
+  /** The keyword trigger that supplies the selected cast's rider. */
+  origin?: { type: "SuspendLastCounter" };
 }
 
 /** Opaque identity for a delayed trigger installed by a resolution cast offer. */

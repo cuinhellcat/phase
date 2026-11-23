@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Preserve the exact Suspend cast origin through serialized resolution choices"
+}

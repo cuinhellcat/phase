@@ -7,15 +7,21 @@
 //! accepting does nothing — the sorcery never reaches the stack.
 
 use engine::ai_support::legal_actions;
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::Effect;
-use engine::types::actions::GameAction;
+use engine::types::ability::{AbilityTag, Effect};
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, PersistedGameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastOccurrence, CastOfferKind, CastPaymentMode, CastingVariant, PersistedGameState,
+    StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const SEARCH_FOR_TOMORROW_ORACLE: &str = "Search your library for a basic land card, put it onto the battlefield, then shuffle.\n\
@@ -192,6 +198,7 @@ fn search_for_tomorrow_last_counter_accept_casts_onto_stack() {
         runner.state().waiting_for,
     );
     assert_eq!(runner.state().stack.len(), 1);
+    assert_cast(&runner, search, P0, CastingVariant::Suspend, 0, false);
 }
 
 const GARGADON_ORACLE: &str = "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.";
@@ -1330,8 +1337,11 @@ fn suspend_last_counter_copy_plays_for_its_controller() {
     assert_eq!(r.state().stack.back().unwrap().id, card);
     assert_eq!(r.state().stack.back().unwrap().controller, P1);
     assert_eq!(r.state().objects[&card].owner, P0);
+    assert_cast(&r, card, P1, CastingVariant::Suspend, 0, true);
     pass_pair(&mut r);
     assert_eq!(r.state().objects[&card].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&card].controller, P1);
+    assert!(has_haste(&r, card));
     pass_pair(&mut r);
     assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
 }
@@ -1457,7 +1467,7 @@ fn suspend_review_restores_the_pending_keyword_on_the_stack_or_at_the_choice() {
         );
         r.act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
-        assert_eq!(r.state().objects[&card].zone, Zone::Stack);
+        assert_cast(&r, card, P0, CastingVariant::Suspend, 0, true);
     }
 }
 
@@ -1779,9 +1789,14 @@ fn suspend_last_counter_plays_the_elected_modal_face_immediately() {
             "both faces must be elected now: {:?}",
             r.state().waiting_for
         );
+        let saved = serde_json::to_string(&PersistedGameState::capture(r.state().clone())).unwrap();
         for back_face in [false, true] {
-            let mut face = GameRunner::from_state(r.state().clone());
-            face.act(GameAction::ChooseModalFace { back_face }).unwrap();
+            let mut face = restore(&saved);
+            assert!(matches!(
+                face.state().waiting_for,
+                WaitingFor::ModalFaceChoice { .. }
+            ));
+            let result = face.act(GameAction::ChooseModalFace { back_face }).unwrap();
             let played_land = name == "Branchloft Pathway" || back_face;
             assert_eq!(
                 face.state().objects[&modal].zone,
@@ -1792,6 +1807,15 @@ fn suspend_last_counter_plays_the_elected_modal_face_immediately() {
                 }
             );
             assert_eq!(face.state().lands_played_this_turn, u8::from(played_land));
+            if played_land {
+                assert!(!result
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::SpellCast { .. })));
+                assert_eq!(face.state().objects[&modal].cast_occurrence, None);
+            } else {
+                assert_cast(&face, modal, P0, CastingVariant::Suspend, 0, true);
+            }
             assert_eq!(
                 face.state().objects[&modal].name,
                 if back_face { back_name.as_str() } else { name }
@@ -2867,4 +2891,516 @@ fn suspend_upkeep_uses_each_cards_owner_after_a_grant_to_a_stolen_creature() {
             if owner == P0 { 2 } else { 1 }
         );
     }
+}
+
+fn has_haste(r: &GameRunner, card: ObjectId) -> bool {
+    engine::game::keywords::object_has_effective_keyword_kind(r.state(), card, KeywordKind::Haste)
+}
+
+fn assert_cast(
+    r: &GameRunner,
+    card: ObjectId,
+    caster: PlayerId,
+    variant: CastingVariant,
+    mana: u32,
+    haste: bool,
+) -> CastOccurrence {
+    let state = r.state();
+    let entry = state.stack.iter().find(|entry| entry.id == card).unwrap();
+    assert!(
+        matches!(
+            entry.kind,
+            StackEntryKind::Spell { casting_variant, actual_mana_spent, .. }
+                if casting_variant == variant && actual_mana_spent == mana
+        ),
+        "expected {variant:?} with {mana} mana spent, got {:?}",
+        entry.kind
+    );
+    assert_eq!(entry.controller, caster);
+    let paid = &state.stack_paid_facts[&card];
+    assert_eq!(paid.casting_variant, variant);
+    assert_eq!(paid.actual_mana_spent, mana);
+    let spell = &state.objects[&card];
+    assert_eq!(spell.zone, Zone::Stack);
+    let occurrence = spell
+        .cast_occurrence
+        .expect("actual cast has a current occurrence");
+    assert_eq!(occurrence.caster, caster);
+    let record =
+        &state.spells_cast_this_turn_by_player[&caster][occurrence.turn_journal_index as usize];
+    assert_eq!(record.spell_object_id, Some(card));
+    assert_eq!(record.cast_variant, variant);
+    assert_eq!(has_haste(r, card), haste, "effective haste on stack");
+    assert_eq!(
+        spell.cast_spell_keywords.contains(&Keyword::Haste),
+        haste,
+        "cast keyword snapshot"
+    );
+    assert_eq!(
+        record.keywords.contains(&Keyword::Haste),
+        haste,
+        "cast history keywords"
+    );
+    occurrence
+}
+
+fn assert_gargadon_attack(r: &mut GameRunner, card: ObjectId, bear: ObjectId, can_attack: bool) {
+    let start_turn = r.state().turn_number;
+    r.advance_to_combat();
+    assert_eq!(r.state().turn_number, start_turn);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    let target = AttackTarget::Player(P1);
+    if can_attack {
+        r.declare_attackers(&[(card, target), (bear, target)])
+            .unwrap();
+    } else {
+        let error = r.declare_attackers(&[(card, target)]).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("summoning sickness"),
+            "{error:?}"
+        );
+        r.declare_attackers(&[(bear, target)])
+            .expect("the previously controlled creature can attack");
+    }
+}
+
+#[test]
+fn suspend_gargadon_paid_sacrifices_and_hard_cast_have_distinct_same_turn_attacks() {
+    for suspend in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let bear = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let lands: Vec<_> = (0..10)
+            .map(|_| s.add_basic_land(P0, ManaColor::Red))
+            .collect();
+        let card = gargadon_in_hand(&mut s);
+        let mut r = s.build();
+        let turn = r.state().turn_number;
+
+        if suspend {
+            let index = suspend_ability_index(r.state(), card);
+            r.act(hand_action(card, index, CastPaymentMode::Auto))
+                .unwrap();
+            assert_eq!(time_counters(r.state(), card), 10);
+            assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+            for (i, land) in lands.into_iter().enumerate() {
+                let index = suspend_ability_index(r.state(), card);
+                r.act(hand_action(card, index, CastPaymentMode::Auto))
+                    .unwrap();
+                r.act(GameAction::SelectCards { cards: vec![land] })
+                    .unwrap();
+                assert_eq!(r.state().objects[&land].zone, Zone::Graveyard);
+                pass_pair(&mut r);
+                assert_eq!(time_counters(r.state(), card), 9 - i as u32);
+            }
+            assert!(matches!(&r.state().stack.back().unwrap().kind,
+                StackEntryKind::TriggeredAbility { ability, .. }
+                    if ability.context.ability_tag == Some(AbilityTag::SuspendLastCounter)));
+            pass_pair(&mut r);
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            r.act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert_cast(&r, card, P0, CastingVariant::Suspend, 0, true);
+        } else {
+            r.cast(card).commit();
+            assert_cast(&r, card, P0, CastingVariant::Normal, 10, false);
+        }
+        pass_pair(&mut r);
+        let permanent = &r.state().objects[&card];
+        assert_eq!(
+            (permanent.zone, permanent.controller),
+            (Zone::Battlefield, P0)
+        );
+        assert_eq!((permanent.power, permanent.toughness), (Some(9), Some(7)));
+        assert_eq!(has_haste(&r, card), suspend);
+        assert_eq!(r.state().turn_number, turn);
+        assert_gargadon_attack(&mut r, card, bear, suspend);
+    }
+}
+
+fn discover_gargadon() -> (GameRunner, ObjectId, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let bear = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    for _ in 0..7 {
+        s.add_basic_land(P0, ManaColor::Red);
+    }
+    let card = gargadon_in_hand(&mut s);
+    let discover = printed_card(&mut s, P0, "Hit the Mother Lode", Zone::Hand);
+    let mut r = s.build();
+    engine::game::zones::move_to_zone(r.state_mut(), card, Zone::Library, &mut Vec::new());
+    r.cast(discover).resolve();
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::CastOffer { kind: CastOfferKind::Discover { hit_card, .. }, .. } if hit_card == card
+    ));
+    r.act(GameAction::DiscoverChoice {
+        choice: CastChoice::Cast,
+    })
+    .unwrap();
+    (r, card, bear)
+}
+
+#[test]
+fn suspend_keyword_does_not_make_discover_a_suspend_cast() {
+    let (mut r, card, bear) = discover_gargadon();
+    assert_cast(&r, card, P0, CastingVariant::Normal, 0, false);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&card].zone, Zone::Battlefield);
+    assert!(!has_haste(&r, card));
+    assert_gargadon_attack(&mut r, card, bear, false);
+}
+
+#[test]
+fn suspend_legacy_finalized_spell_method_does_not_grant_haste() {
+    let (mut r, card, bear) = discover_gargadon();
+    let occurrence = assert_cast(&r, card, P0, CastingVariant::Normal, 0, false);
+    // A finalized free cast recorded by the old inference, with its historical
+    // method, payment and cast identity intact but without a persisted grant.
+    let state = r.state_mut();
+    let StackEntryKind::Spell {
+        casting_variant, ..
+    } = &mut state.stack.back_mut().unwrap().kind
+    else {
+        panic!("Discover must have cast the spell")
+    };
+    *casting_variant = CastingVariant::Suspend;
+    state
+        .stack_paid_facts
+        .get_mut(&card)
+        .unwrap()
+        .casting_variant = CastingVariant::Suspend;
+    let journal = occurrence.turn_journal_index as usize;
+    state.spells_cast_this_turn_by_player.get_mut(&P0).unwrap()[journal].cast_variant =
+        CastingVariant::Suspend;
+    state.spells_cast_this_game_by_player.get_mut(&P0).unwrap()[journal].cast_variant =
+        CastingVariant::Suspend;
+    let saved = serde_json::to_string(&PersistedGameState::capture(r.state().clone())).unwrap();
+    let mut restored = restore(&saved);
+    assert_eq!(
+        assert_cast(&restored, card, P0, CastingVariant::Suspend, 0, false),
+        occurrence
+    );
+    pass_pair(&mut restored);
+    assert_eq!(restored.state().objects[&card].zone, Zone::Battlefield);
+    assert!(!has_haste(&restored, card));
+    assert_eq!(
+        restored.state().spells_cast_this_turn_by_player[&P0][journal].cast_variant,
+        CastingVariant::Suspend
+    );
+    assert_gargadon_attack(&mut restored, card, bear, false);
+}
+
+fn accept_last_counter(r: &mut GameRunner) {
+    pass_pair(r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ));
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+}
+
+#[test]
+fn suspend_gargadon_first_loss_of_stack_control_ends_haste() {
+    let mut steal = None;
+    let mut reclaim = None;
+    let (mut r, card) = gargadon_at_last_counter(|s| {
+        steal = Some(printed_card(s, P1, "Aethersnatch", Zone::Hand));
+        reclaim = Some(printed_card(s, P0, "Aethersnatch", Zone::Hand));
+        for p in [P0, P1] {
+            for _ in 0..6 {
+                s.add_basic_land(p, ManaColor::Blue);
+            }
+        }
+    });
+    accept_last_counter(&mut r);
+    let occurrence = assert_cast(&r, card, P0, CastingVariant::Suspend, 0, true);
+    let saved = serde_json::to_string(&PersistedGameState::capture(r.state().clone())).unwrap();
+    let mut r = restore(&saved);
+    assert_eq!(
+        assert_cast(&r, card, P0, CastingVariant::Suspend, 0, true),
+        occurrence
+    );
+
+    r.act(GameAction::PassPriority).unwrap();
+    let steal = steal.unwrap();
+    r.cast(steal).target_object(card).commit();
+    assert_cast(&r, steal, P1, CastingVariant::Normal, 6, false);
+    pass_pair(&mut r);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P1, .. }
+    ));
+    r.act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    assert_eq!(r.state().objects[&card].controller, P1);
+    assert_eq!(r.state().objects[&card].zone, Zone::Stack);
+    assert!(!has_haste(&r, card), "first loss while still a spell");
+    assert_eq!(r.state().objects[&card].cast_occurrence, Some(occurrence));
+    assert!(r.state().objects[&card]
+        .cast_spell_keywords
+        .contains(&Keyword::Haste));
+
+    for regained in [false, true] {
+        let mut branch = GameRunner::from_state(r.state().clone());
+        let controller = if regained { P0 } else { P1 };
+        if regained {
+            let reclaim = reclaim.unwrap();
+            branch.cast(reclaim).target_object(card).commit();
+            assert_cast(&branch, reclaim, P0, CastingVariant::Normal, 6, false);
+            pass_pair(&mut branch);
+            assert!(matches!(
+                branch.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            branch
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+        }
+        assert_eq!(branch.state().objects[&card].controller, controller);
+        assert_eq!(branch.state().objects[&card].zone, Zone::Stack);
+        assert_eq!(
+            branch.state().objects[&card].cast_occurrence,
+            Some(occurrence)
+        );
+        assert!(
+            !has_haste(&branch, card),
+            "regaining the spell cannot restart the rider"
+        );
+        pass_pair(&mut branch);
+        assert_eq!(branch.state().objects[&card].zone, Zone::Battlefield);
+        assert_eq!(branch.state().objects[&card].controller, controller);
+        assert!(!has_haste(&branch, card));
+    }
+}
+
+#[test]
+fn suspend_gargadon_first_loss_of_permanent_control_ends_haste() {
+    let mut control = None;
+    let mut disenchant = None;
+    let (mut r, card) = gargadon_at_last_counter(|s| {
+        // Same exact control text as Mind Control, with the Aura and Enchant
+        // metadata supplied by the committed card fixture.
+        control = Some(printed_card(s, P1, "Control Magic", Zone::Hand));
+        disenchant = Some(printed_card(s, P0, "Disenchant", Zone::Hand));
+        for _ in 0..4 {
+            s.add_basic_land(P1, ManaColor::Blue);
+        }
+        for _ in 0..2 {
+            s.add_basic_land(P0, ManaColor::White);
+        }
+        for player in [P0, P1] {
+            s.with_library_top(player, &["Island"]);
+        }
+    });
+    accept_last_counter(&mut r);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&card].zone, Zone::Battlefield);
+    assert!(has_haste(&r, card));
+
+    r.advance_to_combat();
+    r.declare_attackers(&[]).unwrap();
+    r.advance_to_end_step();
+    assert_eq!(r.state().phase, Phase::End);
+    r.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(
+        (r.state().active_player, r.state().phase),
+        (P1, Phase::PreCombatMain)
+    );
+    let control = control.unwrap();
+    r.cast(control).target_object(card).commit();
+    assert_cast(&r, control, P1, CastingVariant::Normal, 4, false);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&control].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&card].controller, P1);
+    assert!(!has_haste(&r, card));
+    r.act(GameAction::PassPriority).unwrap();
+    let disenchant = disenchant.unwrap();
+    r.cast(disenchant).target_object(control).commit();
+    assert_cast(&r, disenchant, P0, CastingVariant::Normal, 2, false);
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&control].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&card].controller, P0);
+    assert!(!has_haste(&r, card));
+}
+
+#[test]
+fn suspend_gargadon_live_grant_does_not_copy_or_survive_remand() {
+    let mut copy = None;
+    let mut counter = None;
+    let (mut r, card) = gargadon_at_last_counter(|s| {
+        copy = Some(printed_card(s, P0, "Double Major", Zone::Hand));
+        counter = Some(printed_card(s, P1, "Remand", Zone::Hand));
+        s.add_basic_land(P0, ManaColor::Blue);
+        s.add_basic_land(P0, ManaColor::Green);
+        for _ in 0..10 {
+            s.add_basic_land(P0, ManaColor::Red);
+        }
+        for _ in 0..2 {
+            s.add_basic_land(P1, ManaColor::Blue);
+        }
+        for player in [P0, P1] {
+            s.with_library_top(player, &["Island"]);
+        }
+    });
+    accept_last_counter(&mut r);
+    let first = assert_cast(&r, card, P0, CastingVariant::Suspend, 0, true);
+
+    let mut copied = GameRunner::from_state(r.state().clone());
+    let copy = copy.unwrap();
+    copied.cast(copy).target_object(card).commit();
+    assert_cast(&copied, copy, P0, CastingVariant::Normal, 2, false);
+    copied.act(GameAction::PassPriority).unwrap();
+    let resolution = copied.act(GameAction::PassPriority).unwrap();
+    let copy_entry = copied.state().stack.back().unwrap();
+    let copy_id = copy_entry.id;
+    assert_ne!(copy_id, card);
+    assert!(matches!(
+        copy_entry.kind,
+        StackEntryKind::Spell {
+            casting_variant: CastingVariant::Suspend,
+            ..
+        }
+    ));
+    assert!(resolution.events.iter().any(|event| matches!(event,
+        GameEvent::SpellCopied { original_id, object_id: id, .. } if *original_id == card && *id == copy_id)));
+    assert!(has_haste(&copied, card));
+    assert!(!has_haste(&copied, copy_id));
+    assert!(
+        !copied.state().objects[&copy_id].has_keyword(&Keyword::Haste),
+        "the copy's settled keyword cache must also exclude the original's haste"
+    );
+    assert_eq!(copied.state().objects[&card].cast_occurrence, Some(first));
+    assert_eq!(copied.state().objects[&copy_id].cast_occurrence, None);
+    let history = &copied.state().spells_cast_this_turn_by_player[&P0];
+    assert_eq!(history.len(), 2, "only Gargadon and Double Major were cast");
+    assert!(history
+        .iter()
+        .all(|record| record.spell_object_id != Some(copy_id)));
+    pass_pair(&mut copied);
+    assert_eq!(copied.state().objects[&copy_id].zone, Zone::Battlefield);
+    assert!(copied.state().objects[&copy_id].is_token);
+    assert!(!has_haste(&copied, copy_id));
+
+    r.act(GameAction::PassPriority).unwrap();
+    r.cast(counter.unwrap()).target_object(card).resolve();
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+    assert_eq!(r.state().objects[&card].cast_occurrence, None);
+    assert!(!r.state().stack_paid_facts.contains_key(&card));
+    assert!(!has_haste(&r, card));
+
+    r.advance_to_phase(Phase::PreCombatMain);
+    r.cast(card).commit();
+    let second = assert_cast(&r, card, P0, CastingVariant::Normal, 10, false);
+    assert_ne!(second, first);
+    let history = &r.state().spells_cast_this_turn_by_player[&P0];
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[first.turn_journal_index as usize].cast_variant,
+        CastingVariant::Suspend
+    );
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&card].zone, Zone::Battlefield);
+    assert!(!has_haste(&r, card));
+}
+
+#[test]
+fn suspend_granted_creature_cast_keeps_origin_through_save_and_payment() {
+    use engine::types::ability::CastingPermission;
+    use engine::types::game_state::CostResume;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_basic_land(P0, ManaColor::Red);
+    s.add_basic_land(P0, ManaColor::Blue);
+    let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+    let arbiter = printed_card(&mut s, P0, "Arbiter of Woe", Zone::Hand);
+    let prey = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut r = s.build();
+    r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+        .unwrap();
+    r.act(GameAction::SelectCards {
+        cards: vec![arbiter],
+    })
+    .unwrap();
+    pass_pair(&mut r);
+    assert_eq!(r.state().objects[&arbiter].zone, Zone::Exile);
+    assert_eq!(time_counters(r.state(), arbiter), 4);
+    one_counter_upkeep(&mut r, arbiter);
+    pass_pair(&mut r);
+    accept_last_counter(&mut r);
+    assert!(
+        matches!(&r.state().waiting_for, WaitingFor::PayCost { choices, .. } if choices.contains(&prey))
+    );
+
+    let WaitingFor::PayCost {
+        resume: CostResume::SpellCost { spell, .. } | CostResume::Spell { spell },
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!("expected the indexed spell's sacrifice cost continuation")
+    };
+    assert_eq!(spell.object_id, arbiter);
+    assert_eq!(spell.casting_variant, CastingVariant::Suspend);
+    let index = spell.casting_permission_index.unwrap();
+    let expect_origin = |runner: &GameRunner| {
+        assert!(matches!(
+            runner.state().objects[&arbiter].casting_permissions.get(index.0),
+            Some(CastingPermission::ExileWithAltCost { resolution_cleanup: Some(cleanup), .. })
+                if cleanup.face_policy.origin == Some(AbilityTag::SuspendLastCounter)
+        ));
+    };
+    expect_origin(&r);
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(r.state().clone())).unwrap();
+    let mut cancelled = restore(&saved);
+    cancelled.act(GameAction::CancelCast).unwrap();
+    assert_eq!(cancelled.state().objects[&arbiter].zone, Zone::Exile);
+    assert_eq!(cancelled.state().objects[&prey].zone, Zone::Battlefield);
+    assert!(cancelled.state().objects[&arbiter]
+        .casting_permissions
+        .is_empty());
+    assert!(cancelled.state().pending_cast.is_none());
+    assert!(cancelled
+        .state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .is_none_or(|history| history
+            .iter()
+            .all(|record| record.spell_object_id != Some(arbiter))));
+    assert!(!has_haste(&cancelled, arbiter));
+
+    let mut restored = restore(&saved);
+    expect_origin(&restored);
+    restored
+        .act(GameAction::SelectCards { cards: vec![prey] })
+        .unwrap();
+    assert_eq!(restored.state().objects[&prey].zone, Zone::Graveyard);
+    assert_cast(&restored, arbiter, P0, CastingVariant::Suspend, 0, true);
+
+    // Older pending states can carry the inferred method but lack the receipt's origin.
+    let mut legacy = restore(&saved);
+    let object = legacy.state_mut().objects.get_mut(&arbiter).unwrap();
+    let CastingPermission::ExileWithAltCost {
+        resolution_cleanup: Some(cleanup),
+        ..
+    } = &mut object.casting_permissions[index.0]
+    else {
+        panic!("expected the selected resolution permission")
+    };
+    cleanup.face_policy.origin = None;
+    let mut legacy = restore(
+        &serde_json::to_string(&PersistedGameState::capture(legacy.state().clone())).unwrap(),
+    );
+    legacy
+        .act(GameAction::SelectCards { cards: vec![prey] })
+        .unwrap();
+    assert_eq!(legacy.state().objects[&prey].zone, Zone::Graveyard);
+    assert_cast(&legacy, arbiter, P0, CastingVariant::Normal, 0, false);
 }
