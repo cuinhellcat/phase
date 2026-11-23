@@ -42,8 +42,6 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
-#[cfg(test)]
-use crate::types::counter::CounterType;
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
