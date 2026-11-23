@@ -6794,7 +6794,7 @@ pub struct DamageAmountThreshold {
 /// (`crates/phase-server/src/persistence.rs` deserializing a
 /// `PersistedSession` whose `state` is a `PersistedGameState`, and
 /// `crates/server-core/src/persist.rs`), and the in-repo shared card fixture
-/// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
+/// `crates/engine/tests/fixtures/integration_cards/`, which already
 /// carries legacy `["GE",5]` / `["EQ",1]` arrays.
 /// Write-side counterpart to [`deserialize_damage_amount_compat`]: `PerSource`
 /// is the pre-axis pole, so it is emitted as the legacy tuple `["GE", 6]` —
@@ -10172,6 +10172,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -11037,6 +11038,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -12345,6 +12347,13 @@ impl TurnWindow {
     }
 }
 
+/// Time span of a completed-cycling history read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CyclingHistoryWindow {
+    ThisTurn,
+    ThisGame,
+}
+
 /// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
 ///
 /// Parameterizes the player whose hand size, life total, or other per-player
@@ -13430,6 +13439,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
@@ -15111,6 +15121,14 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
+    /// CR 702.29a + CR 702.29e + CR 702.29f: Completed cycling activations,
+    /// including typecycling, optionally restricted to a recorded card name.
+    CardsCycled {
+        scope: CountScope,
+        window: CyclingHistoryWindow,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// CR 122.1 + CR 122.6: Count counters put this turn by `actor` on objects
     /// matching `target`. `counters` narrows the counter kind; `CounterMatch::Any`
     /// counts every counter type. This parameterizes the legacy boolean
@@ -15398,6 +15416,7 @@ impl QuantityRef {
             | QuantityRef::NotedNumber
             | QuantityRef::AttackedThisTurn { .. }
             | QuantityRef::DescendedThisTurn
+            | QuantityRef::CardsCycled { .. }
             | QuantityRef::SpellsCastThisGame { .. }
             | QuantityRef::CounterAddedThisTurn { .. }
             | QuantityRef::DungeonsCompleted
@@ -15557,6 +15576,7 @@ impl QuantityRef {
             | QuantityRef::PlayerChosenNumber { .. }
             | QuantityRef::NotedNumber
             | QuantityRef::DescendedThisTurn
+            | QuantityRef::CardsCycled { .. }
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
             | QuantityRef::CardsDrawnLastTurn { .. }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
@@ -15670,6 +15690,7 @@ impl QuantityRef {
             | QuantityRef::NotedNumber
             | QuantityRef::AttackedThisTurn { .. }
             | QuantityRef::DescendedThisTurn
+            | QuantityRef::CardsCycled { .. }
             | QuantityRef::SpellsCastThisGame { .. }
             | QuantityRef::CounterAddedThisTurn { .. }
             | QuantityRef::DungeonsCompleted
@@ -16552,6 +16573,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::PlayerCount { .. } | QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. } | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::SpellsCast { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
         | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
@@ -29049,6 +29071,7 @@ pub struct QuantitySlotDerivation {
 /// reads a value that needs no target slot.
 pub fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<QuantitySlotDerivation> {
     match qty {
+        QuantityRef::CardsCycled { .. } => None,
         // CR 208.1: power/toughness are creature numbers — the target slot is a creature.
         QuantityRef::Power {
             scope: ObjectScope::Target,
@@ -29487,6 +29510,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::TargetObjectManaValue { .. }
@@ -45957,7 +45981,7 @@ mod tests {
     }
 
     fn legacy_worship_draw_replacement() -> serde_json::Value {
-        // Witnessed in integration_cards.json.gz at the original PR base.
+        // Witnessed in integration_cards/ at the original PR base.
         serde_json::json!({
             "type": "CreateDrawReplacement",
             "replacement_effect": { "type": "GainLife", "amount": { "type": "Fixed", "value": 5 } }
@@ -54560,6 +54584,44 @@ mod spellbook_selection_serde_tests {
         assert!(
             err.to_string().contains("duplicate field"),
             "expected a duplicate-field error, got {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_serde_tests {
+    use super::*;
+
+    #[test]
+    fn phase3_v6_cycling_quantity_roundtrips_and_legacy_cast_history_decodes() {
+        let named = "Yidaro, Wandering Monster".to_owned();
+        for window in [
+            CyclingHistoryWindow::ThisTurn,
+            CyclingHistoryWindow::ThisGame,
+        ] {
+            for name in [None, Some(named.clone())] {
+                let expected_name = name
+                    .as_ref()
+                    .map(|value| serde_json::to_value(value).unwrap());
+                let qty = QuantityRef::CardsCycled {
+                    scope: CountScope::Controller,
+                    window,
+                    name,
+                };
+                let wire = serde_json::to_value(&qty).unwrap();
+                assert_eq!(wire["type"], "CardsCycled");
+                assert_eq!(wire["window"], serde_json::to_value(window).unwrap());
+                assert_eq!(wire.get("name"), expected_name.as_ref());
+                assert_eq!(serde_json::from_value::<QuantityRef>(wire).unwrap(), qty);
+                assert!(quantity_ref_target_slot_spec(&qty).is_none());
+            }
+        }
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(r#"{"type":"SpellsCastThisGame"}"#).unwrap(),
+            QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: None
+            },
         );
     }
 }
