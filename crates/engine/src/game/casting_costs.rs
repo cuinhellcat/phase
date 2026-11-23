@@ -11902,7 +11902,7 @@ pub(super) fn required_declaration_offerable(
     required: &AbilityCost,
     residual: Option<&AbilityCost>,
 ) -> Result<bool, EngineError> {
-    required_declaration_offerable_using(
+    declaration_offerable_with_defiler_using(
         state,
         player,
         pending,
@@ -11912,7 +11912,9 @@ pub(super) fn required_declaration_offerable(
     )
 }
 
-pub(super) fn required_declaration_offerable_using(
+/// Price a viable additional-cost declaration with the Defiler life payment
+/// that can accompany it, using the same reservation for either offer pricer.
+pub(super) fn declaration_offerable_with_defiler_using(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
@@ -22275,7 +22277,7 @@ mod tests {
             for (available, payable) in [(5, false), (6, true)] {
                 state.players[0].life = available;
                 assert_eq!(
-                    required_declaration_offerable_using(
+                    declaration_offerable_with_defiler_using(
                         &state,
                         P0,
                         &pending,

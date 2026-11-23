@@ -17115,33 +17115,21 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
         record_resolution_cast_projection_measurement(|measurements| {
             measurements.projected_target_checks += 1;
         });
-        let price_modes = !force_normal_cost
-            && prepared
-                .modal
-                .as_ref()
-                .is_some_and(|modal| !modal.mode_costs.is_empty());
         let required_costs = match &object.additional_cost {
             Some(AdditionalCost::Required(cost)) => Some(std::slice::from_ref(cost)),
             Some(AdditionalCost::Choice(choices)) => Some(choices.as_slice()),
             Some(AdditionalCost::Optional { .. } | AdditionalCost::Kicker { .. }) | None => None,
         };
-        let allowed = if let Some(costs) = required_costs.filter(|_| !force_normal_cost) {
-            announced_declaration_offerable(&projected, player, &prepared, costs)
-        } else if price_modes {
-            announced_mana_payable_in_flushed_state(&projected, player, &prepared, None)
-        } else {
+        let allowed = if force_normal_cost {
+            // A normal-cost grant leaves alternative costs open for announcement.
             spell_has_legal_targets_in_flushed_state(&projected, object.id, player)
-                && match required_costs {
-                    Some(costs) => {
-                        prepared_declaration_offerable(&projected, player, &prepared, costs)
-                    }
-                    // A normal-cost grant leaves alternative costs open for announcement.
-                    // A replacement cost is elected already, including a free suspend cast.
-                    None => {
-                        force_normal_cost
-                            || prepared_face_mana_payable(&projected, player, &prepared, None)
-                    }
-                }
+                && required_costs.is_none_or(|costs| {
+                    prepared_declaration_offerable(&projected, player, &prepared, costs)
+                })
+        } else if let Some(costs) = required_costs {
+            announced_declaration_offerable(&projected, player, &prepared, costs)
+        } else {
+            announced_mana_payable_in_flushed_state(&projected, player, &prepared, None, true)
         };
         if back_face {
             legality.back = allowed;
@@ -23597,7 +23585,7 @@ fn announced_declaration_offerable(
                 declaration_mana_lower_bound(state, player, pending, &targeting, exile_reduction)
             };
             choices.iter().any(|cost| {
-                casting_costs::required_declaration_offerable_using(
+                casting_costs::declaration_offerable_with_defiler_using(
                     state,
                     player,
                     &pending,
@@ -23989,7 +23977,7 @@ fn can_cast_prepared_now_with_probe(
         .is_some_and(|m| !m.mode_costs.is_empty())
     {
         return with_flushed_cast_state(state, player, probe, |flushed| {
-            announced_mana_payable_in_flushed_state(flushed, player, prepared, probe)
+            announced_mana_payable_in_flushed_state(flushed, player, prepared, probe, false)
         });
     }
 
@@ -24099,7 +24087,7 @@ fn target_dependent_reduction_makes_payable(
     }
     with_flushed_cast_state(state, player, probe, |flushed| {
         (!layers_dirty || target_dependent_cost_reduction_present(flushed, player, prepared))
-            && announced_mana_payable_in_flushed_state(flushed, player, prepared, probe)
+            && announced_mana_payable_in_flushed_state(flushed, player, prepared, probe, false)
     })
 }
 
@@ -24117,12 +24105,43 @@ fn announced_mana_payable_in_flushed_state(
     player: PlayerId,
     prepared: &PreparedSpellCast,
     probe: Option<&PriorityCastProbe>,
+    for_resolution: bool,
 ) -> bool {
     let resolved = resolved_spell_for_pricing(prepared, player);
-    let chains = target_pricing_chains(state, player, prepared, &resolved, false);
+    // CR 601.2b-c: Some targets depend on X or an additional cost choice.
+    if for_resolution
+        && (requires_additional_cost_declaration_before_targets(&resolved)
+            || ability_target_legality_needs_chosen_x(
+                &resolved,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|def| def.distribute.as_ref()),
+            ))
+    {
+        return spell_has_legal_targets_in_flushed_state(state, prepared.object_id, player)
+            && prepared_face_mana_payable(state, player, prepared, probe);
+    }
+    let chains = target_pricing_chains(state, player, prepared, &resolved, for_resolution);
     if chains.is_empty() {
         return false;
     }
+    // CR 601.2b + CR 601.2f: an optional exile declaration can make the
+    // elected replacement cost payable after increases.
+    let optional_exile = if for_resolution {
+        state.objects.get(&prepared.object_id).and_then(|object| {
+            match object.additional_cost.as_ref() {
+                Some(AdditionalCost::Optional { cost, .. })
+                    if casting_costs::is_exile_any_number_effect_cost(cost) =>
+                {
+                    Some(cost)
+                }
+                _ => None,
+            }
+        })
+    } else {
+        None
+    };
     let defiler =
         casting_costs::defiler_reduction_entry_if_affordable(state, player, prepared.object_id);
     // One priced cast per reduction set (with and without the Defiler
@@ -24152,14 +24171,19 @@ fn announced_mana_payable_in_flushed_state(
     let plain_cast = collect_cast(false);
     let defiler_cast = defiler.is_some().then(|| collect_cast(true));
     let floors = CollectedCostFloors::collect_target_independent(&view);
+    let pending_for =
+        |pending: &PendingCast, chosen: &ResolvedAbility, mode_cost: Option<&ManaCost>| {
+            let mut pending = pending.clone();
+            *pending.ability = chosen.clone();
+            pending.declared_mana_additions.extend(mode_cost.cloned());
+            pending
+        };
     let price =
         |(pending, ctx, modifiers): &(PendingCast, CostFinalizeContext, CollectedCostModifiers),
          chosen: &ResolvedAbility,
          mode_cost: Option<&ManaCost>,
          target_dependent: &(Vec<CostModification>, Vec<u32>)| {
-            let mut pending = pending.clone();
-            *pending.ability = chosen.clone();
-            pending.declared_mana_additions.extend(mode_cost.cloned());
+            let pending = pending_for(pending, chosen, mode_cost);
             let collected = CollectedCastCosts::seeded(
                 modifiers.with_target_dependent(target_dependent.0.clone()),
                 floors.with_target_dependent(target_dependent.1.clone()),
@@ -24188,19 +24212,23 @@ fn announced_mana_payable_in_flushed_state(
     // every target-gated reduction and no target-gated raise or floor (a
     // reduction never raises a total, a raise or floor never lowers one).
     // If even that is unpayable, every assignment is, however many exist.
-    let best_case = (
-        collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
-            .into_iter()
-            .filter(|modification| !modification.is_raise)
-            .collect(),
-        Vec::new(),
-    );
+    let best_case = (!for_resolution).then(|| {
+        (
+            collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
+                .into_iter()
+                .filter(|modification| !modification.is_raise)
+                .collect(),
+            Vec::new(),
+        )
+    });
     let best_case_payable = |chain: &&TargetPricingChain| {
-        let mode_cost = chain.mode_cost.as_ref();
-        payable(&price(&plain_cast, &chain.ability, mode_cost, &best_case))
-            || defiler_cast.as_ref().is_some_and(|cast| {
-                defiler_payable(&price(cast, &chain.ability, mode_cost, &best_case))
-            })
+        best_case.as_ref().is_none_or(|best_case| {
+            let mode_cost = chain.mode_cost.as_ref();
+            payable(&price(&plain_cast, &chain.ability, mode_cost, best_case))
+                || defiler_cast.as_ref().is_some_and(|cast| {
+                    defiler_payable(&price(cast, &chain.ability, mode_cost, best_case))
+                })
+        })
     };
     let mut checked: Vec<(ManaCost, Option<ManaCost>)> = Vec::new();
     any_payable_target_pricing_assignment(
@@ -24220,8 +24248,20 @@ fn announced_mana_payable_in_flushed_state(
             let with_defiler = defiler_cast
                 .as_ref()
                 .map(|cast| price(cast, chosen, mode_cost, &target_dependent));
-            // Payability depends only on the priced pair, so assignments that
-            // price identically are checked once.
+            if optional_exile.is_some_and(|cost| {
+                casting_costs::declaration_offerable_with_defiler_using(
+                    state,
+                    player,
+                    &pending_for(&plain_cast.0, chosen, mode_cost),
+                    cost,
+                    None,
+                    casting_costs::DeclarationOfferPricing::Exact,
+                )
+                .unwrap_or(false)
+            }) {
+                return true;
+            }
+            // Plain mana payability depends only on the priced pair.
             if checked
                 .iter()
                 .any(|(plain, stacked)| *plain == priced && *stacked == with_defiler)
@@ -24234,10 +24274,35 @@ fn announced_mana_payable_in_flushed_state(
             checked.push((priced, with_defiler));
             false
         },
-        |_, _| true,
+        |chain, assignment| {
+            if !for_resolution {
+                return true;
+            }
+            let targeting = chain.pricing_target_bound(state, assignment);
+            let mode_cost = chain.mode_cost.as_ref();
+            let pending = pending_for(&plain_cast.0, &chain.ability, mode_cost);
+            let quote = |state: &GameState, pending: &PendingCast, exile_reduction| {
+                declaration_mana_lower_bound(state, player, pending, &targeting, exile_reduction)
+            };
+            payable(&quote(state, &pending, None))
+                || defiler_cast.as_ref().is_some_and(|(cast, _, _)| {
+                    let pending = pending_for(cast, &chain.ability, mode_cost);
+                    defiler_payable(&quote(state, &pending, None))
+                })
+                || optional_exile.is_some_and(|cost| {
+                    casting_costs::declaration_offerable_with_defiler_using(
+                        state,
+                        player,
+                        &pending,
+                        cost,
+                        None,
+                        casting_costs::DeclarationOfferPricing::LowerBound(&quote),
+                    )
+                    .unwrap_or(false)
+                })
+        },
     )
-    // An unpriced assignment could be payable after this chain's best case
-    // passed. The actual casting pipeline still enforces the announced total.
+    // The actual casting pipeline still enforces the announced total.
     .unwrap_or(true)
 }
 
@@ -24488,7 +24553,7 @@ impl TargetPricingChain {
 
 /// CR 700.2a + CR 601.2b-c: enumerate the same legal selections the prompt
 /// presents, keeping each chain paired with its own announced mana addition.
-/// Targetless chains also need pricing when the spell has a required cost.
+/// Resolution offers also price targetless spells and Aura attachments.
 fn target_pricing_chains(
     state: &GameState,
     player: PlayerId,

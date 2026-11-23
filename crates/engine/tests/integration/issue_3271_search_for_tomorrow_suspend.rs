@@ -2062,6 +2062,179 @@ fn suspend_last_counter_prices_a_required_sacrifice_with_its_creature_target() {
     }
 }
 
+#[test]
+fn suspend_last_counter_prices_optional_exile_before_offering_the_cast() {
+    const GOREX: &str = "As an additional cost to cast this spell, you may exile any number of creature cards from your graveyard. This spell costs {2} less to cast for each card exiled this way.\nDeathtouch\nWhenever Gorex attacks or dies, choose a card at random exiled with Gorex and put that card into its owner's hand.";
+    for with_creature in [false, true] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let gorex = s
+            .add_creature_to_hand_from_oracle(P0, "Gorex, the Tombshell", 4, 4, GOREX)
+            .with_subtypes(vec!["Zombie", "Turtle"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 6,
+                shards: vec![ManaCostShard::Black; 2],
+            })
+            .id();
+        s.add_artifact_from_oracle(P1, "Sphere of Resistance", "Spells cost {1} more to cast.");
+        let creature =
+            with_creature.then(|| s.add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2).id());
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards { cards: vec![gorex] })
+            .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), gorex), 4);
+        one_counter_upkeep(&mut r, gorex);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), gorex), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().stack.back().unwrap().source_id, gorex);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+
+        let Some(creature) = creature else {
+            assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+            assert!(r.state().stack.is_empty());
+            assert_eq!(r.state().objects[&gorex].zone, Zone::Exile);
+            assert!(r.state().objects[&gorex].casting_permissions.is_empty());
+            continue;
+        };
+        assert!(
+            matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ),
+            "Gorex can reduce the tax to zero: {:?}",
+            r.state().waiting_for
+        );
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalCostChoice { player: P0, .. }
+        ));
+        r.act(GameAction::DecideOptionalCost { index: 0 }).unwrap();
+        let WaitingFor::PayCost {
+            player: P0,
+            choices,
+            ..
+        } = &r.state().waiting_for
+        else {
+            panic!(
+                "expected the optional exile selection: {:?}",
+                r.state().waiting_for
+            );
+        };
+        assert_eq!(choices, &[creature]);
+        r.act(GameAction::SelectCards {
+            cards: vec![creature],
+        })
+        .unwrap();
+        assert_eq!(r.state().objects[&creature].zone, Zone::Exile);
+        assert_eq!(r.state().objects[&gorex].zone, Zone::Stack);
+        assert_eq!(r.state().stack.len(), 1);
+        let cast = r.state().stack.back().unwrap();
+        assert_eq!(cast.id, gorex);
+        assert!(matches!(
+            cast.kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn suspend_last_counter_prices_the_only_legal_target_before_offering_the_cast() {
+    use engine::types::ability::TargetRef;
+
+    const RONA: &str = "Kicker {2}{B} (You may pay an additional {2}{B} as you cast this spell.)\nReturn target creature or planeswalker you don't control to its owner's hand. If this spell was kicked, put that permanent on the bottom of its owner's library instead.";
+    const KOPALA: &str = "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.\nAbilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
+    for mana in [0, 2] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let vortex = s
+            .add_spell_to_hand_from_oracle(P0, "Rona's Vortex", true, RONA)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let kopala = s
+            .add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA)
+            .with_subtypes(vec!["Merfolk", "Wizard"])
+            .id();
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+        let lands: Vec<_> = (0..mana)
+            .map(|_| s.add_basic_land(P0, ManaColor::Blue))
+            .collect();
+
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards {
+            cards: vec![vortex],
+        })
+        .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), vortex), 4);
+        one_counter_upkeep(&mut r, vortex);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), vortex), 0);
+        assert_eq!(r.state().stack.len(), 1);
+        assert_eq!(r.state().stack.back().unwrap().source_id, vortex);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        pass_pair(&mut r);
+
+        if mana == 0 {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "the only target requires two mana: {:?}",
+                r.state().waiting_for
+            );
+            assert!(r.state().stack.is_empty());
+            assert_eq!(r.state().objects[&vortex].zone, Zone::Exile);
+            assert!(r.state().objects[&vortex].casting_permissions.is_empty());
+            continue;
+        }
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        // The engine elects the only legal target as part of the cast.
+        assert_eq!(r.state().objects[&vortex].zone, Zone::Stack);
+        assert_eq!(r.state().stack.len(), 1);
+        let cast = r.state().stack.back().unwrap();
+        assert_eq!(cast.id, vortex);
+        assert_eq!(cast.ability().unwrap().targets, [TargetRef::Object(kopala)]);
+        assert!(matches!(
+            cast.kind,
+            StackEntryKind::Spell {
+                actual_mana_spent: 2,
+                ..
+            }
+        ));
+        assert!(lands.iter().all(|id| r.state().objects[id].tapped));
+        pass_pair(&mut r);
+        assert_eq!(r.state().objects[&kopala].zone, Zone::Hand);
+    }
+}
+
 struct CrowdedSuspend {
     spell: ObjectId,
     jhoira: ObjectId,
