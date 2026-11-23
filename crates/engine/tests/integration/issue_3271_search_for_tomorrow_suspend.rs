@@ -2062,6 +2062,298 @@ fn suspend_last_counter_prices_a_required_sacrifice_with_its_creature_target() {
     }
 }
 
+struct CrowdedSuspend {
+    spell: ObjectId,
+    jhoira: ObjectId,
+    killian: ObjectId,
+    discard: ObjectId,
+    taxed: Vec<ObjectId>,
+    untaxed: Option<[ObjectId; 2]>,
+}
+
+fn crowded_suspend_at_last_trigger(
+    all_taxed: bool,
+    sacrifice_prohibited: bool,
+) -> (GameRunner, CrowdedSuspend) {
+    const RUTHLESS_DISPOSAL: &str = "As an additional cost to cast this spell, discard a card and sacrifice a creature.\nTwo target creatures each get -13/-13 until end of turn.";
+    const KOPALA: &str = "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.\nAbilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
+    const STEELY: &str = "As Steely Resolve enters, choose a creature type.\nCreatures of the chosen type have shroud.";
+    const YASHARN: &str = "When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.";
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let kopala = s
+        .add_creature_from_oracle(P1, "Kopala, Warden of Waves", 2, 2, KOPALA)
+        .with_subtypes(vec!["Merfolk", "Wizard"])
+        .id();
+    // Tokens available from repeated casts of Summon the School. Insert them
+    // before any untaxed creature so the first 65 × 64 ordered pairs are taxed.
+    let mut taxed = vec![kopala];
+    for _ in 0..64 {
+        taxed.push(
+            s.add_creature(P1, "Merfolk Wizard", 1, 1)
+                .with_subtypes(vec!["Merfolk", "Wizard"])
+                .id(),
+        );
+    }
+    let untaxed = (!all_taxed).then(|| {
+        [
+            s.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+            s.add_creature(P1, "Hill Giant", 3, 3).id(),
+        ]
+    });
+    let killian = s
+        .add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN_ORACLE)
+        .with_subtypes(vec!["Human", "Warlock"])
+        .id();
+    let steely = all_taxed.then(|| {
+        s.add_enchantment_from_oracle(P1, "Steely Resolve", STEELY)
+            .id()
+    });
+    if sacrifice_prohibited {
+        s.add_creature_from_oracle(P1, "Yasharn, Implacable Earth", 4, 4, YASHARN);
+    }
+    let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+    s.add_artifact_from_oracle(P1, "Sphere of Resistance", "Spells cost {1} more to cast.");
+    let spell = s
+        .add_spell_to_hand_from_oracle(P0, "Ruthless Disposal", false, RUTHLESS_DISPOSAL)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let discard = s.add_card_to_hand(P0, "Plains");
+    s.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+    );
+
+    let mut r = s.build();
+    if let Some(steely) = steely {
+        let state = r.state_mut();
+        state
+            .objects
+            .get_mut(&steely)
+            .unwrap()
+            .chosen_attributes
+            .push(engine::types::ability::ChosenAttribute::CreatureType(
+                "Human".into(),
+            ));
+        engine::game::layers::mark_layers_full(state);
+        engine::game::layers::flush_layers(state);
+        for id in [jhoira, killian] {
+            assert_eq!(r.state().objects[&id].zone, Zone::Battlefield);
+            assert!(r.state().objects[&id].has_keyword(&engine::types::keywords::Keyword::Shroud));
+        }
+    }
+    assert!(r.state().battlefield.iter().take(taxed.len()).eq(&taxed));
+    assert!(taxed.len() * (taxed.len() - 1) > 4096);
+    r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+        .unwrap();
+    r.act(GameAction::SelectCards { cards: vec![spell] })
+        .unwrap();
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), spell), 4);
+    one_counter_upkeep(&mut r, spell);
+    pass_pair(&mut r);
+    assert_eq!(time_counters(r.state(), spell), 0);
+    assert_eq!(r.state().stack.len(), 1);
+    assert_eq!(r.state().stack.back().unwrap().source_id, spell);
+    assert_eq!(r.state().players[0].mana_pool.total(), 0);
+
+    (
+        r,
+        CrowdedSuspend {
+            spell,
+            jhoira,
+            killian,
+            discard,
+            taxed,
+            untaxed,
+        },
+    )
+}
+
+fn assert_crowded_suspend_no_offer(mut r: GameRunner, board: &CrowdedSuspend) {
+    assert_eq!(r.state().stack.back().unwrap().source_id, board.spell);
+    pass_pair(&mut r);
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "unpayable crowded cast offered: {:?}",
+        r.state().waiting_for
+    );
+    assert!(r.state().stack.is_empty());
+    assert_eq!(r.state().objects[&board.spell].zone, Zone::Exile);
+    assert!(r.state().objects[&board.spell]
+        .casting_permissions
+        .is_empty());
+    assert_eq!(r.state().objects[&board.jhoira].zone, Zone::Battlefield);
+}
+
+fn choose_crowded_suspend_targets(
+    r: &mut GameRunner,
+    board: &CrowdedSuspend,
+    targets: [ObjectId; 2],
+) -> Result<engine::types::game_state::ActionResult, engine::game::engine::EngineError> {
+    use engine::types::ability::TargetRef;
+
+    assert!(
+        matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "expected a payable target pair: {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    if board.untaxed.is_none() {
+        let WaitingFor::TargetSelection { selection, .. } = &r.state().waiting_for else {
+            panic!(
+                "expected the Merfolk target prompt: {:?}",
+                r.state().waiting_for
+            );
+        };
+        assert_eq!(selection.current_legal_targets.len(), board.taxed.len());
+        assert!(board.taxed.iter().all(|id| selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(*id))));
+    }
+    let choose = |r: &mut GameRunner, id| {
+        let target = TargetRef::Object(id);
+        let WaitingFor::TargetSelection {
+            player: P0,
+            selection,
+            ..
+        } = &r.state().waiting_for
+        else {
+            panic!("expected target selection: {:?}", r.state().waiting_for);
+        };
+        assert!(selection.current_legal_targets.contains(&target));
+        r.act(GameAction::ChooseTarget {
+            target: Some(target),
+        })
+    };
+    choose(r, targets[0]).unwrap();
+    choose(r, targets[1])
+}
+
+fn pay_crowded_suspend(r: &mut GameRunner, board: &CrowdedSuspend, ids: [ObjectId; 2], mana: u32) {
+    use engine::types::ability::TargetRef;
+    use engine::types::game_state::PayCostKind;
+
+    choose_crowded_suspend_targets(r, board, ids).unwrap();
+    let targets = ids.map(TargetRef::Object);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Discard,
+            ..
+        }
+    ));
+    let discarded = r
+        .act(GameAction::SelectCards {
+            cards: vec![board.discard],
+        })
+        .unwrap();
+    assert!(discarded.events.iter().any(|event| matches!(
+        event, GameEvent::Discarded { player_id: P0, object_id, .. } if *object_id == board.discard
+    )));
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Sacrifice,
+            ..
+        }
+    ));
+    let sacrificed = r
+        .act(GameAction::SelectCards {
+            cards: vec![board.jhoira],
+        })
+        .unwrap();
+    assert!(sacrificed.events.iter().any(|event| matches!(
+        event, GameEvent::PermanentSacrificed { player_id: P0, object_id } if *object_id == board.jhoira
+    )));
+    assert_eq!(r.state().objects[&board.discard].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&board.jhoira].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&board.spell].zone, Zone::Stack);
+    assert_eq!(r.state().stack.len(), 1);
+    let cast = r.state().stack.back().unwrap();
+    assert_eq!(cast.id, board.spell);
+    assert_eq!(cast.ability().unwrap().targets, targets);
+    assert!(matches!(
+        cast.kind,
+        StackEntryKind::Spell {
+            actual_mana_spent,
+            ..
+        } if actual_mana_spent == mana
+    ));
+    assert_eq!(r.state().players[0].mana_pool.total(), 0);
+}
+
+#[test]
+fn suspend_last_counter_required_cost_with_payable_targets_beyond_pricing_budget() {
+    let (mut r, board) = crowded_suspend_at_last_trigger(false, false);
+    for absent in [board.discard, board.killian] {
+        let mut blocked = GameRunner::from_state(r.state().clone());
+        engine::game::zones::move_to_zone(
+            blocked.state_mut(),
+            absent,
+            Zone::Graveyard,
+            &mut vec![],
+        );
+        assert_crowded_suspend_no_offer(blocked, &board);
+    }
+    let (blocked, sacrifice_board) = crowded_suspend_at_last_trigger(false, true);
+    assert_crowded_suspend_no_offer(blocked, &sacrifice_board);
+    pass_pair(&mut r);
+    pay_crowded_suspend(&mut r, &board, board.untaxed.unwrap(), 0);
+}
+
+#[test]
+fn suspend_last_counter_required_cost_preserves_unavoidable_target_tax_beyond_budget() {
+    let (mut r, board) = crowded_suspend_at_last_trigger(true, false);
+    assert_eq!(r.state().objects[&board.discard].zone, Zone::Hand);
+    assert_crowded_suspend_no_offer(GameRunner::from_state(r.state().clone()), &board);
+
+    r.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            ManaType::Red,
+            board.jhoira,
+            false,
+            vec![],
+        ));
+    pass_pair(&mut r);
+    pay_crowded_suspend(&mut r, &board, [board.taxed[0], board.taxed[1]], 1);
+}
+
+#[test]
+fn suspend_last_counter_required_cost_rejects_exact_unpayable_election_after_offer() {
+    let (mut r, board) = crowded_suspend_at_last_trigger(false, false);
+    pass_pair(&mut r);
+    let second_target =
+        choose_crowded_suspend_targets(&mut r, &board, [board.taxed[0], board.taxed[1]]);
+    let result = second_target.unwrap();
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "{result:?}"
+    );
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::Discarded { .. } | GameEvent::PermanentSacrificed { .. }
+    )));
+    assert!(r.state().stack.is_empty());
+    assert!(r.state().pending_cast.is_none());
+    assert_eq!(r.state().objects[&board.spell].zone, Zone::Exile);
+    assert!(r.state().objects[&board.spell]
+        .casting_permissions
+        .is_empty());
+    assert_eq!(r.state().objects[&board.discard].zone, Zone::Hand);
+    assert_eq!(r.state().objects[&board.jhoira].zone, Zone::Battlefield);
+}
+
 #[test]
 fn suspend_upkeep_rechecks_exile_incarnation_and_effective_suspend() {
     let mut s = GameScenario::new();

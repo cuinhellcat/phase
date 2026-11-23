@@ -12075,8 +12075,8 @@ struct CollectedCostFloors {
 impl CollectedCostFloors {
     fn collect(view: &SpellCostView<'_>, ability: &ResolvedAbility) -> Self {
         Self {
-            target_independent: collect_cost_floors(view, None, false),
-            target_dependent: collect_cost_floors(view, Some(ability), true),
+            target_independent: collect_cost_floors(view, SpellCostTargets::Unchosen, false),
+            target_dependent: collect_cost_floors(view, SpellCostTargets::Chosen(ability), true),
         }
     }
 
@@ -12085,7 +12085,7 @@ impl CollectedCostFloors {
     /// candidate target assignment.
     fn collect_target_independent(view: &SpellCostView<'_>) -> Self {
         Self {
-            target_independent: collect_cost_floors(view, None, false),
+            target_independent: collect_cost_floors(view, SpellCostTargets::Unchosen, false),
             target_dependent: Vec::new(),
         }
     }
@@ -12113,6 +12113,8 @@ impl CollectedCostFloors {
 struct CollectedCastCosts {
     modifiers: OnceCell<CollectedCostModifiers>,
     floors: OnceCell<CollectedCostFloors>,
+    /// Present only for an offer bound: surcharge per target and proven count.
+    minimum_strive: Option<(ManaCost, usize)>,
 }
 
 impl CollectedCastCosts {
@@ -12121,6 +12123,7 @@ impl CollectedCastCosts {
         Self {
             modifiers: OnceCell::from(modifiers),
             floors: OnceCell::from(floors),
+            minimum_strive: None,
         }
     }
 
@@ -13140,9 +13143,11 @@ pub(super) fn apply_target_dependent_cost_modifiers(
     mana_cost: &mut ManaCost,
 ) {
     apply_target_dependent_cost_modifiers_using(
-        state,
-        object_id,
-        ability,
+        state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.strive_cost.as_ref()),
+        || declared_targets_in_chain(ability).len(),
         mana_cost,
         &collect_target_dependent_cost_modifiers(
             &SpellCostView::for_variant(state, player, object_id, None),
@@ -13156,13 +13161,11 @@ pub(super) fn apply_target_dependent_cost_modifiers(
 /// already-collected modifier set and honoring the caster's elected reduction
 /// order when one has been made.
 ///
-/// The only state read left here is Strive's printed surcharge, which is a
-/// property of the spell and of its chosen targets — never of the reduction
-/// order — so re-running this per candidate permutation costs no board walk.
+/// Strive reads the target count only when the spell has a surcharge. Both
+/// inputs are independent of the reduction order.
 fn apply_target_dependent_cost_modifiers_using(
-    state: &GameState,
-    object_id: ObjectId,
-    ability: &ResolvedAbility,
+    strive_cost: Option<&ManaCost>,
+    target_count: impl FnOnce() -> usize,
     mana_cost: &mut ManaCost,
     collected: &[CostModification],
     election: Option<&[ReductionProvenance]>,
@@ -13172,14 +13175,9 @@ fn apply_target_dependent_cost_modifiers_using(
     // strive_cost * (num_targets - 1) to the total casting cost. "Target"
     // counts announced targets only (CR 115.10a): an inheriting rider's carried
     // copy of its parent's target is not another one.
-    if let Some(strive_cost) = state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.strive_cost.clone())
-    {
-        let target_count = super::ability_utils::declared_targets_in_chain(ability).len();
-        for _ in 1..target_count {
-            *mana_cost = super::restrictions::add_mana_cost(mana_cost, &strive_cost);
+    if let Some(strive_cost) = strive_cost {
+        for _ in 1..target_count() {
+            *mana_cost = super::restrictions::add_mana_cost(mana_cost, strive_cost);
         }
     }
     apply_cost_modifications_in_order_with(mana_cost, collected, election);
@@ -13503,10 +13501,24 @@ fn recompute_pending_mana_total_using(
         apply_hybrid_announcement(&mut cost, &positions, announcement);
     }
     apply_non_floor_cost_modifiers_using(&mut cost, modifiers, ctx.election());
+    let strive = collected
+        .minimum_strive
+        .as_ref()
+        .map(|(cost, _)| cost)
+        .or_else(|| {
+            view.state
+                .objects
+                .get(&pending.object_id)
+                .and_then(|obj| obj.strive_cost.as_ref())
+        });
     apply_target_dependent_cost_modifiers_using(
-        view.state,
-        pending.object_id,
-        &pending.ability,
+        strive,
+        || {
+            collected.minimum_strive.as_ref().map_or_else(
+                || declared_targets_in_chain(&pending.ability).len(),
+                |(_, count)| *count,
+            )
+        },
         &mut cost,
         &modifiers.target_dependent,
         ctx.election(),
@@ -14243,6 +14255,8 @@ enum SpellCostTargets<'a> {
     /// the targets. Bounds only: its reductions are the most any target
     /// assignment can get.
     Any,
+    /// An unavoidable target gate, proven on the required first declared slot.
+    RequiredRoot(&'a [TargetRef]),
 }
 
 fn cost_filter_reads_targets(filter: &TargetFilter) -> bool {
@@ -14347,6 +14361,15 @@ fn spell_cost_filter_admits(
         }
         // The non-target part of the filter already matched in the analysis.
         SpellCostTargets::Any => true,
+        SpellCostTargets::RequiredRoot(candidates) => {
+            analyze_cost_filter_on_view_with_projection(
+                view,
+                filter,
+                source_id,
+                super::filter::filter_reads_pt(filter),
+                candidates,
+            ) == PreTargetCostFilterAnalysis::TargetIndependentRelevant
+        }
     }
 }
 
@@ -14403,6 +14426,7 @@ fn analyze_cost_filter_on_view(
         filter,
         source_id,
         super::filter::filter_reads_pt(filter),
+        &[],
     )
 }
 
@@ -14411,15 +14435,29 @@ fn analyze_cost_filter_on_view_with_projection(
     filter: &TargetFilter,
     source_id: ObjectId,
     project_pt: bool,
+    required_root: &[TargetRef],
 ) -> PreTargetCostFilterAnalysis {
     match filter {
         TargetFilter::Typed(typed) => {
-            let has_target_property = typed.properties.iter().any(|property| {
-                matches!(
-                    property,
-                    FilterProp::Targets { .. } | FilterProp::TargetsOnly { .. }
-                )
-            });
+            let has_unproven_target_property =
+                typed.properties.iter().any(|property| match property {
+                    FilterProp::Targets { filter } => {
+                        required_root.is_empty()
+                            || !view.state.objects.get(&source_id).is_some_and(|source| {
+                                required_root.iter().all(|target| {
+                                    target_ref_matches_cost_filter(
+                                        view.state,
+                                        source_id,
+                                        source.controller,
+                                        target,
+                                        filter,
+                                    )
+                                })
+                            })
+                    }
+                    FilterProp::TargetsOnly { .. } => true,
+                    _ => false,
+                });
             let non_target_properties = typed
                 .properties
                 .iter()
@@ -14438,7 +14476,7 @@ fn analyze_cost_filter_on_view_with_projection(
             });
             if !view.matches_with_projection(&base, source_id, project_pt) {
                 PreTargetCostFilterAnalysis::Irrelevant
-            } else if has_target_property {
+            } else if has_unproven_target_property {
                 PreTargetCostFilterAnalysis::TargetDependent
             } else {
                 PreTargetCostFilterAnalysis::TargetIndependentRelevant
@@ -14447,8 +14485,13 @@ fn analyze_cost_filter_on_view_with_projection(
         TargetFilter::Or { filters } => filters.iter().fold(
             PreTargetCostFilterAnalysis::Irrelevant,
             |combined, inner| {
-                let next =
-                    analyze_cost_filter_on_view_with_projection(view, inner, source_id, project_pt);
+                let next = analyze_cost_filter_on_view_with_projection(
+                    view,
+                    inner,
+                    source_id,
+                    project_pt,
+                    required_root,
+                );
                 match (combined, next) {
                     (PreTargetCostFilterAnalysis::TargetIndependentRelevant, _)
                     | (_, PreTargetCostFilterAnalysis::TargetIndependentRelevant) => {
@@ -14465,8 +14508,13 @@ fn analyze_cost_filter_on_view_with_projection(
         TargetFilter::And { filters } => filters.iter().fold(
             PreTargetCostFilterAnalysis::TargetIndependentRelevant,
             |combined, inner| {
-                let next =
-                    analyze_cost_filter_on_view_with_projection(view, inner, source_id, project_pt);
+                let next = analyze_cost_filter_on_view_with_projection(
+                    view,
+                    inner,
+                    source_id,
+                    project_pt,
+                    required_root,
+                );
                 match (combined, next) {
                     (PreTargetCostFilterAnalysis::Irrelevant, _)
                     | (_, PreTargetCostFilterAnalysis::Irrelevant) => {
@@ -14480,10 +14528,14 @@ fn analyze_cost_filter_on_view_with_projection(
                 }
             },
         ),
-        TargetFilter::Not { filter } => {
-            analyze_cost_filter_on_view_with_projection(view, filter, source_id, project_pt)
-                .negate()
-        }
+        TargetFilter::Not { filter } => analyze_cost_filter_on_view_with_projection(
+            view,
+            filter,
+            source_id,
+            project_pt,
+            required_root,
+        )
+        .negate(),
         _ => {
             if view.matches_with_projection(filter, source_id, project_pt) {
                 PreTargetCostFilterAnalysis::TargetIndependentRelevant
@@ -15460,7 +15512,7 @@ fn apply_cost_floor_inner(
 ) {
     let floors = collect_cost_floors(
         &SpellCostView::new(state, caster, spell_id, fused),
-        selected_ability,
+        selected_ability.map_or(SpellCostTargets::Unchosen, SpellCostTargets::Chosen),
         target_sensitive_only,
     );
     apply_cost_floors(mana_cost, &floors);
@@ -15476,11 +15528,10 @@ fn apply_cost_floor_inner(
 /// every candidate order without re-walking `battlefield_functioning_statics`.
 fn collect_cost_floors(
     view: &SpellCostView<'_>,
-    selected_ability: Option<&ResolvedAbility>,
+    targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
 ) -> Vec<u32> {
     let state = view.state;
-    let targets = selected_ability.map_or(SpellCostTargets::Unchosen, SpellCostTargets::Chosen);
     let mut floors = Vec::new();
     // CR 604.1: O(1) presence gate — no ModifyCost static means no cost floor to apply.
     if !static_kind_present(state, StaticModeKind::ModifyCost) {
@@ -23521,14 +23572,44 @@ fn announced_declaration_offerable(
             && prepared_declaration_offerable(state, player, prepared, choices);
     }
     let chains = target_pricing_chains(state, player, prepared, &resolved, true);
-    any_payable_target_pricing_assignment(state, chains.iter(), |chain, chosen| {
-        let mut pending = pending_cast_from_prepared(prepared, chosen.clone());
+    let pending_for = |chain: &TargetPricingChain, ability: ResolvedAbility| {
+        let mut pending = pending_cast_from_prepared(prepared, ability);
         pending
             .declared_mana_additions
             .extend(chain.mode_cost.clone());
-        required_declaration_is_offerable(state, player, &pending, choices)
-    })
-    .unwrap_or_else(|_| prepared_declaration_offerable(state, player, prepared, choices))
+        pending
+    };
+    any_payable_target_pricing_assignment(
+        state,
+        chains.iter(),
+        |chain, chosen| {
+            required_declaration_is_offerable(
+                state,
+                player,
+                &pending_for(chain, chosen.clone()),
+                choices,
+            )
+        },
+        |chain, assignment| {
+            let targeting = chain.pricing_target_bound(state, assignment);
+            let pending = pending_for(chain, chain.ability.clone());
+            let quote = |state: &GameState, pending: &PendingCast, exile_reduction| {
+                declaration_mana_lower_bound(state, player, pending, &targeting, exile_reduction)
+            };
+            choices.iter().any(|cost| {
+                casting_costs::required_declaration_offerable_using(
+                    state,
+                    player,
+                    &pending,
+                    cost,
+                    None,
+                    casting_costs::DeclarationOfferPricing::LowerBound(&quote),
+                )
+                .unwrap_or(false)
+            })
+        },
+    )
+    .unwrap_or(true)
 }
 
 fn resolved_spell_for_pricing(prepared: &PreparedSpellCast, player: PlayerId) -> ResolvedAbility {
@@ -24130,7 +24211,7 @@ fn announced_mana_payable_in_flushed_state(
             // targets, shared by both reduction sets.
             let target_dependent = (
                 collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(chosen)),
-                collect_cost_floors(&view, Some(chosen), true),
+                collect_cost_floors(&view, SpellCostTargets::Chosen(chosen), true),
             );
             let mode_cost = chain.mode_cost.as_ref();
             let priced = price(&plain_cast, chosen, mode_cost, &target_dependent);
@@ -24153,10 +24234,153 @@ fn announced_mana_payable_in_flushed_state(
             checked.push((priced, with_defiler));
             false
         },
+        |_, _| true,
     )
     // An unpriced assignment could be payable after this chain's best case
     // passed. The actual casting pipeline still enforces the announced total.
     .unwrap_or(true)
+}
+
+/// CR 601.2f + CR 601.2h: the lowest defensible price on an unpriced chain,
+/// after the declaration has added its mana and checked its residual cost.
+fn declaration_mana_lower_bound(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    targeting: &TargetPricingBound,
+    exile_reduction: Option<u32>,
+) -> ManaCost {
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        pending.object_id,
+        Some(pending.casting_variant),
+    );
+    let ctx = CostFinalizeContext::from_pending(pending);
+    let mut modifiers = CollectedCostModifiers::collect_on_view(
+        &view,
+        None,
+        pending.casting_permission_index,
+        &ctx,
+    );
+    let possible = collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any);
+    let proven = SpellCostTargets::RequiredRoot(&targeting.required_root);
+    modifiers.target_dependent.extend(
+        possible
+            .iter()
+            .filter(|modifier| !modifier.is_raise)
+            .cloned(),
+    );
+    modifiers.target_dependent.extend(
+        collect_target_dependent_cost_modifiers(&view, proven)
+            .into_iter()
+            .filter(|modifier| modifier.is_raise && modifier.multiplier > 0),
+    );
+    let mut floors = CollectedCostFloors::collect_target_independent(&view)
+        .with_target_dependent(collect_cost_floors(&view, proven, true));
+    let mut strive = state
+        .objects
+        .get(&pending.object_id)
+        .and_then(|obj| obj.strive_cost.clone());
+    let pip_value = |cost: &ManaCost| match cost {
+        ManaCost::Cost { shards, .. } => shards
+            .iter()
+            .map(ManaCostShard::mana_value_contribution)
+            .sum(),
+        _ => 0u32,
+    };
+    let has_shards =
+        |cost: &ManaCost| matches!(cost, ManaCost::Cost { shards, .. } if !shards.is_empty());
+    let adds_shards = |modifier: &&CostModification| {
+        modifier.is_raise && modifier.multiplier > 0 && has_shards(&modifier.amount)
+    };
+    let uncertain_increase = possible.iter().filter(adds_shards).count()
+        != modifiers
+            .target_dependent
+            .iter()
+            .filter(adds_shards)
+            .count();
+    let shard_cost_may_change = modifiers.ordered().any(|modifier| {
+        !modifier.is_raise && modifier.multiplier > 0 && has_shards(&modifier.amount)
+    }) || uncertain_increase
+        || (targeting.target_count.start() != targeting.target_count.end()
+            && strive.as_ref().is_some_and(has_shards));
+    let mut relaxed_pending;
+    let pending = if shard_cost_may_change {
+        // CR 107.4b + CR 107.4e + CR 107.4f + CR 601.2f: a reducer can claim a hybrid shard
+        // another reducer needed, and a floor can exchange a life-payable
+        // symbol for generic mana. Keep a necessary generic amount, giving
+        // reductions their maximum generic credit and floors credit for all
+        // possible shards (even those that could be paid without mana).
+        let floor_credit = pending
+            .base_cost
+            .iter()
+            .chain(&pending.declared_mana_additions)
+            .map(pip_value)
+            .chain(
+                modifiers
+                    .non_floor
+                    .iter()
+                    .chain(&possible)
+                    .filter(|modifier| modifier.is_raise)
+                    .map(|modifier| {
+                        pip_value(&modifier.amount).saturating_mul(modifier.multiplier)
+                    }),
+            )
+            .chain(strive.iter().map(|cost| {
+                let extra = targeting.target_count.end().saturating_sub(1);
+                pip_value(cost).saturating_mul(u32::try_from(extra).unwrap_or(u32::MAX))
+            }))
+            .fold(0u32, u32::saturating_add);
+        for floor in floors
+            .target_independent
+            .iter_mut()
+            .chain(&mut floors.target_dependent)
+        {
+            *floor = floor.saturating_sub(floor_credit);
+        }
+        let generic_part = |cost: &ManaCost| match cost {
+            ManaCost::Cost { generic, .. } => ManaCost::generic(*generic),
+            _ => cost.clone(),
+        };
+        for modifier in modifiers
+            .non_floor
+            .iter_mut()
+            .chain(&mut modifiers.target_dependent)
+        {
+            modifier.amount = if modifier.is_raise {
+                generic_part(&modifier.amount)
+            } else {
+                ManaCost::generic(modifier.amount.mana_value())
+            };
+        }
+        relaxed_pending = pending.clone();
+        relaxed_pending.base_cost = pending.base_cost.as_ref().map(generic_part);
+        relaxed_pending.declared_mana_additions = pending
+            .declared_mana_additions
+            .iter()
+            .map(generic_part)
+            .collect();
+        strive = strive.as_ref().map(generic_part);
+        &relaxed_pending
+    } else {
+        pending
+    };
+    let mut collected = CollectedCastCosts::seeded(modifiers, floors);
+    collected.minimum_strive = strive.map(|cost| (cost, *targeting.target_count.start()));
+    let mut total = recompute_pending_mana_total_using(
+        &view,
+        pending,
+        Some(pending.ability.chosen_x.unwrap_or(0)),
+        &ctx,
+        &collected,
+    );
+    if let Some(reduction) = exile_reduction {
+        total = total.reduced_by_generic(reduction);
+        let floors = collected.floors(&view, &pending.ability);
+        apply_cost_floors(&mut total, &floors.target_independent);
+    }
+    total
 }
 
 struct TargetPricingBudgetExhausted;
@@ -24167,6 +24391,7 @@ fn any_payable_target_pricing_assignment<'a>(
     state: &GameState,
     chains: impl Iterator<Item = &'a TargetPricingChain>,
     mut payable: impl FnMut(&TargetPricingChain, &ResolvedAbility) -> bool,
+    mut may_pay_unpriced: impl FnMut(&TargetPricingChain, &[Option<TargetRef>]) -> bool,
 ) -> Result<bool, TargetPricingBudgetExhausted> {
     let mut budget = TARGET_DEPENDENT_PRICING_ASSIGNMENT_LIMIT;
     for chain in chains {
@@ -24179,7 +24404,12 @@ fn any_payable_target_pricing_assignment<'a>(
         );
         for assignment in assignments {
             if budget == 0 {
-                return Err(TargetPricingBudgetExhausted);
+                // The extra legal assignment witnesses this chain only. A
+                // rejected bound lets the remaining chains prove their own.
+                if may_pay_unpriced(chain, &assignment) {
+                    return Err(TargetPricingBudgetExhausted);
+                }
+                break;
             }
             budget -= 1;
             let mut chosen = chain.ability.clone();
@@ -24198,6 +24428,62 @@ struct TargetPricingChain {
     slots: Vec<TargetSelectionSlot>,
     constraints: Vec<crate::types::game_state::TargetSelectionConstraint>,
     mode_cost: Option<ManaCost>,
+    targeting: TargetPricingOrigin,
+}
+
+enum TargetPricingOrigin {
+    Ability,
+    AuraAttachment,
+}
+
+struct TargetPricingBound {
+    required_root: Vec<TargetRef>,
+    target_count: std::ops::RangeInclusive<usize>,
+}
+
+impl TargetPricingChain {
+    /// CR 601.2c + CR 115.10a: check that the existing slot binder records
+    /// the extra legal assignment in declaration order. The root candidates
+    /// must come from the same chain and constraints at an empty prefix.
+    fn pricing_target_bound(
+        &self,
+        state: &GameState,
+        assignment: &[Option<TargetRef>],
+    ) -> TargetPricingBound {
+        let mut bound = TargetPricingBound {
+            required_root: Vec::new(),
+            target_count: 0..=self.slots.len(),
+        };
+        let mut witness = self.ability.clone();
+        if assign_selected_slots_in_chain(state, &mut witness, assignment).is_err()
+            || !declared_targets_in_chain(&witness)
+                .iter()
+                .eq(assignment.iter().flatten())
+        {
+            return bound;
+        }
+        bound.target_count =
+            self.slots.iter().filter(|slot| !slot.optional).count()..=self.slots.len();
+        if matches!(self.targeting, TargetPricingOrigin::Ability)
+            && self.slots.first().is_some_and(|slot| !slot.optional)
+        {
+            let root = assignment.first().and_then(Option::as_ref);
+            if let Ok(selection) = begin_target_selection_for_ability(
+                state,
+                &self.ability,
+                &self.slots,
+                &self.constraints,
+            ) {
+                if selection.current_slot == 0
+                    && selection.selected_slots.is_empty()
+                    && root.is_some_and(|target| selection.current_legal_targets.contains(target))
+                {
+                    bound.required_root = selection.current_legal_targets;
+                }
+            }
+        }
+        bound
+    }
 }
 
 /// CR 700.2a + CR 601.2b-c: enumerate the same legal selections the prompt
@@ -24224,6 +24510,7 @@ fn target_pricing_chains(
                 slots: vec![slot],
                 constraints: Vec::new(),
                 mode_cost: None,
+                targeting: TargetPricingOrigin::AuraAttachment,
             })
             .into_iter()
             .collect();
@@ -24236,6 +24523,7 @@ fn target_pricing_chains(
                 slots,
                 constraints,
                 mode_cost,
+                targeting: TargetPricingOrigin::Ability,
             },
         )
     };
@@ -35435,6 +35723,10 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
 
 /// Delegates the traversal to `QuantityExpr::any_ref`, so a new expression
 /// wrapper can't bypass target detection.
+pub(super) fn declaration_quantity_reads_targets(expr: &QuantityExpr) -> bool {
+    quantity_expr_reads_target_object(expr, TargetRead::Any)
+}
+
 fn quantity_expr_reads_target_object(expr: &QuantityExpr, read: TargetRead) -> bool {
     expr.any_ref(&mut |x| quantity_ref_reads_target_object(x, read))
 }

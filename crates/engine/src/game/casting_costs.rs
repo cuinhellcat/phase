@@ -424,6 +424,20 @@ pub(crate) fn split_declared_mana_addition_and_residual(
     pending: Option<&PendingCast>,
     cost: AbilityCost,
 ) -> Result<DeclaredManaSplit, EngineError> {
+    split_declared_mana_addition_and_residual_using(
+        state,
+        pending,
+        cost,
+        DeclarationOfferPricing::Exact,
+    )
+}
+
+fn split_declared_mana_addition_and_residual_using(
+    state: Option<&GameState>,
+    pending: Option<&PendingCast>,
+    cost: AbilityCost,
+    pricing: DeclarationOfferPricing<'_>,
+) -> Result<DeclaredManaSplit, EngineError> {
     match cost {
         AbilityCost::Mana { cost } => Ok(DeclaredManaSplit {
             declared: vec![cost],
@@ -440,9 +454,16 @@ pub(crate) fn split_declared_mana_addition_and_residual(
                     ));
                 }
             };
-            let amount =
+            // CR 601.2c + CR 601.2f: the exact declaration reads the elected
+            // target. Until then this generic addition has a lower bound of zero.
+            let amount = if matches!(pricing, DeclarationOfferPricing::LowerBound(_))
+                && super::casting::declaration_quantity_reads_targets(&quantity)
+            {
+                0
+            } else {
                 super::quantity::resolve_quantity_with_targets(state, &quantity, &pending.ability)
-                    .max(0) as u32;
+                    .max(0) as u32
+            };
             Ok(DeclaredManaSplit {
                 declared: vec![ManaCost::generic(amount)],
                 residual: None,
@@ -482,7 +503,8 @@ pub(crate) fn split_declared_mana_addition_and_residual(
             let mut residuals = Vec::new();
             let mut payment_mode = None;
             for cost in costs {
-                let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
+                let split =
+                    split_declared_mana_addition_and_residual_using(state, pending, cost, pricing)?;
                 declared.extend(split.declared);
                 if let Some(residual) = split.residual {
                     residuals.push(residual);
@@ -508,13 +530,30 @@ pub(crate) fn split_declared_mana_addition_and_residual(
     }
 }
 
+type DeclarationManaBound<'a> = dyn Fn(&GameState, &PendingCast, Option<u32>) -> ManaCost + 'a;
+
+/// A resolution offer may price a necessary mana bound. Actual declarations
+/// always compute the total for the selected targets and cost choices.
+#[derive(Clone, Copy)]
+pub(super) enum DeclarationOfferPricing<'a> {
+    Exact,
+    LowerBound(&'a DeclarationManaBound<'a>),
+}
+
 pub(crate) fn additional_cost_declaration_is_offerable(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
     cost: AbilityCost,
 ) -> Result<bool, EngineError> {
-    declaration_offerable_reserving(state, player, pending, cost, 0)
+    declaration_offerable_reserving(
+        state,
+        player,
+        pending,
+        cost,
+        0,
+        DeclarationOfferPricing::Exact,
+    )
 }
 
 /// [`additional_cost_declaration_is_offerable`] with `reserved_life` more life
@@ -527,6 +566,7 @@ fn declaration_offerable_reserving(
     pending: &PendingCast,
     cost: AbilityCost,
     reserved_life: u32,
+    pricing: DeclarationOfferPricing<'_>,
 ) -> Result<bool, EngineError> {
     // CR 601.2h: "Unpayable costs can't be paid." A cost the parser could not
     // read has no payment procedure at all, so it can never be declared — a
@@ -558,7 +598,8 @@ fn declaration_offerable_reserving(
         .and_then(|latch| super::casting::latch_payment_terms_state(state, latch));
     let state = terms_state.as_ref().unwrap_or(state);
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
-    let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
+    let split =
+        split_declared_mana_addition_and_residual_using(Some(state), Some(pending), cost, pricing)?;
     if let Some(residual) = split.residual.as_ref() {
         if !residual.is_payable_for_spell(state, player, pending.object_id) {
             return Ok(false);
@@ -566,40 +607,46 @@ fn declaration_offerable_reserving(
     }
     let mut pending = pending.clone();
     pending.declared_mana_additions.extend(split.declared);
-    // CR 601.2f + CR 702.119a + CR 702.48c: preview against the total the cast
-    // will lock in, including the reduction an Emerge or Offering sacrifice
-    // already earned, so an optional cost the pool pays beside the reduced
-    // total is offered.
-    let mut total = super::casting::recompute_pending_mana_total_with(
-        state,
-        player,
-        &pending,
-        pending.ability.chosen_x,
-        &super::casting::CostFinalizeContext::from_pending(&pending),
-    );
-    // CR 601.2f: An optional exile-this-way cost can make the announced X
-    // payable. The declaration preview runs before the cards are selected, so
-    // account for the greatest legal generic reduction here; otherwise the
-    // prompt is incorrectly skipped and the cast fails at mana payment.
-    if exile_this_way_cost {
-        total = total.reduced_by_generic(exile_any_number_cost_reduction_capacity(
-            state,
-            player,
-            pending.object_id,
-        ));
-        if !cost_has_x(&total) {
-            super::casting::apply_cost_floor(state, player, pending.object_id, &mut total);
-        }
+    // CR 119.4 + CR 601.2h: all committed life has to be payable even when
+    // the mana component is zero. Reserve it before checking any mana route.
+    let committed_life =
+        reserved_life.saturating_add(split.residual.as_ref().map_or(0, |residual| {
+            cost_life_payment(state, player, pending.object_id, residual)
+        }));
+    if committed_life > i32::MAX as u32
+        || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
+    {
+        return Ok(false);
     }
+    // CR 601.2f: price an exile-this-way declaration with its greatest legal
+    // generic reduction. The floor still applies after that reduction.
+    let exile_reduction = exile_this_way_cost
+        .then(|| exile_any_number_cost_reduction_capacity(state, player, pending.object_id));
+    let total = match pricing {
+        DeclarationOfferPricing::Exact => {
+            // CR 601.2f + CR 702.119a + CR 702.48c: price the locked total,
+            // including any already-earned Emerge or Offering reduction.
+            let mut total = super::casting::recompute_pending_mana_total_with(
+                state,
+                player,
+                &pending,
+                pending.ability.chosen_x,
+                &super::casting::CostFinalizeContext::from_pending(&pending),
+            );
+            if let Some(reduction) = exile_reduction {
+                total = total.reduced_by_generic(reduction);
+                if !cost_has_x(&total) {
+                    super::casting::apply_cost_floor(state, player, pending.object_id, &mut total);
+                }
+            }
+            total
+        }
+        DeclarationOfferPricing::LowerBound(quote) => quote(state, &pending, exile_reduction),
+    };
     if total.is_without_paying_mana() {
         return Ok(true);
     }
-    let reserved = super::casting::PaymentReservation::life(
-        reserved_life
-            + split.residual.as_ref().map_or(0, |residual| {
-                cost_life_payment(state, player, pending.object_id, residual)
-            }),
-    );
+    let reserved = super::casting::PaymentReservation::life(committed_life);
     let scratch = super::casting::reserved_payment_state(state, player, &reserved);
     let state = scratch.as_ref().unwrap_or(state);
     let can_pay_normally =
@@ -11855,11 +11902,36 @@ pub(super) fn required_declaration_offerable(
     required: &AbilityCost,
     residual: Option<&AbilityCost>,
 ) -> Result<bool, EngineError> {
+    required_declaration_offerable_using(
+        state,
+        player,
+        pending,
+        required,
+        residual,
+        DeclarationOfferPricing::Exact,
+    )
+}
+
+pub(super) fn required_declaration_offerable_using(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    required: &AbilityCost,
+    residual: Option<&AbilityCost>,
+    pricing: DeclarationOfferPricing<'_>,
+) -> Result<bool, EngineError> {
     // CR 119.4 + CR 601.2h: the cast's other unpaid life is paid beside it.
     let residual_life = residual.map_or(0, |residual| {
         cost_life_payment(state, player, pending.object_id, residual)
     });
-    if declaration_offerable_reserving(state, player, pending, required.clone(), residual_life)? {
+    if declaration_offerable_reserving(
+        state,
+        player,
+        pending,
+        required.clone(),
+        residual_life,
+        pricing,
+    )? {
         return Ok(true);
     }
     let Some(defiler) = defiler_offer_alongside(
@@ -11887,7 +11959,8 @@ pub(super) fn required_declaration_offerable(
         player,
         &credited,
         required.clone(),
-        residual_life + defiler.life_cost,
+        residual_life.saturating_add(defiler.life_cost),
+        pricing,
     )
 }
 
@@ -22185,6 +22258,36 @@ mod tests {
             cost: AbilityCost::Tap,
         }];
         root
+    }
+
+    #[test]
+    fn zero_mana_declaration_requires_all_committed_life() {
+        let mut state = GameState::new_two_player(42);
+        let pending = payment_root(1, &[]);
+        let life = AbilityCost::PayLife {
+            amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+        };
+        let zero = |_: &GameState, _: &PendingCast, _| ManaCost::zero();
+        for pricing in [
+            DeclarationOfferPricing::Exact,
+            DeclarationOfferPricing::LowerBound(&zero),
+        ] {
+            for (available, payable) in [(5, false), (6, true)] {
+                state.players[0].life = available;
+                assert_eq!(
+                    required_declaration_offerable_using(
+                        &state,
+                        P0,
+                        &pending,
+                        &life,
+                        Some(&life),
+                        pricing,
+                    )
+                    .unwrap(),
+                    payable,
+                );
+            }
+        }
     }
 
     fn published(state: &GameState) -> Option<ObjectId> {
