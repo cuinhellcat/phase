@@ -20454,7 +20454,7 @@ fn conjunct_steps_are_infeasible(
 /// can't be performed in full
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
-pub(super) fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     optional_effect_infeasibility(state, ability).is_some()
 }
 

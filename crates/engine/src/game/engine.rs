@@ -2431,7 +2431,12 @@ pub(crate) fn finalize_persisted_restore(
             .is_some_and(|frame| {
                 frame.ability.context.ability_tag
                     == Some(crate::types::ability::AbilityTag::SuspendLastCounter)
-                    && effects::optional_effect_is_infeasible(state, &frame.ability)
+                    && effects::upfront_optional_gate(
+                        state,
+                        &frame.ability,
+                        effects::OptionalFeasibility::Probe,
+                    )
+                    .is_none()
             })
     {
         let mut events = Vec::new();
