@@ -646,23 +646,55 @@ fn declaration_offerable_reserving(
     if total.is_without_paying_mana() {
         return Ok(true);
     }
+    let object_id = pending.object_id;
+    let tap_payment_payable = |state: &GameState, mode| {
+        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
+            state, player, object_id, &total, mode,
+        )
+    };
+    // CR 601.2g + CR 601.2h: a suspended spell's additional cost must still
+    // be payable after any mana abilities used for the priced total.
+    if let (CastingVariant::Suspend, Some(residual)) =
+        (pending.casting_variant, split.residual.as_ref())
+    {
+        let legs = match residual {
+            AbilityCost::Composite { costs } => costs.as_slice(),
+            cost => std::slice::from_ref(cost),
+        };
+        let legs =
+            super::cost_payability::reservable_battlefield_legs(state, player, object_id, legs);
+        if !legs.is_empty() {
+            let payable = |objects: &[(ObjectId, super::casting::ReservedUse)]| {
+                let reserved = super::casting::PaymentReservation {
+                    life: committed_life,
+                    objects,
+                };
+                super::casting::reserved_assignment_payable(
+                    state, player, object_id, &total, &reserved,
+                ) || split.payment_mode.is_some_and(|mode| {
+                    let scratch = super::casting::reserved_payment_state(state, player, &reserved);
+                    tap_payment_payable(scratch.as_ref().unwrap_or(state), mode)
+                })
+            };
+            return Ok(reserved_assignment_verdict(
+                state,
+                player,
+                object_id,
+                &legs,
+                split.payment_mode,
+                &payable,
+            ) != ReservationVerdict::Rejected);
+        }
+    }
     let reserved = super::casting::PaymentReservation::life(committed_life);
     let scratch = super::casting::reserved_payment_state(state, player, &reserved);
     let state = scratch.as_ref().unwrap_or(state);
-    let can_pay_normally =
-        super::casting::can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &total);
-    if can_pay_normally {
-        return Ok(true);
-    }
-    Ok(split.payment_mode.is_some_and(|mode| {
-        super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
-            state,
-            player,
-            pending.object_id,
-            &total,
-            mode,
-        )
-    }))
+    Ok(
+        super::casting::can_feasibly_pay_mana_cost(state, player, Some(object_id), &total)
+            || split
+                .payment_mode
+                .is_some_and(|mode| tap_payment_payable(state, mode)),
+    )
 }
 
 fn continue_after_declared_mana_split(
@@ -2081,15 +2113,7 @@ pub enum ReservationVerdict {
 /// [`ReservationVerdict::Exhausted`].
 pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
 
-/// CR 118.3 + CR 601.2g-h: search the assignments of `legs`' objects for one
-/// that leaves `base`'s priced total payable by the castability authority with
-/// those objects and `pricing.reserved`'s life held.
-///
-/// Holding objects only removes resources, so a total unpayable with nothing
-/// held is rejected at once. A candidate is inert when it makes no mana now (no
-/// mana-source selection), no other mana ability or tap-payment mode can use
-/// it, and no production reads the board: holding any of them changes no probe,
-/// so a leg takes inert candidates first and enumerates only the rest.
+/// Price the alternative before searching for a payable assignment of its object legs.
 fn reserved_alternative_verdict(
     state: &GameState,
     player: PlayerId,
@@ -2098,7 +2122,6 @@ fn reserved_alternative_verdict(
     pricing: &super::casting::CastPricing<'_>,
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
-    let reach = super::mana_sources::player_mana_ability_reach(state, player);
     let totals = super::casting::cast_mana_totals(
         state,
         player,
@@ -2118,16 +2141,37 @@ fn reserved_alternative_verdict(
                 )
             })
     };
+    reserved_assignment_verdict(state, player, object_id, legs, None, &payable)
+}
+
+/// CR 118.3 + CR 601.2g-h: search for an assignment of `legs`' objects that
+/// leaves the priced mana and reserved life payable.
+///
+/// Holding objects only removes resources, so a total unpayable with nothing
+/// held is rejected at once. A candidate is inert when it makes no mana now (no
+/// mana-source selection), no other mana ability or tap-payment mode can use
+/// it, and no production reads the board: holding any of them changes no probe,
+/// so a leg takes inert candidates first and enumerates only the rest.
+fn reserved_assignment_verdict(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    legs: &[super::cost_payability::ReservableLeg],
+    declared_payment_mode: Option<ConvokeMode>,
+    payable: &impl Fn(&[(ObjectId, super::casting::ReservedUse)]) -> bool,
+) -> ReservationVerdict {
     if !payable(&[]) {
         return ReservationVerdict::Rejected;
     }
     if legs.is_empty() {
         return ReservationVerdict::Witness;
     }
+    let reach = super::mana_sources::player_mana_ability_reach(state, player);
     let mana_sources: HashSet<ObjectId> = if reach.other_objects
         != super::mana_sources::OtherObjectUse::None
         || reach.production == super::mana_sources::ProductionAmount::BoardDependent
         || state.layers_dirty.is_dirty()
+        || declared_payment_mode.is_some()
         || super::casting::spell_tap_payment_mode(state, player, object_id).is_some()
     {
         state.battlefield.iter().copied().collect()
@@ -2144,7 +2188,7 @@ fn reserved_alternative_verdict(
         &|id| !mana_sources.contains(&id),
         &mut held,
         &mut explored,
-        &payable,
+        payable,
     ) {
         Some(true) => ReservationVerdict::Witness,
         Some(false) => ReservationVerdict::Rejected,

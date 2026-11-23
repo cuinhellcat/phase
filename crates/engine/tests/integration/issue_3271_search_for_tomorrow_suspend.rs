@@ -2087,6 +2087,86 @@ fn suspend_last_counter_prices_a_required_sacrifice_with_its_creature_target() {
 }
 
 #[test]
+fn suspend_last_counter_requires_joint_mana_and_sacrifice_payment() {
+    use engine::types::ability::TargetRef;
+
+    for with_land in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let jhoira = printed_card(&mut s, P0, "Jhoira of the Ghitu", Zone::Battlefield);
+        let blood_pet = printed_card(&mut s, P0, "Blood Pet", Zone::Battlefield);
+        let identity = s
+            .add_enchantment_to_hand_from_oracle(P0, "Grafted Identity", "")
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["enchant"], GRAFTED_IDENTITY)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .id();
+        let target = s.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        s.add_artifact_from_oracle(P1, "Sphere of Resistance", "Spells cost {1} more to cast.");
+        if with_land {
+            s.add_basic_land(P0, ManaColor::Black);
+        }
+        s.with_mana_pool(
+            P0,
+            vec![engine::types::mana::ManaUnit::new(ManaType::Red, jhoira, false, vec![]); 2],
+        );
+
+        let mut r = s.build();
+        r.act(hand_action(jhoira, 0, CastPaymentMode::Auto))
+            .unwrap();
+        r.act(GameAction::SelectCards {
+            cards: vec![identity],
+        })
+        .unwrap();
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), identity), 4);
+        engine::game::zones::move_to_zone(r.state_mut(), jhoira, Zone::Graveyard, &mut vec![]);
+        one_counter_upkeep(&mut r, identity);
+        pass_pair(&mut r);
+        assert_eq!(time_counters(r.state(), identity), 0);
+        assert_eq!(r.state().stack.back().unwrap().source_id, identity);
+        assert_eq!(r.state().players[0].mana_pool.total(), 0);
+        assert_eq!(r.state().objects[&blood_pet].zone, Zone::Battlefield);
+        pass_pair(&mut r);
+
+        if !with_land {
+            assert!(
+                matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+                "Blood Pet cannot pay both the creature sacrifice and Sphere tax: {:?}",
+                r.state().waiting_for,
+            );
+            assert_eq!(r.state().objects[&identity].zone, Zone::Exile);
+            continue;
+        }
+
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        r.act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert!(matches!(
+            r.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        r.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .unwrap();
+        assert!(matches!(r.state().waiting_for, WaitingFor::PayCost { .. }));
+        r.act(GameAction::SelectCards {
+            cards: vec![blood_pet],
+        })
+        .unwrap();
+        assert_eq!(r.state().objects[&blood_pet].zone, Zone::Graveyard);
+        assert_eq!(r.state().objects[&identity].zone, Zone::Stack);
+    }
+}
+
+#[test]
 fn suspend_last_counter_prices_optional_exile_before_offering_the_cast() {
     const GOREX: &str = "As an additional cost to cast this spell, you may exile any number of creature cards from your graveyard. This spell costs {2} less to cast for each card exiled this way.\nDeathtouch\nWhenever Gorex attacks or dies, choose a card at random exiled with Gorex and put that card into its owner's hand.";
     for with_creature in [false, true] {
