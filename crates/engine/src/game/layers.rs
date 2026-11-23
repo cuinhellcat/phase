@@ -3121,12 +3121,8 @@ fn evaluate_condition_inner(
         StaticCondition::SourceIsSaddled => state.objects.get(&source_id).is_some_and(|obj| {
             obj.zone == crate::types::zones::Zone::Battlefield && obj.is_saddled
         }),
-        // CR 702.62a + CR 611.2b: True when the source object's current controller
-        // equals the stored player. Drives the Suspend haste duration: when a
-        // suspended creature spell resolves, a transient continuous effect with
-        // `Duration::ForAsLongAs { SourceControllerEquals { resolution_controller } }`
-        // grants haste; a Threaten / Mind Control swap moves controller and
-        // this predicate flips false, naturally lapsing the static.
+        // CR 702.62a + CR 611.2b: Suspend haste lasts while the caster controls
+        // the spell or the resulting permanent. This tests its current controller.
         StaticCondition::SourceControllerEquals { player } => state
             .objects
             .get(&source_id)

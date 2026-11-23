@@ -19495,8 +19495,8 @@ pub enum CastVariantPaid {
     /// CR 702.74a: Evoke alternative cast cost was paid from hand. Read by the
     /// synthesized intervening-if ETB sacrifice trigger.
     Evoke,
-    /// CR 702.62a: Historical marker for a cast via Suspend's last-counter
-    /// trigger. Kept readable in saves written before cast-time attribution.
+    /// CR 702.62a: Legacy Suspend marker retained for reading older saves.
+    /// The former inference could also stamp other exile casts of cards with Suspend.
     Suspend,
     /// CR 702.138a + CR 702.138b: The spell that became this permanent was cast
     /// from a graveyard via its escape alternative cost. Read by the "unless it
